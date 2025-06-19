@@ -1,0 +1,2902 @@
+---
+title: "01_Deconvolution_customScadenCTVT"
+author: "IMEV2"
+date: `r Sys.Date()`"
+output: html_document
+---
+
+# 0 Environment
+## 0.1 Packages
+### 0.1.1 Installs
+```{r echo=F, message=F, warning=FALSE}
+# if (!requireNamespace("devtools", quietly = TRUE)) {
+#    install.packages("devtools")
+# }
+# devtools::install_github("Danko-Lab/BayesPrism/BayesPrism")
+
+# if(!require("remotes")) install.packages("remotes")
+# 
+# remotes::install_github("neurogenomics/scKirby")
+# 
+# install.packages("anndata")
+# 
+# BiocManager::install("zellkonverter")
+```
+### 0.1.1 Library
+```{r echo=F, message=F, warning=FALSE}
+set.seed(123)
+library(BayesPrism)
+library(tidyverse)
+library(SingleCellExperiment)
+library(openxlsx)
+library(zellkonverter)
+library(circlize)
+library(patchwork)
+library(pheatmap)
+library(ComplexHeatmap)
+setClassUnion("ExpData", c("matrix", "SummarizedExperiment"))
+
+```
+
+## 0.2 Paths
+```{r echo=F, message=FALSE, warning=FALSE}
+wDir <- paste0("~/Desktop/1_Deconvolution/")
+dataDir <- paste0(wDir, "/11_Data/")
+scriptDir <- paste0(wDir, "/12_Scripts/deconBenchmark/")
+bulkDir <- paste0(wDir, "For_Nina/01_RNAseq_analysis/01_CTVT/Data_input_htseq_reverse/")
+
+# dir.create(paste0(resDir, fprefix))
+
+resDir <- paste0(wDir, "/13_Results/")
+plotDir <- paste0(wDir, "/14_Plots/")
+
+```
+
+#### 0.3.1.1 Example 
+In our reference, the original proportion of Endo is .2%. If we were to subsample 10,000 cells, this would leave us with approx. 24 cells total. Instead, if we set the threshold as 50, the proportions will shift for all cell types to make sure at least 50 cells are sampled and then the remainder of the cell types will be distributed according to the proportions. 
+
+- Disadv, here we see the proportion of endo's has gone up from .2 to .6 percent. 
+```{r}
+# > ogProp <- ogCount/sum(ogCount)
+# > ogProp
+# 
+#              CAFs        CTVT_cells Endothelial_cells     Mono.Macro.DC      Plasma_cells           T_cells 
+#       0.040361827       0.791482225       0.002474499       0.118198565       0.010200434       0.037282450 
+
+
+# > aCount <- table(a$manual.log.anot.fine)
+# > aProp <- aCount / sum(aCount)
+# > aProp
+# 
+#              CAFs        CTVT_cells Endothelial_cells     Mono.Macro.DC      Plasma_cells           T_cells 
+#            0.0431            0.7778            0.0061            0.1193            0.0136            0.0401 
+# > ogCount <- table(snCountsFinal_colData$manual.log.anot.fine)
+
+```
+
+# 1.0 Inputs
+Scaden requires a .h5ad file. 
+Reading in SCE object, subsetting on cells and genes to create smaller test object. 
+- Option 1.1 and 1.2: Raw counts. All genes or HVGs only. 
+- Option 2: Pre-process with scaden.ipynb, will filter certain genes and cells, and performs normalization with scanpy. Also performs in house hvg ranking. 
+- Option 3.1 and 3.2 : Use lognorm counts from scuttle. These have changed slightly from Maurine's object because of duplicated gene name. All genes or HVGs only. 
+
+- Of note, I don't think subsampling the reference makes sense here because it is generating bulk profiles, so I would assume more cells are better. 
+
+
+## 1.1 Reference
+### 1.1.1 Read in updated obj
+```{r}
+# obj <- readRDS(paste0(dataDir,
+#                       "/SCE_concat_CTVT_includingAllGenes_logCorrecDone_vstCorrecDone_ClustDone2_ManAnot.rds"))
+# 
+# # colData(obj)
+# print(obj)
+# ncol(obj) # 36,371
+# nrow(obj) # 16,028
+# 
+# 
+# write.xlsx(colData(obj) %>% as.data.frame(),
+#            paste0(dataDir, fprefix, "_colData.xlsx"))
+# snCountsFinal <- assay(obj, "counts") %>%
+#   as.data.frame() 
+# 
+# range(snCountsFinal)
+# 
+# snLogCountsFinal <- assay(obj, "logcounts") %>%
+#   as.data.frame() 
+# 
+# snVstCountsFinal <- assay(obj, "vstcounts") %>%
+#   as.data.frame() 
+# 
+# snAnnoFinal <- data.frame("Celltype" = colData(obj)$manual.log.anot.fine)
+# snSamplesFinal <- data.frame("SampleID" = obj$Sample)
+#   
+rm(obj)
+gc()
+```
+
+# ----- snCounts only ------
+# 2 Scaden Custom
+```{r}
+# Reference == All cells all features
+resDir <- paste0(resDir, "01_Deconvolution_customScadenCTVT/")
+fprefix <- "01_Deconvolution_customScadenCTVT"
+plotDirScaden <- paste0(plotDir, fprefix, "/")
+```
+
+## 2.1 Ground truth percentages
+Of note, because for 3302T1b we have b_p and b (for bulk cell), I am duplicating the ground truth results for 3302T1b in the reference counts, but calling these "3302T1bp". This way, every unique sampleNameEdit will have its own reference, which is needed for computing the error metrics. 
+```{r}
+snCountsFinal_colData <- read.xlsx(paste0(dataDir,
+                                          fprefix, 
+                                      "_colData.xlsx"))
+
+# Create the cell count matrix: rows = cell types, columns = samples
+snCellCounts <- snCountsFinal_colData %>%
+  group_by(manual.log.anot.fine,
+           Sample) %>%
+  summarise(cellCount = n()) %>%
+  pivot_wider(names_from = Sample,
+              values_from = cellCount,
+              values_fill = 0) %>%
+  column_to_rownames("manual.log.anot.fine")
+
+snCellCounts[,"3302T1p"] <- snCellCounts[,"3302T1b"]
+
+# Convert to percentages (column-wise normalization)
+snCellPercentages <- sweep(snCellCounts,
+                           2,
+                           colSums(snCellCounts),
+                           FUN = "/") %>%
+  round(3) %>%
+  t() %>%
+  as.data.frame() %>%
+  rownames_to_column("sample") %>%
+  pivot_longer(
+    cols = -sample,
+    names_to = "manual.log.anot.fine",
+    values_to = "cellProportion"
+  ) %>%
+  # If sample name ends in b_n, type is bn (bulk nuc). Otherwise, it is bc (bulk cell)
+  mutate(
+    sampleType = "sn",
+    sampleName = sample,
+    sampleNameEdit = str_remove(sampleName, "_p$|_2$")
+  ) %>%
+  select(sampleName, sampleType, manual.log.anot.fine, cellProportion, sampleNameEdit) %>%
+  mutate("deconvBenchResType" = "groundTruth", # P for proportion
+         "Method" = NA,
+         "Parameters" = NA,
+         "Reference" = "snCounts",
+         "Seed"=NA)
+
+# rm(snCellCounts, snCountsFinal_colData)
+# gc()
+```
+
+## 2.2 Read in results 
+### 2.2.1 Performance metrics
+#### 2.2.1.1 Set up dataframes 
+```{r}
+masterPropDf <- data.frame(sampleName = c(),
+                           sampleType = c(),
+                           manual.log.anot.fine = c(),
+                           cellProportion =c(),
+                           sampleNameEdit = c(),
+                           deconvBenchResType = c(),
+                           Method = c(),
+                           Parameters = c())
+
+
+masterGlobMetricDf <- data.frame(bulkCellEstimate = c(),
+                             bulkNucEstimate = c(),
+                             Method = c(),
+                             Parameters = c(),
+                             Metric = c())
+
+masterGranularMetricDf <- data.frame(
+  Metric = c(),
+  Value = c(),
+  Subject = c(),
+  Estimate = c()
+)
+
+masterRawPEDf <- data.frame(
+  Colname = c(),
+  Rowname = c(),
+  Estimate = c(),
+  Method = c(),
+  Parameters = c(),
+  Reference = c(),
+  Seed = c()
+)
+
+# Script with functions changes for CTVT because we are using a different column with the annotations. 
+# TODO for future iterations, add symlink to script so that column name is dynamic. 
+source(paste0(scriptDir, "/01_Deconvolution_deconBenchmark_metricFunctions_CTVT.R")) 
+# 01_Deconvolution_deconBenchmark_metricFunctions.R
+```
+
+#### 2.2.1.2 Append ground truth results to the dataframes. 
+```{r}
+# Saving with ground truth percentages (only for the first results, otherwise will be repeated each time.)
+masterPropDf <- rbind(masterPropDf,
+                      snCellPercentages)
+```
+
+
+#### 2.2.1.3 Loop through custom results directories. 
+Each directory is named as the model (all params).
+See comment above about 3302T1b (for which we have 2 bulk cell results).
+Therefore adding if statement, if sample name is 3302T1b, the corresponding sampleName should be 3302T1b_p and sampleNameEdit (matched name to the sn reference counts) will be 3302T1bp.
+
+```{r, warning=FALSE}
+tempResDir <- "~/Desktop/1_Deconvolution/13_Results/01_Deconvolution_customScadenCTVT/4_predict/" # switch with true directory once all results are finished.
+
+subDirs <- list.dirs(tempResDir, full.names = TRUE, recursive = FALSE)
+
+### TODO make pattern and ref dynamic for LOO models.
+pattern <- "snCounts_bal(\\w+)_thresh(\\w+)_ran(\\d+)_var([0-9.]+)_samp(\\d+)_cells(\\d+)_seed(\\d+)_lr([0-9.]+)_steps(\\d+)"
+
+ref <- "snCounts"
+
+paramsPattern <- paste0("(?<=", ref, "_).*?(?=_seed)")
+
+for (sub in subDirs){
+
+  # Get file name and parameters
+  tempPrefix <- basename(sub)
+  matches <- str_match(tempPrefix, pattern)
+  filePath <- list.files(sub,
+                         pattern="_Predicted.txt",
+                         full.names = T)
+
+  print(paste0("Saving: ", tempPrefix))
+
+  if(length(filePath)!=1){
+    print(paste0("Error with ", tempPrefix))
+    break
+  }
+
+  temp <- read.table(filePath) %>%
+    as.data.frame() %>%
+    rownames_to_column("sample") %>%
+    pivot_longer(
+      cols = -sample,
+      names_to = "manual.log.anot.fine",
+      values_to = "cellProportion"
+    ) %>%
+    # If sample name ends in _n, type is bn (bulk nuc). Otherwise, it is bc (bulk cell)
+    mutate(
+      sampleType = case_when(
+        str_ends(sample, "_n") ~ "bn",
+        TRUE ~ "bc"
+      ),
+      # If sample type is bn, remove b_n to save sample id only.
+      sampleName = case_when(
+        sampleType == "bn" ~ str_remove(sample, "_n$"),
+        TRUE ~ sample
+      ),
+      sampleName = case_when(
+        sampleName == "3302T1b_p" ~ "3302T1p",
+        TRUE ~ sampleName
+      ),
+      # If sample type is bc, remove only _p, or _2 to match sample name edit of bn samples. Because we have b_p and b in some cases, we will need to loop through unique $sample and then extract the corresponding sample name edit for the matched bulk. 
+      sampleNameEdit = case_when(
+        sampleType == "bc" ~ str_remove(sampleName, "_p$|_2$"),
+        TRUE ~ sampleName
+      ),
+       # BUT, if sample name is 3302T1b, the sampleNameEdit should be 3302T1bp, so that there is no duplicate sampleNameEdit for the error calculations. TODO: When doing the bulk cell vs bulk nuc, we will need to check that the two bulk cell errors for are grouped together. We could also duplicate the bn results for this sample. 
+
+    ) %>%
+    select(sampleName,
+           sampleType,
+           manual.log.anot.fine,
+           cellProportion,
+           sampleNameEdit) %>%
+    # Method details
+    mutate("deconvBenchResType" = "P", # P for proportion
+           "Method" = "Scaden",
+           "Parameters" = str_replace(tempPrefix, "_seed\\d+", ""),
+           "Reference" = ref,
+           "Seed"=matches[,8]) # saves as string
+  
+
+  # Rbind proportion outputs to compute error metrics.
+  tempResGround <- rbind(temp,
+                          snCellPercentages)
+
+  # Append results to masterPropDf.
+  masterPropDf <- rbind(masterPropDf,
+                        temp)
+
+  # Compute and rbind metric outputs
+  tempResMetrics <- deconError(tempResGround,
+                                parameters = str_replace(tempPrefix, "_seed\\d+", ""),
+                                method = "Scaden",
+                                reference=ref,
+                                seed=matches[,8])
+  # Rbind metric measurements
+  masterGlobMetricDf <- rbind(masterGlobMetricDf,
+                              tempResMetrics$overviewMetrics)
+
+  masterGranularMetricDf <- rbind(masterGranularMetricDf,
+                                  tempResMetrics$granularMetrics)
+  
+  masterRawPEDf <- rbind(masterRawPEDf, 
+                         tempResMetrics$rawPredictionError)
+
+  # Cleanup
+  rm(temp,
+     matches,
+     tempResGround,
+     tempResMetrics)
+
+  gc()
+
+}
+
+# 
+masterPropDfNew <- masterPropDf %>%
+  mutate(Param_Seed = paste0(Parameters, "_seed", Seed))
+
+```
+### 2.2.2 Training data distribution
+#### 2.2.2.1 Set up dataframes
+Split by absolute counts and proportions. 
+```{r}
+masterTrainPropDf <- data.frame("CTVT"=c(),
+                             "bad"=c(),
+                             "Bcells"=c(),
+                             "Plasma"=c(),
+                             "CAF.Endo"=c(),
+                             "Tcells"=c() ,
+                             "Myeloid"=c() ,
+                             "SampleID"=c(),
+                             "Dataset"=c(),
+                             "Source"=c(),
+                             "Method"=c(),
+                             "Parameters"=c(),
+                             "Reference"=c(),
+                             "Seed" =c()
+)
+
+masterTrainCountsDf <- data.frame("CTVT"=c(),
+                             "bad"=c(),
+                             "Bcells"=c(),
+                             "Plasma"=c(),
+                             "CAF.Endo"=c(),
+                             "Tcells"=c() ,
+                             "Myeloid"=c() ,
+                             "SampleID"=c(),
+                             "Dataset"=c(),
+                             "Source"=c(),
+                             "Method"=c(),
+                             "Parameters"=c(),
+                             "Reference"=c(),
+                             "Seed" =c()
+)
+
+```
+
+#### 2.2.2.2 Proportion results
+```{r}
+tempSimDir <- "~/Desktop/1_Deconvolution/13_Results/01_Deconvolution_customScadenCTVT/1_simulate/" # switch with true directory once all results are finished.
+
+subDirs <- list.dirs(tempSimDir,
+                     full.names = TRUE,
+                     recursive = FALSE)
+
+# Get full subdirectory paths in tempSimDir
+# Get only the **directory names** (not full paths)
+subDirNames <- basename(subDirs)
+
+# Get directory names 
+predictResDirNames <- basename(list.dirs(tempResDir, full.names = TRUE, recursive = FALSE))
+
+# Filter subDirs by matching names
+matchedSubDirs <- subDirs[subDirNames %in% predictResDirNames]
+
+# Result: matchedSubDirs contains full paths of matching subdirectories
+matchedSubDirs
+
+### TODO make pattern and ref dynamic for LOO models.
+pattern <- "snCounts_bal(\\w+)_thresh(\\w+)_ran(\\d+)_var([0-9.]+)_samp(\\d+)_cells(\\d+)_seed(\\d+)_lr([0-9.]+)_steps(\\d+)"
+
+ref <- "snCounts"
+
+paramsPattern <- paste0("(?<=", ref, "_).*?(?=_seed)")
+
+for (sub in matchedSubDirs){
+
+  # Get file name and parameters
+  tempPrefix <- basename(sub)
+  matches <- str_match(tempPrefix, pattern)
+  filePath <- list.files(sub,
+                         pattern="Proportions.csv",
+                         full.names = T)
+
+  print(paste0("Saving: ", tempPrefix))
+
+  if(length(filePath)!=1){
+    print(paste0("Error with ", tempPrefix))
+    break
+  }
+
+  temp <- read_csv(filePath,
+                   show_col_types = F) %>%
+    filter(SampleID!="SampleID") %>%
+    mutate("Method" = "Scaden",
+           "Parameters" = str_replace(tempPrefix, "_seed\\d+", ""),
+           "Reference" = ref,
+           "Seed"=matches[,8]) # saves as string
+
+
+    masterTrainPropDf <- rbind(masterTrainPropDf,
+                            temp)
+
+
+}
+
+# Average all proportions for a given training dataset. We can later average over samples, seeds, and/or parameters depending on what we want to look for. But the following df is essential for checking how the training data for a given Prediction.txt file may have been of influence.
+# masterPropAvgSeedSampleParam <- masterTrainPropDf  %>%
+#            group_by(Seed, SampleID, Parameters) %>%
+#            summarise(across(1:7,
+#                             mean,
+#                             na.rm = TRUE)) %>%
+#   mutate(Average = "seedSampleParameters",
+#          Type = "proportions")
+
+masterPropAvgParamSeed <- masterTrainPropDf  %>%
+          mutate(Param_Seed = paste0(Parameters, "_", Seed)) %>%
+           group_by(Param_Seed) %>%
+           summarise(across(1:7,
+                            mean,
+                            na.rm = TRUE)) %>%
+  mutate(Average = "Param_Seed",
+         Type = "proportions")
+
+
+# Now repeating for absolute counts rather than proportions. I.e. if sampling more cells or more pseudobulk samples performs better, could it be because of more in general? Or does it perform even better for unbalanced because you recover the immune cell types?
+
+for (sub in matchedSubDirs){
+
+  # Get file name and parameters
+  tempPrefix <- basename(sub)
+  matches <- str_match(tempPrefix, pattern)
+  filePath <- list.files(sub,
+                         pattern="Counts.csv",
+                         full.names = T)
+
+  print(paste0("Saving: ", tempPrefix))
+
+  if(length(filePath)!=1){
+    print(paste0("Error with ", tempPrefix))
+    break
+  }
+
+  temp <- read_csv(filePath,
+                   show_col_types = F) %>%
+    filter(SampleID!="SampleID") %>%
+    mutate("Method" = "Scaden",
+           "Parameters" = str_extract(tempPrefix, paramsPattern),
+           "Reference" = ref,
+           "Seed"=matches[,8]) # saves as string
+
+
+    masterTrainCountsDf <- rbind(masterTrainCountsDf,
+                            temp)
+}
+
+# Average all proportions for a given training dataset.
+# TODO: Check This works when there are mixed samples (percRan).
+masterCountsAvgParamSeed <- masterTrainCountsDf %>%
+  mutate(Param_Seed = paste0(Parameters, "_", Seed)) %>%
+           group_by(Param_Seed) %>%
+           summarise(across(1:7,
+                            mean,
+                            na.rm = TRUE)) %>%
+  mutate(Average = "Param_Seed",
+         Type = "proportions")
+```
+
+## 2.3 Write results
+### 2.3.1 All training data
+#### 2.3.1.1 Performance metrics
+```{r}
+openxlsx::write.xlsx(masterPropDf,
+           paste0(resDir,
+                  fprefix,
+                  "_masterProportionDfCTVTSwitch.xlsx"))
+
+
+openxlsx::write.xlsx(masterGlobMetricDf,
+           paste0(resDir,
+                  fprefix,
+                  "_masterGlobalMetricDf.xlsx"))
+
+
+openxlsx::write.xlsx(masterGranularMetricDf,
+           paste0(resDir,
+                  fprefix,
+                  "_masterGranularMetricDf.xlsx"))
+
+
+
+openxlsx::write.xlsx(masterRawPEDf,
+                     paste0(resDir,
+                  fprefix,
+                  "_masterRawPEDf.xlsx"))
+
+
+```
+
+#### 2.3.1.2 Training data distribution
+```{r}
+# openxlsx::write.xlsx(masterPropAvgSeedSampleParam,
+#            paste0(resDir,
+#                   fprefix,
+#                   "_masterPropAvgSeedSampleParam.xlsx"))
+# 
+# openxlsx::write.xlsx(masterCountsAvgSeedSampleParam,
+#            paste0(resDir,
+#                   fprefix,
+#                   "_masterCountsAvgSeedSampleParam.xlsx"))
+
+openxlsx::write.xlsx(masterTrainCountsDf,
+           paste0(resDir,
+                  fprefix,
+                  "_masterTrainCountsDf.xlsx"))
+
+openxlsx::write.xlsx(masterCountsAvgParamSeed,
+           paste0(resDir,
+                  fprefix,
+                  "_masterCountsAvgParamSeed.xlsx"))
+
+openxlsx::write.xlsx(masterTrainPropDf,
+           paste0(resDir,
+                  fprefix,
+                  "_masterTrainPropDf.xlsx"))
+
+
+openxlsx::write.xlsx(masterPropAvgParamSeed,
+           paste0(resDir,
+                  fprefix,
+                  "_masterPropAvgParamSeed.xlsx"))
+```
+# ---
+# 5 Visualizations
+```{r}
+source(paste0(scriptDir, "/01_Deconvolution_deconBenchmark_visualizationFunctions.R"))
+source(paste0(scriptDir, "/01_Deconvolution_deconBenchmark_metricFunctions.R"))
+manualColors <- c(
+  "CAFs"              = "skyblue",  # Red
+  "CTVT_cells"        = "#E41A1C",  # Blue
+  "Endothelial_cells" = "forestgreen",  # Green
+  "Mono.Macro.DC"     = "magenta",  # Purple
+  "Plasma_cells"      = "orange",  # Orange
+  "T_cells"           = "darkgrey"   # Brown
+)
+```
+
+## 5.1 Read in results
+Run table(df$Method_Param_Reference) to make sure results have looped correctly. 
+Uncomment "Method_Param" and "Method_Param_Reference" code if looping through LOO models.
+```{r}
+masterGlobMetricDf <- read.xlsx(paste0(resDir, "/01_Deconvolution_customScadenCTVT/results/", fprefix, "_masterGlobalMetricDf.xlsx"))
+
+masterGranularMetricDf <- read.xlsx(paste0(resDir,  "/01_Deconvolution_customScadenCTVT/results/",  fprefix, "_masterGranularMetricDf.xlsx"))
+
+masterPropDf <- read.xlsx(paste0(resDir,  "/01_Deconvolution_customScadenCTVT/results/",  fprefix, "_masterPropDfCTVT.xlsx"))
+
+masterRawPEDf <- read.xlsx(paste0(resDir,  "/01_Deconvolution_customScadenCTVT/results/",  fprefix, "_masterRawPEDf.xlsx"))
+```
+
+
+# 5 Visualizations
+```{r}
+source(paste0(scriptDir, "/01_Deconvolution_deconBenchmark_visualizationFunctions.R"))
+source(paste0(scriptDir, "/01_Deconvolution_deconBenchmark_metricFunctions.R"))
+manualColors <- c(
+  "CAFs"              = "skyblue",  # Red
+  "CTVT_cells"        = "#E41A1C",  # Blue
+  "Endothelial_cells" = "forestgreen",  # Green
+  "Mono.Macro.DC"     = "magenta",  # Purple
+  "Plasma_cells"      = "orange",  # Orange
+  "T_cells"           = "darkgrey"   # Brown
+)
+```
+
+## 5.1 Read in results
+Run table(df$Method_Param_Reference) to make sure results have looped correctly. 
+Uncomment "Method_Param" and "Method_Param_Reference" code if looping through LOO models.
+```{r}
+masterGlobMetricDfSwitch <- read.xlsx(paste0(resDir, "/01_Deconvolution_customScadenCTVT/", fprefix, "_masterGlobMetricDfSwitch.xlsx"))
+
+masterGranularMetricDfSwitch <- read.xlsx(paste0(resDir, "/01_Deconvolution_customScadenCTVT/", fprefix, "_masterGranularMetricDfSwitch.xlsx"))
+
+masterPropDf <- read.xlsx(paste0(resDir, "/01_Deconvolution_customScadenCTVT/", fprefix, "_masterPropDf.xlsx"))
+
+masterRawPEDfSwitch <- read.xlsx(paste0(resDir, "/01_Deconvolution_customScadenCTVT/", fprefix, "_masterRawPEDfSwitch.xlsx"))
+```
+
+## 5.2 Global Metrics
+### 5.2.1 Averaged over seeds. 
+#### 5.2.1.1 Dotplots
+##### 5.2.1.1.1 Dataframe
+```{r}
+# Reshape data to long format
+tempDf <- masterGlobMetricDf %>%
+  # filter(Reference %in% c("subsampledCellsHvgs", "subSampledCellsHvgs")) %>%
+  pivot_longer(cols = c(bulkCellEstimate, bulkNucEstimate), 
+               names_to = "EstimateType", values_to = "Value") %>%
+  # mutate(Method_Param=paste0(Method, "_", Parameters))
+  mutate(
+    Metric = factor(Metric, levels = c("MAE", "MAECorr", "SCorr", "CCorr")),
+    # Method_Param = fct_rev(factor(Method_Param))  # Reverse for y-axis
+    Method_Param = fct_rev(factor(Parameters))
+  ) 
+
+true <- tempDf %>%
+  filter(is.na(Metric) == TRUE) 
+
+avgPred <- tempDf %>%
+  filter(is.na(Metric) == FALSE) %>%
+  # Should group by everything except seed. 
+  group_by(Parameters,
+           Method,
+           Reference,
+           EstimateType,
+           Metric, Method_Param) %>%
+  summarise(
+    Stdev = sd(Value, na.rm=T),
+    Mean = mean(Value, na.rm=T),
+    N = n(),
+    `95CI` = 1.96 * Stdev / sqrt(N),
+    .groups = "drop"
+  ) %>%
+  mutate(Seed = "averaged") %>%
+  select(Method, Parameters, Reference, Seed, Metric, EstimateType, Mean, Stdev, `95CI`, Method_Param) %>%
+  mutate(Method_Param_Reference = Method_Param) # For plotting. 
+
+```
+
+#### 3.8.5.2 Bulk nuclei
+```{r}
+# Bulk Nucleus Plots
+p1_nuc <- plot_metric_dot(avgPred, 
+                           "bulkNucEstimate", 
+                           "MAE", 
+                           color_low = "firebrick3", 
+                           color_high = "lightyellow", 
+                           title = "Nuc",
+                           reverse = T) # Lower MAE is better.
+
+p2_nuc <- plot_metric_dot(avgPred, 
+                           "bulkNucEstimate", 
+                           "MAECorr", 
+                           "navyblue", 
+                           "lightblue", 
+                           title = "Nuc",
+                           reverse = T) # Lower MAECorr is better. 
+
+p3_nuc <- plot_metric_dot(avgPred, 
+                           "bulkNucEstimate", 
+                           "SCorr", 
+                           "deeppink", 
+                           "mistyrose",
+                           title = "Nuc",
+                           reverse = F) # Higher Corr is better
+
+p4_nuc <- plot_metric_dot(avgPred, 
+                           "bulkNucEstimate", 
+                           "CCorr", 
+                           
+                           "darkgreen", 
+                           "palegreen", 
+                           title = "Nuc",
+                           reverse = F)# Higher Corr is better
+```
+
+#### 3.8.2.3 Bulk cell
+```{r}
+# Bulk Cellleus Plots
+p1_cell <- plot_metric_dot(avgPred, 
+                            "bulkCellEstimate", 
+                            "MAE", 
+                            "firebrick3", 
+                            "lightyellow", 
+                            title = "Cell",
+                            reverse = T)
+p2_cell <- plot_metric_dot(avgPred, 
+                            "bulkCellEstimate", 
+                            "MAECorr", 
+                            "navyblue", 
+                            "lightblue", 
+                            title = "Cell",
+                            reverse = T)
+p3_cell <- plot_metric_dot(avgPred, 
+                            "bulkCellEstimate", 
+                            "SCorr", 
+                            "deeppink", 
+                            "mistyrose",
+                            title = "Cell",
+                            reverse = F)
+p4_cell <- plot_metric_dot(avgPred, 
+                            "bulkCellEstimate", 
+                            "CCorr", 
+                            "darkgreen", 
+                            "palegreen", 
+                            title = "Cell",
+                            reverse = F)
+```
+#### 3.8.2.4 Save
+```{r}
+(bulknuccellMetricsPerMethodParam <- wrap_plots(p1_nuc,
+                                            p1_cell,
+                                            p2_nuc,
+                                            p2_cell,
+                                            p3_nuc,
+                                            p3_cell,
+                                            p4_nuc,
+                                            p4_cell,
+                                            ncol=8,
+                                            nrow=1,
+                                            axis_titles="collect",
+                                            axes="collect") +
+  plot_layout(guides = "collect") &
+  theme(legend.position = "bottom") &
+  theme(
+    legend.text = element_text(size = 8),        
+    legend.title = element_text(size = 9)         
+  ) +
+  theme(
+  axis.text.x = element_blank(),
+  axis.ticks.x = element_blank(),
+  strip.text = element_text(size = 14),
+  plot.title = element_text(hjust = 0.5),
+  # legend.title = element_blank(),
+  axis.text.y = element_text(angle = 45, 
+                             size = 10, 
+                             hjust = 1) , 
+  panel.grid = element_blank()
+  
+))
+
+ggsave(paste0(plotDirScaden, 
+              "/dot/", 
+              fprefix, "_bulkNucCellMetricsPerMethodParam_avgSeed.pdf"), 
+       bulknuccellMetricsPerMethodParam,
+       height = 14, 
+       width= 20)
+```
+#### 5.2.1.2 Dotplots
+```{r}
+avgPredPlot <- avgPred %>%
+  mutate(Method_Param_Reference_Estimate = paste0(Method_Param_Reference, "_", EstimateType))
+
+# Define color palette for the 4 metrics
+metric_colors <- c(
+  "MAE" = "firebrick2",
+  "MAECorr" = "lightblue",
+  "SCorr" = "pink",
+  "CCorr" = "lightgreen"
+)
+
+bulkMetricsDotplot <- ggplot(avgPred, aes(x = EstimateType, y = Mean, fill = Metric)) +
+  geom_col(position = position_dodge()) +
+  geom_errorbar(aes(ymin = Mean - Stdev, ymax = Mean + Stdev), 
+                position = position_dodge(.9), width = 0.25) +
+  facet_wrap(~ Method_Param_Reference, ncol=2) +
+  scale_fill_manual(values = metric_colors) +
+  labs(y = "Mean over seeds (+/- Stdev)") +
+  theme_minimal()
+
+
+ggsave(paste0(plotDirScaden, 
+              "bar/", 
+              fprefix, "_bulkNucCellMetricsPerMethodParam_avgSeed.pdf"), 
+       bulkMetricsDotplot,
+       height = 45, 
+       width= 10)
+```
+
+### 3.8.3 RMSE Heatmaps
+#### 3.8.3.1 All samples with all cell type proportions. 
+```{r}
+# Compute RMSE using adjusted sample names for with sn matrix. Then left join with original sample names for each result. Then rbind all results and use original sample name as rows in pheatmap. 
+rmseNucDf <- masterPropDf %>%
+    filter(sampleType %in% c("bn")) %>%
+    select(sampleNameEdit, 
+           sampleName) %>%
+  unique()
+
+
+rmseNuc <- rmseBySampleMedian(masterPropDf, 
+                            pred_type = "bn", 
+                            col="Param_Seed") %>%
+  left_join(rmseNucDf) %>%
+  select(-sampleNameEdit)
+  
+rmseCellDf <- masterPropDf %>%
+    filter(sampleType %in% c("bc")) %>%
+    select(sampleNameEdit, 
+           sampleName) %>%
+  unique()
+
+rmseCell <- rmseBySampleMedian(masterPropDf, 
+                               pred_type = "bc", 
+                               col = "Param_Seed")%>%
+  left_join(rmseCellDf) %>%
+  select(-sampleNameEdit)
+
+rmseAllSamples <- rbind(rmseNuc, rmseCell)
+
+   
+rmseMat <- rmseAllSamples %>%
+      pivot_wider(names_from = "Param_Seed", 
+                  values_from = RMSE) %>%
+      column_to_rownames("sampleName") %>%
+      as.matrix()
+
+# Step 1: Calculate proportions of all cell types
+all_celltype_props <- masterPropDf %>%
+  filter(sampleType %in% c("sn")) %>%
+  select(sampleName, manual.log.anot.fine, cellProportion) %>%
+  unique() %>%
+  pivot_wider(
+    names_from = manual.log.anot.fine,
+    values_from = cellProportion,
+    values_fill = 0  # fill missing with 0
+  ) %>% 
+  select(-"CTVT_cells") # For color mapping
+
+# Step 2: Match row order of rmseMat
+all_celltype_props <- all_celltype_props %>%
+  filter(sampleName %in% rownames(rmseMat)) %>%
+  column_to_rownames("sampleName")
+
+# Reorder to match matrix rows
+all_celltype_props <- all_celltype_props[rownames(rmseMat), , drop = FALSE]
+
+# Step 3: Create color scales for each cell type
+celltype_colors <- lapply(all_celltype_props, function(x) {
+  colorRamp2(
+    range(x, na.rm = TRUE),
+    c("white", scales::hue_pal()(1))  # assign different color per column later
+  )
+})
+
+# Assign unique colors to each cell type (using hue palette), except CTVT
+celltype_names <- colnames(all_celltype_props)[colnames(all_celltype_props)!="CTVT_cells"]
+
+hues <- scales::hue_pal()(length(celltype_names))
+
+celltype_colors <- setNames(
+  lapply(seq_along(celltype_names), function(i) {
+    colorRamp2(range(all_celltype_props[[i]], na.rm = TRUE), c("white", hues[i]))
+  }),
+  celltype_names
+)
+
+# Step 4: Create row annotation for all cell types - add CTVT from chunk above back in!
+rmseRefDf <- masterPropDf %>%
+    filter(sampleType %in% c("sn")) %>%
+  filter(manual.log.anot.fine %in% c("CTVT_cells")) %>%
+    select(
+           sampleName, 
+           cellProportion) %>%
+  unique()
+
+annot_df <- rmseRefDf %>%
+  filter(sampleName %in% rownames(rmseMat)) %>%
+  column_to_rownames("sampleName") %>%
+  dplyr::rename("CTVT_snProportion"="cellProportion")
+
+# Reorder to match matrix rows
+annot_df <- annot_df[rownames(rmseMat), , drop = FALSE]
+
+multi_celltype_annotation <- rowAnnotation(
+  df = cbind(all_celltype_props, 
+             CTVT_proportion = annot_df$CTVT_snProportion),
+  col = c(celltype_colors, 
+          CTVT_proportion = colorRamp2(
+    range(annot_df$CTVT_snProportion, na.rm = TRUE),
+    c("white", "purple"))),
+  annotation_name_side = "top"
+)
+
+# Step 5: Combine with CTVT annotation if you want both
+combined_row_ha <- multi_celltype_annotation  # replace with next line if you want both
+# combined_row_ha <- row_ha + multi_celltype_annotation
+
+# Define min, median, and max RMSE values
+rmse_range <- range(rmseMat, na.rm = TRUE)
+rmse_mid <- median(rmseMat, na.rm = TRUE)
+
+# Define color function correctly
+rmse_col_fun <- colorRamp2(
+  c(rmse_range[1], rmse_mid, rmse_range[2]),
+  c("white", "pink", "red"))
+
+
+###################################
+# Code column information
+###################################
+# Extract column information
+paramDf <- data.frame(
+  colname = colnames(rmseMat),
+  stringsAsFactors = FALSE
+)
+
+paramDf$bal <- str_extract(paramDf$colname, "bal(True|False)")
+paramDf$thresh <- str_extract(paramDf$colname, "thresh(None|0|5|10)")
+paramDf$ran <- str_remove(str_extract(paramDf$colname, "ran\\d+"), "ran") |> as.integer()
+paramDf$var <- str_remove(str_extract(paramDf$colname, "var\\d\\.\\d+"), "var") |> as.numeric()
+paramDf$samp <- str_remove(str_extract(paramDf$colname, "samp\\d+"), "samp") |> as.integer()
+paramDf$cells <- str_remove(str_extract(paramDf$colname, "cells\\d+"), "cells") |> as.integer()
+paramDf$seed <- str_remove(str_extract(paramDf$colname, "seed\\d+"), "seed") |> as.integer()
+paramDf$lr <- str_remove(str_extract(paramDf$colname, "lr\\d\\.\\d+"), "cells") |> as.integer()
+paramDf$steps <- str_remove(str_extract(paramDf$colname, "steps\\d+"), "steps") |> as.integer()
+
+# Subset only the levels that are present in the data
+# Define full color maps
+bal_colors <- c("balTrue" = "forestgreen", "balFalse" = "orange")
+thresh_colors <- c("threshNone" = "blue", 
+                   "thresh0" = "red",
+                   "thresh5"="purple",
+                   "thresh10"="pink"
+                   )
+
+  # Subset only the levels that are present in the data
+bal_colors_present <- bal_colors[names(bal_colors) %in% unique(paramDf$bal)]
+thresh_colors_present <- thresh_colors[names(thresh_colors) %in% unique(paramDf$thresh)]
+
+ha_column = HeatmapAnnotation(
+  bal = paramDf$bal,
+  thresh = paramDf$thresh,
+  ran = paramDf$ran,
+  var = paramDf$var,
+  samp = paramDf$samp,
+  cells = paramDf$cells,
+  seed = paramDf$seed,
+  col = list(
+    bal = bal_colors_present,
+    thresh = thresh_colors_present,
+    ran = structure(colorRampPalette(c("darkseagreen1", "darkseagreen4"))(length(unique(paramDf$ran))),
+                    names = sort(unique(paramDf$ran))),
+    var = structure(colorRampPalette(c("cadetblue1", "cadetblue4"))(length(unique(paramDf$var))),
+                    names = sort(unique(paramDf$var))),
+    samp = structure(colorRampPalette(c("pink", "maroon"))(length(unique(paramDf$samp))),
+                     names = sort(unique(paramDf$samp))),
+    cells = structure(colorRampPalette(c("darkgoldenrod1", "darkgoldenrod"))(length(unique(paramDf$cells))),
+                      names = sort(unique(paramDf$cells))),
+    seed = structure(colorRampPalette(c("azure", "azure4"))(length(unique(paramDf$seed))),
+                     names = sort(unique(paramDf$seed))), 
+    steps = structure(colorRampPalette(c("magenta", "purple3"))(length(unique(paramDf$steps))),
+                     names = sort(unique(paramDf$steps))), 
+    lr = structure(colorRampPalette(c("salmon1", "salmon4"))(length(unique(paramDf$lr))),
+                     names = sort(unique(paramDf$lr)))
+  ),
+  annotation_name_side = "left",
+  annotation_legend_param = list(title_gp = gpar(fontsize = 8))
+)
+
+
+
+###################################
+# Clust columns and rows = T 
+###################################
+
+# Step 6: Add annotation to Heatmap
+htClustRowCol <- Heatmap(
+  rmseMat,
+  name = "Median RMSE",
+  col = rmse_col_fun,
+  cluster_rows = TRUE,
+  cluster_columns = TRUE,
+  show_column_names = F, 
+  row_names_gp = gpar(fontsize = 8),
+  column_names_gp = gpar(fontsize = 8),
+  bottom_annotation = ha_column,
+  left_annotation = combined_row_ha,
+  heatmap_legend_param = list(title = "RMSE"),
+  cell_fun = function(j, i, x, y, width, height, fill){
+    grid.text(sprintf("%.1f", rmseMat[i, j]), x, y, gp = gpar(fontsize = 6))}
+)
+
+
+###################################
+# Clust rows but not columns 
+###################################
+
+# Step 6: Add annotation to Heatmap
+htClustRow <- Heatmap(
+  rmseMat,
+  name = "Median RMSE",
+  col = rmse_col_fun,
+  cluster_rows = TRUE,
+  cluster_columns = F,
+  row_names_gp = gpar(fontsize = 8),
+  column_names_gp = gpar(fontsize = 8),
+  left_annotation = combined_row_ha,
+  show_column_names = F, 
+  bottom_annotation = ha_column,
+  heatmap_legend_param = list(title = "RMSE"),
+  cell_fun = function(j, i, x, y, width, height, fill){
+    grid.text(sprintf("%.1f", rmseMat[i, j]), x, y, gp = gpar(fontsize = 6))}
+)
+
+###################################
+# Clust neither rows nor columns
+###################################
+
+samples <- c(
+  "3176T3b",
+  "switched3176T3b",
+  "3176T3",
+  "switched3176T3",
+  "3177T2a",
+  "3177T2",
+  "3178T1b",
+  "switched3178T1b",
+  "3178T1",
+  "switched3178T1",
+  "3179T2a",
+  "3179T2",
+  "3179T3a",
+  "3179T3",
+  "3180T3a",
+  "3180T3",
+  "3181T1a",
+  "3181T1"
+)
+
+rmseMatManual <- rmseMat[samples,]
+
+# Step 6: Add annotation to Heatmap
+ht <- Heatmap(
+  rmseMatManual,
+  name = "Median RMSE",
+  col = rmse_col_fun,
+  cluster_rows = F,
+  cluster_columns = F,
+  row_names_gp = gpar(fontsize = 8),
+  column_names_gp = gpar(fontsize = 8),
+  left_annotation = combined_row_ha,
+  show_column_names = F, 
+  bottom_annotation = ha_column,
+  heatmap_legend_param = list(title = "RMSE"),
+  cell_fun = function(j, i, x, y, width, height, fill){
+    grid.text(sprintf("%.1f", rmseMat[i, j]), x, y, gp = gpar(fontsize = 6))}
+)
+
+###################################
+# Save
+###################################
+
+# Step 7: Output to PDF
+pdf(paste0(plotDirScaden, "/heatmaps/", fprefix, "_medianRmse_withAllCelltypeProps_paramSeed_switchedHeatmap.pdf"), 
+    height = 10, width = 20)
+
+draw(
+    htClustRowCol,
+    heatmap_legend_side = "right",         # RMSE legend
+    
+    annotation_legend_side = "bottom",     # Annotation legend (e.g., column info)
+    merge_legend = FALSE                   # Keep separate legends
+)
+
+draw(
+    htClustRow,
+    heatmap_legend_side = "right",         # RMSE legsend
+    annotation_legend_side = "bottom",     # Annotation legend (e.g., column info)
+    merge_legend = FALSE                   # Keep separate legends
+)
+
+draw(
+    ht,
+    heatmap_legend_side = "right",         # RMSE legsend
+    annotation_legend_side = "bottom",     # Annotation legend (e.g., column info)
+    merge_legend = FALSE                   # Keep separate legends
+)
+
+
+dev.off()
+```
+## 5.3 Granular metrics
+### 5.3.1 Per cell type
+```{r}
+
+```
+
+#### 5.3.1.1 MAE
+```{r}
+
+```
+
+#### 5.3.1.2 RMSE
+```{r}
+
+```
+
+#### 5.3.1.3 RPE
+```{r}
+
+```
+
+## 5.4 Raw prediction error
+### 5.4.1 Per cell type
+Individual plot per cell type.
+x-axis = param_seed
+y-axis = raw prediction error
+
+```{r}
+# Balanced
+# ensure Param_Seed is treated as a factor (so it’s discrete on the x-axis)
+masterRawPEDf$Param_Seed <- factor(masterRawPEDf$Param_Seed)
+masterRawPEDf$X_axis <- str_replace(masterRawPEDf$Param_Seed,
+                                          "snCounts_",
+                                          "")
+masterRawPEDf$X_axis <- factor(masterRawPEDf$X_axis)
+masterRawPEDf$bal <- str_extract(masterRawPEDf$X_axis, "bal(True|False)")
+
+for(ctype in unique(masterRawPEDf$manual.log.anot.fine)){
+  print(ctype)
+  
+  tempRawPEDf <- masterRawPEDf %>%
+    filter(manual.log.anot.fine == ctype)
+  
+  tempRawPEDfBalTrue <- tempRawPEDf %>%
+    filter(bal == "balTrue") %>%
+    mutate(color_group = case_when(
+      sampleNameEdit %in% c("switched3176T3", "switched3178T1") ~ "Switched (Red)",
+      sampleNameEdit %in% c("3176T3", "3178T1") ~ "Original (Blue)",
+      TRUE ~ "Other"
+    ))
+  
+  tempRawPEDfBalFalse <- tempRawPEDf %>%
+    filter(bal == "balFalse") %>%
+    mutate(color_group = case_when(
+      sampleNameEdit %in% c("switched3176T3", "switched3178T1") ~ "Switched (Red)",
+      sampleNameEdit %in% c("3176T3", "3178T1") ~ "Original (Blue)",
+      TRUE ~ "Other"
+    ))
+  
+  min_y <- min(tempRawPEDf$rawPE) - .5
+  max_y <- max(tempRawPEDf$rawPE) + .5
+  
+  a <- ggplot(tempRawPEDfBalTrue, aes(x = X_axis, y = rawPE)) +
+  geom_boxplot(outlier.size = 1) +
+  geom_point(aes(color = color_group), position = position_jitter(width = 0.2), size = 1) +
+  facet_wrap(~ bal) +
+  theme(
+    strip.text = element_text(face = "bold"),
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    panel.grid.major = element_line(color = "gray80"),
+    panel.grid.minor = element_blank()
+  ) +
+  scale_color_manual(values = c("Switched (Red)" = "red", "Original (Blue)" = "blue", "Other" = "black"))+
+    labs(
+    x = "Parameter + Seed",
+    y = "rawPE",
+    title = ctype,
+    color = "Sample Type"
+  ) + ylim(min_y, max_y)
+
+  
+  b <- ggplot(tempRawPEDfBalFalse, aes(x = X_axis, y = rawPE)) +
+  geom_boxplot(outlier.size = 1) +
+  geom_point(aes(color = color_group), position = position_jitter(width = 0.2), size = 1) +
+  facet_wrap(~ bal) +
+  theme(
+    strip.text = element_text(face = "bold"),
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    panel.grid.major = element_line(color = "gray80"),
+    panel.grid.minor = element_blank()
+  ) +
+  scale_color_manual(values = c("Switched (Red)" = "red", "Original (Blue)" = "blue", "Other" = "black")) +
+  labs(
+    x = "Parameter + Seed",
+    y = "rawPE",
+    title = ctype,
+    color = "Sample Type"
+  ) +
+  ylim(min_y, max_y)
+
+
+
+  
+  aNo <- a +
+        theme(axis.text.x = element_blank(),
+          axis.ticks.x = element_blank())
+  
+  bNo <- b +
+        theme(axis.text.x = element_blank(),
+          axis.ticks.x = element_blank())
+  
+  
+  abNoAxes <- aNo + bNo + plot_layout(axes="collect") +
+    labs(
+    x = "Parameter + Seed",
+    y = "rawPE",
+    title = ctype
+  )
+  
+  pdf(paste0(plotDirScaden, 
+              "/box/",
+              fprefix,
+              "_masterRawPEDfBox_", ctype, ".pdf"),
+       height=4, 
+       width=8)
+  
+  # print(ab)
+  print(abNoAxes)
+  
+  dev.off()
+}
+```
+
+
+### 5.4.1 Per sample
+Individual plot per sample.
+x-axis = param_seed
+y-axis = raw prediction error
+
+```{r}
+# Balanced
+# ensure Param_Seed is treated as a factor (so it’s discrete on the x-axis)
+masterRawPEDf$Param_Seed <- factor(masterRawPEDf$Param_Seed)
+masterRawPEDf$X_axis <- str_replace(masterRawPEDf$Param_Seed,
+                                          "snCounts_",
+                                          "")
+masterRawPEDf$X_axis <- factor(masterRawPEDf$X_axis)
+masterRawPEDf$bal <- str_extract(masterRawPEDf$X_axis, "bal(True|False)")
+
+for(samp in unique(masterRawPEDf$sampleName)){
+  # print(ctype)
+  
+  tempRawPEDf <- masterRawPEDf %>%
+    filter(manual.log.anot.fine == ctype)
+  
+  # Create a grouping variable for color inside tempRawPEDfBalTrue
+  tempRawPEDfBalTrue <- tempRawPEDfBalTrue %>%
+    mutate(color_group = case_when(
+      sampleNameEdit %in% c("switched3176T3", "switched3178T1") ~ "Switched (Red)",
+      sampleNameEdit %in% c("3176T3", "3178T1") ~ "Original (Blue)",
+      TRUE ~ "Other"
+    ))
+
+  # Calculate outliers manually for tempRawPEDfBalTrue grouped by X_axis
+    outliersTrue <- tempRawPEDfBalTrue %>%
+      group_by(X_axis) %>%
+      filter(rawPE < quantile(rawPE, 0.25) - 1.5 * IQR(rawPE) | 
+             rawPE > quantile(rawPE, 0.75) + 1.5 * IQR(rawPE)) %>%
+      ungroup()
+
+  a <- ggplot(tempRawPEDfBalTrue, aes(x = X_axis, y = rawPE)) +
+    geom_boxplot(outlier.shape = NA) +   # suppress default outliers
+    geom_jitter(data = outliersTrue, aes(color = color_group), width = 0.2, size = 1) +  # jitter outliers
+    facet_wrap(~ bal) +
+    scale_color_manual(values = c("Switched (Red)" = "red", "Original (Blue)" = "blue", "Other" = "black")) +
+    theme(
+      strip.text = element_text(face = "bold"),
+      axis.text.x = element_text(angle = 45, hjust = 1),
+      panel.grid.major = element_line(color = "gray80"),
+      panel.grid.minor = element_blank()
+    ) +
+    labs(
+      x = "Parameter + Seed",
+      y = "rawPE",
+      title = ctype,
+      color = "Outlier Type"
+    ) +
+    ylim(-.3, .3)
+
+
+  
+  # Create grouping variable in tempRawPEDfBalFalse
+  tempRawPEDfBalFalse <- tempRawPEDfBalFalse %>%
+    mutate(color_group = case_when(
+      sampleNameEdit %in% c("switched3176T3", "switched3178T1") ~ "Switched (Red)",
+      sampleNameEdit %in% c("3176T3", "3178T1") ~ "Original (Blue)",
+      TRUE ~ "Other"
+    ))
+  
+  # Calculate outliers manually for tempRawPEDfBalTrue grouped by X_axis
+    outliersFalse <- tempRawPEDfBalFalse %>%
+      group_by(X_axis) %>%
+      filter(rawPE < quantile(rawPE, 0.25) - 1.5 * IQR(rawPE) | 
+             rawPE > quantile(rawPE, 0.75) + 1.5 * IQR(rawPE)) %>%
+      ungroup()
+
+  b <- ggplot(tempRawPEDfBalFalse, aes(x = X_axis, y = rawPE)) +
+    geom_boxplot(outlier.shape = NA) +   # suppress default outliers
+    geom_jitter(data = outliersFalse, aes(color = color_group), width = 0.2, size = 1) +  # jitter outliers
+    facet_wrap(~ bal) +
+    scale_color_manual(values = c("Switched (Red)" = "red", "Original (Blue)" = "blue", "Other" = "black")) +
+    theme(
+      strip.text = element_text(face = "bold"),
+      axis.text.x = element_text(angle = 45, hjust = 1),
+      panel.grid.major = element_line(color = "gray80"),
+      panel.grid.minor = element_blank()
+    ) +
+    labs(
+      x = "Parameter + Seed",
+      y = "rawPE",
+      title = ctype,
+      color = "Outlier Type"
+    ) +
+    ylim(-.3, .3)
+
+  
+  aNo <- a +
+        theme(axis.text.x = element_blank(),
+          axis.ticks.x = element_blank())
+  
+  bNo <- b +
+        theme(axis.text.x = element_blank(),
+          axis.ticks.x = element_blank())
+  
+  
+  abNoAxes <- aNo + bNo + plot_layout(axes="collect") +
+    labs(
+    x = "Parameter + Seed",
+    y = "rawPE",
+    title = ctype
+  )
+  
+  pdf(paste0(plotDirScaden, 
+              "/box/",
+              fprefix,
+              "_masterRawPEDfBox_", ctype, ".pdf"),
+       height=4, 
+       width=8)
+  
+  # print(ab)
+  print(abNoAxes)
+  
+  dev.off()
+}
+
+```
+
+#### 5.3.1.1 MAE
+```{r}
+
+```
+
+#### 5.3.1.2 RMSE
+```{r}
+
+```
+
+#### 5.3.1.3 RPE
+```{r}
+
+```
+
+
+
+
+
+
+
+## 5.5 Prediction proportions.
+Outer loop --> reference. 
+Inner loop --> method param reference.
+Read in masterPropDf from Chunk ### 5.4.2
+In the scaden results, NA_NA_allCellsAllFeatures = ground truth and Scaden_Default_snCounts are the prediction on the full object. Not an issue in the other codes, but adjusting names of the references here. 
+```{r}
+# masterPropDfNew <- masterPropDfNew %>%
+#   mutate(
+# 
+#     Method_Param = if_else(
+#       Method_Param == "NA_NA_allCellsAllFeatures",
+#       "NA_NA_snCounts",
+#       Method_Param
+#     ),
+#     Reference = if_else(
+#       Reference == "allCellsAllFeatures",
+#       "snCounts",
+#       Reference
+#     )
+#   )
+
+## I checked table($Method_Param_Reference) and counts are preserved.
+  
+```
+### 5.5.1 Training data proportions
+Comment out if not needed. 
+```{r}
+refProp <- read.xlsx(paste0(wDir, "13_Results/relativeProportionCellTypesPerReference.xlsx")) %>%
+  column_to_rownames("cellTypes") %>%
+  as.data.frame()
+
+# head(masterPropAvgParamSeed)
+# 
+# masterPropAvgParamSeed <- masterPropAvgParamSeed %>%
+#   mutate(Param_Seed = paste0(Parameters, "_seed", Seed))
+```
+
+
+### 5.5.2 Global arguments
+```{r}
+cellTypeOrder <- c("CTVT_cells", "CAFs", "Endothelial_cells",
+                   "Mono.Macro.DC", "Plasma_cells",  "T_cells")
+
+sampleGroups <- list(
+  c("Full reference", "Training data"),
+  c("sn_3176T3", "bn_3176T3", "bc_3176T3"),
+  c("sn_switched3176T3", "bn_switched3176T3", "bc_switched3176T3"),
+  c("sn_3177T2", "bn_3177T2", "bc_3177T2"),
+  c("bc_3177T4", "bn_3177T4"),
+  c("bn_3177T5", "bc_3177T5"),
+  c("bn_3177T6", "bc_3177T6"),
+  c("sn_3178T1", "bn_3178T1", "bc_3178T1"),
+  c("sn_switched3178T1", "bn_switched3178T1", "bc_switched3178T1"),
+  c("sn_3179T2", "bn_3179T2", "bc_3179T2"),
+  c("sn_3179T3", "bn_3179T3", "bc_3179T3"),
+  c("sn_3180T3", "bn_3180T3", "bc_3180T3"),
+  c("sn_3181T1", "bn_3181T1", "bc_3181T1")
+)
+
+# Flatten list to get sampleOrder (same as yours)
+sampleOrder <- unlist(sampleGroups)
+
+# Determine where to insert gaps: after each group
+rowGaps <- unit(rep(5, length(sampleGroups) - 1), "pt")
+
+# refProp <- read.xlsx(paste0(wDir, "13_Results/relativeProportionCellTypesPerReference.xlsx")) %>%
+#   column_to_rownames("cellTypes") %>%
+#   as.data.frame()
+
+# Filter only "sn" samples for true proportions df. Never changes. 
+snDf <- masterPropDf %>%
+    filter(sampleType == "sn")%>%
+    mutate(typeName = paste0(sampleType,"_", sampleNameEdit))
+```
+
+### 5.5.3 Loop through references and plot
+```{r}
+print(length(unique(masterPropDf$Reference)))
+
+for (ref in unique(masterPropDf$Reference)){
+  
+  print(paste0("Running reference: ", ref))
+  
+  # Create heatmap directory for this reference. 
+  plotDirHmPropDf <- paste0(plotDirScaden, "/heatmaps/", ref, "/")
+  
+  # Will not overwrite any existing directories. 
+  dir.create(plotDirHmPropDf)
+
+  #########################
+  # Subset masterPropDf on reference for creating heatmapMatrix.
+  #########################
+  
+  # Add column for heatmap rownames to match sampleGroups. 
+  masterPropDfEdit <- masterPropDf %>%
+    filter(Reference==ref) %>%
+    mutate(typeName = paste0(sampleType,"_", sampleNameEdit)) 
+    
+  
+  # Remainer of results df. 
+  resDf <- masterPropDfEdit %>%
+    filter(sampleType != "sn") 
+
+  ###########################################
+  ### Loop through Param_Seed_Reference ###
+  ### Multiple parameters possible per reference 
+  ### Scripts are split by method so not really looping through methods rn. 
+  ###########################################
+
+  for (ps in unique(resDf$Param_Seed)){
+    
+    print(ps)
+    
+    #########################
+    # Get "All samples" and training data cell type proportions. 
+    #########################
+    
+    # if ref == "snCounts" bind full ref and training data distribution from masterPropAvgParamSeed
+    # Differs from LOO table, where we bind fullRef twice if the reference = snCounts.
+    refDf <- NULL
+    
+    if (ref == "snCounts"){
+      
+      trainDf <- masterPropAvgParamSeed %>%
+        filter(Param_Seed == ps) %>%
+        ungroup() %>%
+        select(c(cellTypeOrder)) 
+      
+      fullRef <- refProp %>%
+        t() %>%
+        as.data.frame() %>%
+        rownames_to_column("Ref") %>%
+        filter(Ref == "fullRef") %>%
+        column_to_rownames("Ref") %>%
+        select(cellTypeOrder) 
+      
+      refDf <- rbind(fullRef, trainDf)
+    
+      }else{
+      # refDf <- refProp %>%
+      #   select(c(fullRef, ref)) %>%
+      #   t()
+      break
+    }
+  
+    # To match sampleGroup names and order. 
+    rownames(refDf) <- c("Full reference", "Training data")
+    
+    # To match cell type order in heatmapMatrix.
+    refDf <- refDf[,cellTypeOrder]
+      
+    # Filter sn counts. 
+    resDfTruth <- masterPropDfEdit %>%
+        filter(sampleType == "sn") 
+    
+    # Rbind results and ground truth. 
+    tempPlotDf <- resDf %>%
+      filter(Param_Seed==ps) %>%
+      rbind(snDf) 
+    
+    # Check to make sure all typeNames have all cell types in df
+    all_counts_equal <- length(unique(table(tempPlotDf$typeName))) == 1
+    if (all_counts_equal==FALSE) {
+      cat("❌ typeName groups have unequal counts.\n")
+      print(table(tempPlotDf$typeName))  # Optional: see where they differ
+    }
+  
+    # ########################################
+    # # Error matrix #
+    # ########################################
+    # 
+    # perCelltypeSampleErr <- absErrorMatrices(plotDf = tempPlotDf, 
+    #                                          keyColumn = "typeName",
+    #                                          sOrder = sampleOrder, 
+    #                                          ctypeOrder = cellTypeOrder)
+    # 
+    # errMatrix <- perCelltypeSampleErr$errMatrix %>%
+    #   as.data.frame() %>%
+    #   drop_na() %>% 
+    #   as.matrix()
+    # 
+    # # Custom diverging color function
+    # minValue <- min(errMatrix, na.rm = TRUE)
+    # maxValue <- max(errMatrix, na.rm = TRUE)
+    # colFun <- colorRamp2(c(minValue, 0, maxValue), c("firebrick1", "white", "blue"))
+    # 
+    # 
+    # errHeatmap <- Heatmap(errMatrix,
+    #     name = "Truth - Prediction",  # legend label
+    #     col = colFun,
+    #     cluster_rows = FALSE,
+    #     cluster_columns = FALSE,
+    #     show_row_names = TRUE,
+    #     show_column_names = TRUE, 
+    #     column_names_rot = 45)
+    # 
+    # dfLong <- as.data.frame(errMatrix) %>%
+    #   rownames_to_column("sample") %>%
+    #   pivot_longer(-sample, names_to = "cellType", values_to = "error") 
+    # 
+    # dfLong$sample <- factor(dfLong$sample, levels = rownames(errMatrix))
+    # dfLong$cellType <- factor(dfLong$cellType, levels = colnames(errMatrix))
+    # 
+    # # Plot
+    # errDotplot <- ggplot(dfLong, aes(x = cellType, y = sample)) +
+    #   geom_point(aes(size = abs(error), color = error)) +
+    #   scale_color_gradient2(low = "firebrick1", mid = "white", high = "blue", midpoint = 0, 
+    #                         name = "Truth - Prediction") +
+    #   scale_size(range = c(1, 6), name = "|Error|") +
+    #   theme_minimal() +
+    #   theme(axis.text.x = element_text(angle = 45, hjust = 1),
+    #         panel.grid = element_blank()) +
+    #   labs(x = "Cell Type", y = "Sample")
+    # 
+    # 
+    # pdf(paste0(plotDirScaden, "/dot/",ref, "/", fprefix,"_", ref,  ps, "_proportions.pdf"), 
+    #     height=10, 
+    #     width = 10)
+    # print(errDotplot)
+    # dev.off()
+    # 
+    #     pdf(paste0(plotDirScaden, "/heatmaps/",ref, "/", fprefix,"_", ref,  ps, "_proportions.pdf"), 
+    #     height=10, 
+    #     width = 10)
+    # draw(errHeatmap)
+    # dev.off()
+    # 
+    
+    
+    ########################################
+    # Pred colored by cell type #
+    ########################################
+    # Check to make sure all typeNames have all cell types in df
+    all_counts_equal <- length(unique(table(tempPlotDf$typeName))) == 1
+    if (all_counts_equal==FALSE) {
+      cat("❌ typeName groups have unequal counts.\n")
+      print(table(tempPlotDf$typeName))  # Optional: see where they differ
+    }
+  
+    # Pivot to wide format
+    heatmapMatrix <- tempPlotDf %>%
+      select(typeName, manual.log.anot.fine, cellProportion) %>%
+      pivot_wider(names_from = manual.log.anot.fine, values_from = cellProportion) %>%
+      # Use mutated seq type _ sample name edit for new row names.
+      column_to_rownames("typeName") %>%
+      select(cellTypeOrder) %>%
+      as.matrix() %>%
+      rbind(refDf)
+    
+    # Check to make sure all rownames are included in the ordering column of the samples in the heatmap. 
+    diff <- setdiff(rownames(heatmapMatrix), sampleOrder)
+    if (length(diff)!=0) {
+      cat("❌ Missing sample names in sampleOrder")
+      print(diff)
+    }
+    
+    # Reorder for plotting
+    heatmapMatrix <- heatmapMatrix[sampleOrder, cellTypeOrder]
+    
+    # Ensure that the color vector matches matrix columns
+    cellTypes <- colnames(heatmapMatrix)
+    stopifnot(all(cellTypes %in% names(manualColors)))
+    
+    # Create column-specific color functions: white → manual hue
+    col_fun_list <- setNames(
+      lapply(cellTypes, function(cell) {
+        vals <- heatmapMatrix[, cell]
+        colorRamp2(
+          c(min(vals, na.rm = TRUE), max(vals, na.rm = TRUE)),
+          c("white", manualColors[[cell]])
+        )
+      }),
+      cellTypes
+    )
+    
+    # Create a heatmap per cell type
+    heatmap_list <- lapply(cellTypes, function(cell) {
+      # Heatmap(heatmapMatrix[, cell, drop = FALSE],
+      #         name = cell,
+      #         col = col_fun_list[[cell]],
+      #         cluster_rows = FALSE,
+      #         cluster_columns = FALSE,
+      #         show_row_names = TRUE,
+      #         show_column_names = TRUE, 
+      #         column_names_rot = 45, 
+      #         row_gap = rowGaps,
+      #         row_split = rep(seq_along(sampleGroups), lengths(sampleGroups)))
+      Heatmap(heatmapMatrix[, cell, drop = FALSE],
+        name = cell,
+        col = col_fun_list[[cell]],
+        cluster_rows = FALSE,
+        cluster_columns = FALSE,
+        show_row_names = TRUE,
+        show_column_names = TRUE, 
+        column_names_rot = 45, 
+        row_gap = rowGaps,
+        row_split = rep(seq_along(sampleGroups), lengths(sampleGroups)),
+        cell_fun = function(j, i, x, y, width, height, fill) {
+          value <- heatmapMatrix[i, cell]
+          grid.text(sprintf("%.2f", value), x, y, gp = gpar(fontsize = 8))
+        })
+
+      })
+    
+    # Combine and draw the full heatmap
+    combinedHeatmap <- Reduce(`+`, heatmap_list)
+    
+    pdf(paste0(plotDirHmPropDf, fprefix,"_",  ps, "_proportions.pdf"), 
+        height=10, 
+        width = 10)
+    draw(combinedHeatmap, 
+         heatmap_legend_side = "top", 
+         column_title = ps, 
+         column_title_side = "bottom",
+         column_title_gp = gpar(fontsize = 14, fontface = "bold")) 
+    dev.off()
+    
+    
+  }
+  
+}
+
+```
+
+
+## 5.6 Proportion df
+```{r}
+# plotDirHmPropDf <- paste0(plotDir, "/heatmaps/propDf/")
+cellTypeOrder <- c("CTVT_cells", "CAFs", "Endothelial_cells",
+                   "Mono.Macro.DC", "Plasma_cells",  "T_cells")
+```
+
+### 5.4.1 Full reference
+Was testing the function on just the reference with all cells and all genes ("snCounts"). 
+This is built into the loop in ### 5.4.2
+See 01_Deconvolution_musicLOO.Rmd for all details. 
+
+#### 5.4.1.1 Global arguments
+```{r}
+cellTypeOrder <- c("CTVT_cells", "CAFs", "Endothelial_cells",
+                   "Mono.Macro.DC", "Plasma_cells",  "T_cells")
+
+sampleGroups <- list(
+  # Add row with training data proportions. 
+  c("All samples", "Reference", "Training data"),
+  c("sn_3176T3", "bn_3176T3", "bc_3176T3"),
+  c("sn_3177T2", "bn_3177T2", "bc_3177T2"),
+  c("bc_3177T4", "bn_3177T4"),
+  c("bn_3177T5", "bc_3177T5"),
+  c("bn_3177T6", "bc_3177T6"),
+  c("sn_3178T1", "bn_3178T1", "bc_3178T1"),
+  c("sn_3179T2", "bn_3179T2", "bc_3179T2"),
+  c("sn_3179T3", "bn_3179T3", "bc_3179T3"),
+  c("sn_3180T3", "bn_3180T3", "bc_3180T3"),
+  c("sn_3181T1", "bn_3181T1", "bc_3181T1")
+)
+
+# Flatten list to get sampleOrder (same as yours)
+sampleOrder <- unlist(sampleGroups)
+
+# Determine where to insert gaps: after each group
+rowGaps <- unit(rep(5, length(sampleGroups) - 1), "pt")
+
+refProp <- read.xlsx(paste0(wDir, "13_Results/relativeProportionCellTypesPerReference.xlsx")) %>%
+  column_to_rownames("cellTypes") %>%
+  as.data.frame()
+
+# Filter only "sn" samples for true proportions df. Never changes. 
+snDf <- masterPropDf %>%
+    filter(sampleType == "sn")%>%
+    mutate(typeName = paste0(sampleType,"_", sampleNameEdit))
+```
+#### 5.4.1.1 Get training data proportions. 
+Average over all pseudobulk samples constructed for training. 
+```{r}
+# Predicted proportions df
+masterPropAvgSeedSampleParam <- read.xlsx(paste0(resDir,
+                                                 fprefix,
+                                                 "_masterPropAvgSeedSampleParam.xlsx")) %>%
+  mutate(Param_Seed = paste0(Parameters, "_seed", Seed)) %>%
+  group_by(Param_Seed) 
+
+# # Get training data proportions, averaged over the pseudobulk samples. 
+# predDfMeanStdev <- masterPropAvgSeedSampleParam %>%
+#   filter(!is.na(Parameters)) %>%
+#   # mutate(
+#   #   Method_Param = paste0(Method, "_", Parameters)
+#   # ) %>%
+#   # filter(!is.na(Parameters)) %>%
+#   separate(Parameters,
+#            into = c("bal", "thresh", "ran", "var", "samp", "cells"),
+#            sep = "_",
+#            remove = FALSE) %>% # Keep original 'Parameters' column 
+#   group_by(Parameters, Seed) %>%
+#   summarise(
+#     across(
+#       c("CAFs", 
+#         "CTVT_cells", 
+#         "Endothelial_cells", 
+#         "Mono.Macro.DC",
+#         "Plasma_cells", 
+#         "T_cells"),
+#       list(mean = ~mean(.x, na.rm = TRUE),
+#            sd = ~sd(.x, na.rm = TRUE)),
+#       .names = "{.col}_{.fn}"
+#     )
+#   )
+
+predDfMean <- masterPropAvgSeedSampleParam %>%
+  filter(!is.na(Parameters)) %>%
+  # mutate(
+  #   Method_Param = paste0(Method, "_", Parameters)
+  # ) %>%
+  # filter(!is.na(Parameters)) %>%
+  separate(Parameters,
+           into = c("bal", "thresh", "ran", "var", "samp", "cells"),
+           sep = "_",
+           remove = FALSE) %>% # Keep original 'Parameters' column 
+  group_by(Parameters, Seed) %>%
+  summarise(across(c("CAFs",
+                     "CTVT_cells",
+                     "Endothelial_cells",
+                     "Mono.Macro.DC",
+                     "Plasma_cells",
+                     "T_cells"),
+                   mean,
+                   na.rm = TRUE)) %>%
+  mutate(Param_Seed = paste0(Parameters, "_seed", Seed))
+
+```
+
+#### 2.4.2.2 Loop through training data parameters
+Mutate ground truth reference. 
+```{r}
+masterPropDf <- masterPropDf %>%
+  mutate(
+    Method_Param = if_else(
+      Method_Param == "NA_NA_allCellsAllFeatures",
+      "NA_NA_snCounts",
+      Method_Param
+    ),
+    Reference = if_else(
+      Reference == "allCellsAllFeatures",
+      "snCounts",
+      Reference
+    )
+  )
+```
+
+##### 2.4.2.2.1 Heatmaps and barplots
+TODO: Create a new df with the average proportions per simulation (and seed). Here we are plotting all training data simulations individually. Next chunk: combine seeds next to each other?
+```{r}
+print(unique(masterPropDf$Reference))
+
+for (ref in unique(masterPropDf$Reference)){
+  
+  print(paste0("Running reference: ", ref))
+  
+  # Create heatmap directory for this reference. 
+  plotDirHmPropDf <- paste0(plotDirScaden, "/heatmaps/", ref, "/")
+  plotDirBpPropDf <- paste0(plotDirScaden, "/bar/", ref, "/")
+  # Will not overwrite any existing directories. 
+  dir.create(plotDirHmPropDf)
+  dir.create(plotDirBpPropDf)
+  #########################
+  # Get "All samples", "Reference", and "Training data" cell type proportions. 
+  #########################
+  
+  # if ref == "snCounts", rbind the fullRef row twice (because snCounts=fullRef -- not an LOO)
+  
+  refDf <- NULL
+  if (ref == "snCounts"){
+    refDf <- cbind(refProp$fullRef, refProp$fullRef) %>%
+      t()
+      
+    
+    # Add rownames back! 
+    colnames(refDf) <- rownames(refProp)
+    rownames(refDf) <- c("Original sn proportions", "snCounts")
+  
+    }else{
+      
+    refDf <- refProp %>%
+      select(c(fullRef, ref)) %>%
+      t() 
+  }
+
+  # To match sampleGroup names and order. 
+  rownames(refDf) <- c("All samples", "Reference")
+  
+  # To match cell type order in heatmapMatrix.
+  refDf <- refDf[,cellTypeOrder]
+  
+  #########################
+  # Subset masterPropDf on reference for creating heatmapMatrix.
+  #########################
+  
+  # Add column for heatmap rownames to match sampleGroups. Also add column matching seed and   parameters combination
+  masterPropDfEdit <- masterPropDf %>%
+    filter(Reference==ref) %>%
+    mutate(typeName = paste0(sampleType,"_", sampleNameEdit), 
+           Param_Seed = paste0(Parameters,"_", Seed))
+  
+  # Remainer of results df. 
+  resDf <- masterPropDfEdit %>%
+    filter(sampleType != "sn")
+
+  ###########################################
+  ### Loop through Method_Param_Reference ###
+  ### Multiple parameters possible per reference 
+  ### Scripts are split by method so not really looping through methods rn. 
+  ###########################################
+
+  for (mpr in unique(resDf$Param_Seed)){
+    print(mpr)
+    
+    # Filter sn counts. 
+    resDfTruth <- masterPropDfEdit %>%
+      filter(sampleType == "sn")
+    
+    # Filter mpr
+    resDfPredict <- masterPropDfEdit %>%
+      filter(Param_Seed==mpr)
+    
+    # Filter training data proportions for this Param_Seed and add to refDf
+    tempTrainProp <- masterPropAvgSeedSampleParam %>%
+      mutate(Param)
+      filter(Param_Seed == mpr) %>%
+      # select(-c(Parameters, Param_Seed)) %>%
+      ungroup %>%
+      select(colnames(refDf)) %>%
+      # TODO: Check why adding grouping variables?
+      as.matrix()
+    
+    rownames(tempTrainProp) <- "Training data"
+    
+    tempRefDf <- rbind(refDf, 
+                       tempTrainProp)
+   
+    
+    # Rbind results and ground truth. 
+    tempPlotDf <- rbind(resDfPredict, resDfTruth)
+    
+    # Check to make sure all typeNames have all cell types in df
+    all_counts_equal <- length(unique(table(tempPlotDf$typeName))) == 1
+    
+    if (all_counts_equal==FALSE) {
+      cat("❌ typeName groups have unequal counts.\n")
+      print(table(tempPlotDf$typeName))  # Optional: see where they differ
+    }
+  
+    # Pivot to wide format
+    heatmapMatrix <- tempPlotDf %>%
+      select(typeName, manual.log.anot.fine, cellProportion) %>%
+      pivot_wider(names_from = manual.log.anot.fine, values_from = cellProportion) %>%
+      # Use mutated seq type _ sample name edit for new row names.
+      column_to_rownames("typeName") %>%
+      select(cellTypeOrder) %>%
+      as.matrix() %>%
+      rbind(tempRefDf)
+    
+    # Check to make sure all rownames are included in the ordering column of the samples in the heatmap. 
+    diff <- setdiff(rownames(heatmapMatrix), sampleOrder)
+    
+    if (length(diff)!=0) {
+      cat("❌ Missing sample names in sampleOrder")
+      print(diff)
+    }
+    
+    # Check to make sure all ordering columns are in rownames. 
+    diff <- setdiff(sampleOrder, rownames(heatmapMatrix))
+    if (length(diff)!=0) {
+      cat("❌ Missing sampleOrder names in heatMapmatrix rownames.")
+      print(diff)  
+    }
+    
+    # Reorder for plotting
+    heatmapMatrix <- heatmapMatrix[sampleOrder, cellTypeOrder]
+    
+    # Ensure that the color vector matches matrix columns
+    cellTypes <- colnames(heatmapMatrix)
+    stopifnot(all(cellTypes %in% names(manualColors)))
+    
+    # Create column-specific color functions: white → manual hue
+    col_fun_list <- setNames(
+      lapply(cellTypes, function(cell) {
+        vals <- heatmapMatrix[, cell]
+        colorRamp2(
+          c(min(vals, na.rm = TRUE), max(vals, na.rm = TRUE)),
+          c("white", manualColors[[cell]])
+        )
+      }),
+      cellTypes
+    )
+    
+    # Create a heatmap per cell type - printing values 
+    heatmap_list_values <- lapply(cellTypes, function(cell) {
+      Heatmap(heatmapMatrix[, cell, drop = FALSE],
+              name = cell,
+              col = col_fun_list[[cell]],
+              cluster_rows = FALSE,
+              cluster_columns = FALSE,
+              show_row_names = TRUE,
+              show_column_names = TRUE, 
+              column_names_rot = 45, 
+              row_gap = rowGaps,
+              row_split = rep(seq_along(sampleGroups), lengths(sampleGroups)),
+          cell_fun = function(j, i, x, y, width, height, fill) {
+      grid.text(
+        sprintf("%.2f", heatmapMatrix[i, cell]),
+        x, y,
+        gp = gpar(fontsize = 10, col = "black")
+      )
+      })
+    })
+    
+    # Create a heatmap per cell type - Not printing values
+    heatmap_list <- lapply(cellTypes, function(cell) {
+      Heatmap(heatmapMatrix[, cell, drop = FALSE],
+              name = cell,
+              col = col_fun_list[[cell]],
+              cluster_rows = FALSE,
+              cluster_columns = FALSE,
+              show_row_names = TRUE,
+              show_column_names = TRUE, 
+              column_names_rot = 45, 
+              row_gap = rowGaps,
+              row_split = rep(seq_along(sampleGroups), lengths(sampleGroups)))
+    })
+    
+    # Combine and draw the full heatmap
+    combinedHeatmap <- Reduce(`+`, heatmap_list_values)
+    combinedHeatmapNoValues <- Reduce(`+`, heatmap_list)
+    
+    pdf(paste0(plotDirHmPropDf, fprefix,"_", mpr, "_proportionsHeatmap.pdf"), 
+        height=10, 
+        width = 10)
+    draw(combinedHeatmap, 
+         heatmap_legend_side = "top", 
+         column_title = mpr, 
+         column_title_side = "bottom",
+         column_title_gp = gpar(fontsize = 14, fontface = "bold")) 
+    draw(combinedHeatmapNoValues, 
+         heatmap_legend_side = "top", 
+         column_title = mpr, 
+         column_title_side = "bottom",
+         column_title_gp = gpar(fontsize = 14, fontface = "bold")) 
+    dev.off()
+  }
+  
+  # Convert the heatmap matrix to long format for ggplot2
+  plotDf <- as.data.frame(heatmapMatrix) %>%
+    rownames_to_column(var = "Sample") %>%
+    pivot_longer(-Sample, names_to = "CellType", values_to = "Proportion")
+  
+  # Ensure correct ordering
+  plotDf$Sample <- factor(plotDf$Sample, levels = sampleOrder)
+  plotDf$CellType <- factor(plotDf$CellType, levels = cellTypeOrder)
+  
+  # Plot stacked bar chart
+  barPlot <- ggplot(plotDf, aes(x = Sample, y = Proportion, fill = CellType)) +
+    geom_bar(stat = "identity", width = 0.8) +
+    scale_fill_manual(values = manualColors) +
+    labs(x = "Sample", y = "Proportion", fill = "Cell Type") +
+    ggtitle(mpr) +
+    theme_minimal(base_size = 12) +
+    theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5),
+          plot.title = element_text(hjust = 0.5, face = "bold"))
+  
+  # Save the plot
+  # TODO: Edit for 
+  ggsave(filename = paste0(plotDirBpPropDf, fprefix, "_", mpr, "_proportionsBarplot.pdf"),
+         plot = barPlot, width = 12, height = 8)
+  
+}
+```
+
+##### 2.4.2.2.2 Heatmaps with per sample and cell type error. 
+TODO: Create a new df with the average proportions per simulation (and seed). Here we are plotting all training data simulations individually. Next chunk: combine seeds next to each other?
+```{r}
+print(unique(masterPropDf$Reference))
+
+
+for (ref in unique(masterPropDf$Reference)){
+  
+  print(paste0("Running reference: ", ref))
+  
+  # Create heatmap directory for this reference. 
+  plotDirHmPropDf <- paste0(plotDirScaden, "/heatmaps/", ref, "/")
+  plotDirBpPropDf <- paste0(plotDirScaden, "/bar/", ref, "/")
+  # Will not overwrite any existing directories. 
+  dir.create(plotDirHmPropDf)
+  dir.create(plotDirBpPropDf)
+  #########################
+  # Get "All samples", "Reference", and "Training data" cell type proportions. 
+  #########################
+  
+  # if ref == "snCounts", rbind the fullRef row twice (because snCounts=fullRef -- not an LOO)
+  
+  refDf <- NULL
+  if (ref == "snCounts"){
+    refDf <- cbind(refProp$fullRef, refProp$fullRef) %>%
+      t()
+      
+    
+    # Add rownames back! 
+    colnames(refDf) <- rownames(refProp)
+    rownames(refDf) <- c("Original sn proportions", "snCounts")
+  
+    }else{
+      
+    refDf <- refProp %>%
+      select(c(fullRef, ref)) %>%
+      t() 
+    }
+  
+
+
+  # To match sampleGroup names and order. 
+  rownames(refDf) <- c("All samples", "Reference")
+  
+  # To match cell type order in heatmapMatrix.
+  refDf <- refDf[,cellTypeOrder]
+  
+  #########################
+  # Subset masterPropDf on reference for creating heatmapMatrix.
+  #########################
+  
+  # Add column for heatmap rownames to match sampleGroups. Also add column matching seed and   parameters combination
+  masterPropDfEdit <- masterPropDf %>%
+    filter(Reference==ref) %>%
+    mutate(typeName = paste0(sampleType,"_", sampleNameEdit), 
+           Param_Seed = paste0(Parameters,"_", Seed))
+  
+  # Remainer of results df. 
+  resDf <- masterPropDfEdit %>%
+    filter(sampleType != "sn")
+
+  ###########################################
+  ### Loop through Method_Param_Reference ###
+  ### Multiple parameters possible per reference 
+  ### Scripts are split by method so not really looping through methods rn. 
+  ###########################################
+
+  for (mpr in unique(resDf$Param_Seed)){
+    print(mpr)
+    
+    # Add error metrics per cell type 
+    ctypeError <- masterGranularMetricDf %>%
+      mutate(Param_Seed = paste0(Parameters, "_", Seed)) %>%
+      filter(Param_Seed == mpr)
+      
+    
+    # Filter sn counts. 
+    resDfTruth <- masterPropDfEdit %>%
+      filter(sampleType == "sn")
+    
+    # Filter mpr
+    resDfPredict <- masterPropDfEdit %>%
+      filter(Param_Seed==mpr)
+    
+    # Filter training data proportions for this Param_Seed and add to refDf
+    tempTrainProp <- masterPropAvgSeedSampleParam %>%
+      filter(Param_Seed == mpr) %>%
+      # select(-c(Parameters, Param_Seed)) %>%
+      ungroup %>%
+      select(colnames(refDf)) %>%
+      # TODO: Check why adding grouping variables?
+      as.matrix()
+    
+    if (nrow(tempTrainProp)!=1){
+      print(paste0("❌ Error with ", mpr, ". Skipping this MPR, but check this result.\n"))
+      next
+    }
+    
+    rownames(tempTrainProp) <- "Training data"
+    
+    tempRefDf <- rbind(refDf, 
+                       tempTrainProp)
+   
+    
+    # Rbind results and ground truth. 
+    tempPlotDf <- rbind(resDfPredict, resDfTruth)
+    
+    # Check to make sure all typeNames have all cell types in df
+    all_counts_equal <- length(unique(table(tempPlotDf$typeName))) == 1
+    
+    if (all_counts_equal==FALSE) {
+      cat("❌ typeName groups have unequal counts.\n")
+      print(table(tempPlotDf$typeName))  # Optional: see where they differ
+    }
+  
+    # Pivot to wide format
+    heatmapMatrix <- tempPlotDf %>%
+      select(typeName, manual.log.anot.fine, cellProportion) %>%
+      pivot_wider(names_from = manual.log.anot.fine, values_from = cellProportion) %>%
+      # Use mutated seq type _ sample name edit for new row names.
+      column_to_rownames("typeName") %>%
+      select(cellTypeOrder) %>%
+      as.matrix() %>%
+      rbind(tempRefDf)
+    
+    # Check to make sure all rownames are included in the ordering column of the samples in the heatmap. 
+    diff <- setdiff(rownames(heatmapMatrix), sampleOrder)
+    
+    if (length(diff)!=0) {
+      cat("❌ Missing sample names in sampleOrder")
+      print(diff)
+    }
+    
+    # Check to make sure all ordering columns are in rownames. 
+    diff <- setdiff(sampleOrder, rownames(heatmapMatrix))
+    if (length(diff)!=0) {
+      cat("❌ Missing sampleOrder names in heatMapmatrix rownames.")
+      print(diff)  
+    }
+    
+    # Reorder for plotting
+    heatmapMatrix <- heatmapMatrix[sampleOrder, cellTypeOrder]
+    
+    # Ensure that the color vector matches matrix columns
+    cellTypes <- colnames(heatmapMatrix)
+    stopifnot(all(cellTypes %in% names(manualColors)))
+    
+    # Create column-specific color functions: white → manual hue
+    col_fun_list <- setNames(
+      lapply(cellTypes, function(cell) {
+        vals <- heatmapMatrix[, cell]
+        colorRamp2(
+          c(min(vals, na.rm = TRUE), max(vals, na.rm = TRUE)),
+          c("white", manualColors[[cell]])
+        )
+      }),
+      cellTypes
+    )
+    
+    # Create a heatmap per cell type - printing values 
+    heatmap_list_values <- lapply(cellTypes, function(cell) {
+      Heatmap(heatmapMatrix[, cell, drop = FALSE],
+              name = cell,
+              col = col_fun_list[[cell]],
+              cluster_rows = FALSE,
+              cluster_columns = FALSE,
+              show_row_names = TRUE,
+              show_column_names = TRUE, 
+              column_names_rot = 45, 
+              row_gap = rowGaps,
+              row_split = rep(seq_along(sampleGroups), lengths(sampleGroups)),
+          cell_fun = function(j, i, x, y, width, height, fill) {
+      grid.text(
+        sprintf("%.2f", heatmapMatrix[i, cell]),
+        x, y,
+        gp = gpar(fontsize = 10, col = "black")
+      )
+      })
+    })
+    
+    # Create a heatmap per cell type - Not printing values
+    heatmap_list <- lapply(cellTypes, function(cell) {
+      Heatmap(heatmapMatrix[, cell, drop = FALSE],
+              name = cell,
+              col = col_fun_list[[cell]],
+              cluster_rows = FALSE,
+              cluster_columns = FALSE,
+              show_row_names = TRUE,
+              show_column_names = TRUE, 
+              column_names_rot = 45, 
+              row_gap = rowGaps,
+              row_split = rep(seq_along(sampleGroups), lengths(sampleGroups)))
+    })
+    
+    # Combine and draw the full heatmap
+    combinedHeatmap <- Reduce(`+`, heatmap_list_values)
+    combinedHeatmapNoValues <- Reduce(`+`, heatmap_list)
+    
+    pdf(paste0(plotDirHmPropDf, fprefix,"_", mpr, "_proportionsHeatmap.pdf"), 
+        height=10, 
+        width = 10)
+    draw(combinedHeatmap, 
+         heatmap_legend_side = "top", 
+         column_title = mpr, 
+         column_title_side = "bottom",
+         column_title_gp = gpar(fontsize = 14, fontface = "bold")) 
+    draw(combinedHeatmapNoValues, 
+         heatmap_legend_side = "top", 
+         column_title = mpr, 
+         column_title_side = "bottom",
+         column_title_gp = gpar(fontsize = 14, fontface = "bold")) 
+    dev.off()
+  
+    # Convert the heatmap matrix to long format for ggplot2
+    plotDf <- as.data.frame(heatmapMatrix) %>%
+      rownames_to_column(var = "Sample") %>%
+      pivot_longer(-Sample, names_to = "CellType", values_to = "Proportion")
+    
+    # Ensure correct ordering
+    plotDf$Sample <- factor(plotDf$Sample, levels = sampleOrder)
+    plotDf$CellType <- factor(plotDf$CellType, levels = cellTypeOrder)
+    
+    # Plot stacked bar chart
+    barPlot <- ggplot(plotDf, aes(x = Sample, y = Proportion, fill = CellType)) +
+      geom_bar(stat = "identity", width = 0.8) +
+      scale_fill_manual(values = manualColors) +
+      labs(x = "Sample", y = "Proportion", fill = "Cell Type") +
+      ggtitle(mpr) +
+      theme_minimal(base_size = 12) +
+      theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5),
+            plot.title = element_text(hjust = 0.5, face = "bold"))
+    
+    # Save the plot
+    # TODO: Edit for 
+    ggsave(filename = paste0(plotDirBpPropDf, fprefix, "_", mpr, "_proportionsBarplot.pdf"),
+           plot = barPlot, width = 12, height = 8)
+  }
+  
+}
+```
+
+##### 2.4.2.2.2 Dotplots with AE for every prediction. 
+```{r}
+print(unique(masterPropDf$Reference))
+
+for (ref in unique(masterPropDf$Reference)){
+  
+  print(paste0("Running reference: ", ref))
+  
+  # Create heatmap directory for this reference. 
+  # plotDirHmPropDf <- paste0(plotDirScaden, "/heatmaps/", ref, "/")
+  # plotDirBpPropDf <- paste0(plotDirScaden, "/bar/", ref, "/")
+  plotDirDpPropDf <- paste0(plotDirScaden, "/dot/", ref, "/")
+  # Will not overwrite any existing directories. 
+  dir.create(plotDirDpPropDf)
+  
+  #########################
+  # Get "All samples", "Reference", and "Training data" cell type proportions. 
+  #########################
+  
+  # if ref == "snCounts", rbind the fullRef row twice (because snCounts=fullRef -- not an LOO)
+  
+  refDf <- NULL
+  if (ref == "snCounts"){
+    refDf <- cbind(refProp$fullRef, refProp$fullRef) %>%
+      t()
+      
+    
+    # Add rownames back! 
+    colnames(refDf) <- rownames(refProp)
+    rownames(refDf) <- c("Original sn proportions", "snCounts")
+  
+    }else{
+      
+    refDf <- refProp %>%
+      select(c(fullRef, ref)) %>%
+      t() 
+    }
+  
+
+
+  # To match sampleGroup names and order. 
+  rownames(refDf) <- c("All samples", "Reference")
+  
+  # To match cell type order in heatmapMatrix.
+  refDf <- refDf[,cellTypeOrder]
+  
+  #########################
+  # Subset masterPropDf on reference for creating heatmapMatrix.
+  #########################
+  
+  # Add column for heatmap rownames to match sampleGroups. Also add column matching seed and   parameters combination
+  masterPropDfEdit <- masterPropDf %>%
+    filter(Reference==ref) %>%
+    mutate(typeName = paste0(sampleType,"_", sampleNameEdit), 
+           Param_Seed = paste0(Parameters,"_", Seed))
+  
+  # Remainer of results df. 
+  resDf <- masterPropDfEdit %>%
+    filter(sampleType != "sn")
+
+  ###########################################
+  ### Loop through Method_Param_Reference ###
+  ### Multiple parameters possible per reference 
+  ### Scripts are split by method so not really looping through methods rn. 
+  ###########################################
+
+  for (mpr in unique(resDf$Param_Seed)){
+    print(mpr)
+  
+  # Rbind results and ground truth. 
+    tempPlotDf <- resDf %>%
+      filter(Param_Seed == mpr) %>%
+      rbind(snDf) 
+    
+    # Check to make sure all typeNames have all cell types in df
+    all_counts_equal <- length(unique(table(tempPlotDf$typeName))) == 1
+    if (all_counts_equal==FALSE) {
+      cat("❌ typeName groups have unequal counts.\n")
+      print(table(tempPlotDf$typeName))  # Optional: see where they differ
+    }
+    
+    ########################################
+    # Added error metrics #
+    ########################################
+    
+    perCelltypeSampleErr <- absErrorMatrices(plotDf = tempPlotDf, 
+                                             keyColumn = "typeName",
+                                             sOrder = sampleOrder, 
+                                             ctypeOrder = cellTypeOrder)
+    
+    errMatrix <- perCelltypeSampleErr$errMatrix %>%
+      as.data.frame() %>%
+      drop_na() %>% 
+      as.matrix()
+    
+    # Custom diverging color function
+    minValue <- min(errMatrix, na.rm = TRUE)
+    maxValue <- max(errMatrix, na.rm = TRUE)
+    colFun <- colorRamp2(c(minValue, 0, maxValue), c("firebrick1", "white", "blue"))
+    
+
+    errHeatmap <- Heatmap(errMatrix,
+        name = "Truth - Prediction",  # legend label
+        col = colFun,
+        cluster_rows = FALSE,
+        cluster_columns = FALSE,
+        show_row_names = TRUE,
+        show_column_names = TRUE, 
+        column_names_rot = 45)
+    
+    dfLong <- as.data.frame(errMatrix) %>%
+      rownames_to_column("sample") %>%
+      pivot_longer(-sample, names_to = "cellType", values_to = "error") 
+    
+    dfLong$sample <- factor(dfLong$sample, levels = rownames(errMatrix))
+    dfLong$cellType <- factor(dfLong$cellType, levels = colnames(errMatrix))
+    
+    # Plot
+    errDotplot <- ggplot(dfLong, aes(x = cellType, y = sample)) +
+      geom_point(aes(size = abs(error), color = error)) +
+      scale_color_gradient2(low = "firebrick1", mid = "white", high = "blue", midpoint = 0, 
+                            name = "Truth - Prediction") +
+      scale_size(range = c(1, 6), name = "|Error|") +
+      theme_minimal() +
+      theme(axis.text.x = element_text(angle = 45, hjust = 1),
+            panel.grid = element_blank()) +
+      labs(x = "Cell Type", y = "Sample")
+    
+    ggsave(paste0(plotDirDpPropDf, fprefix, "_", mpr, "_absoluteError_dotplot.pdf"), 
+           height=5, 
+           width=5)
+}
+}
+```
+##### 2.4.2.2.3 Dotplots with AE average + stdev over seeds 
+```{r}
+print(unique(masterPropDf$Reference))
+
+for (ref in unique(masterPropDf$Reference)){
+  
+  print(paste0("Running reference: ", ref))
+  
+  # Create heatmap directory for this reference. 
+  # plotDirHmPropDf <- paste0(plotDirScaden, "/heatmaps/", ref, "/")
+  # plotDirBpPropDf <- paste0(plotDirScaden, "/bar/", ref, "/")
+  plotDirDpPropDf <- paste0(plotDirScaden, "/dot/", ref, "/")
+  # Will not overwrite any existing directories. 
+  dir.create(plotDirDpPropDf)
+  
+  #########################
+  # Get "All samples", "Reference", and "Training data" cell type proportions. 
+  #########################
+  
+  # if ref == "snCounts", rbind the fullRef row twice (because snCounts=fullRef -- not an LOO)
+  
+  refDf <- NULL
+  if (ref == "snCounts"){
+    refDf <- cbind(refProp$fullRef, refProp$fullRef) %>%
+      t()
+      
+    
+    # Add rownames back! 
+    colnames(refDf) <- rownames(refProp)
+    rownames(refDf) <- c("Original sn proportions", "snCounts")
+  
+    }else{
+      
+    refDf <- refProp %>%
+      select(c(fullRef, ref)) %>%
+      t() 
+    }
+  
+
+
+  # To match sampleGroup names and order. 
+  rownames(refDf) <- c("All samples", "Reference")
+  
+  # To match cell type order in heatmapMatrix.
+  refDf <- refDf[,cellTypeOrder]
+  
+  #########################
+  # Subset masterPropDf on reference for creating heatmapMatrix.
+  #########################
+  
+  # Add column for heatmap rownames to match sampleGroups. Also add column matching seed and   parameters combination
+  masterPropDfEdit <- masterPropDf %>%
+    filter(Reference==ref) %>%
+    mutate(typeName = paste0(sampleType,"_", sampleNameEdit), 
+           Param_Seed = paste0(Parameters,"_", Seed))
+  
+  # Remainer of results df. Group by Parameter and average accross seeds.  
+  resDf <- masterPropDfEdit %>%
+    filter(sampleType != "sn") 
+  
+  snDf <- masterPropDfEdit %>%
+    filter(sampleType == "sn")
+    
+
+  ###########################################
+  ### Loop through Method_Param_Reference ###
+  ### Multiple parameters possible per reference 
+  ### Scripts are split by method so not really looping through methods rn. 
+  ###########################################
+
+  for (pr in unique(resDf$Parameters)){
+    print(pr)
+  
+  # Rbind results and ground trut. 
+  tempPlotDf <- resDf %>%
+      filter(Parameters == mpr) %>%
+      rbind(snDf) 
+    
+    # Check to make sure all typeNames have all cell types in df
+    all_counts_equal <- length(unique(table(tempPlotDf$typeName))) == 1
+    if (all_counts_equal==FALSE) {
+      cat("❌ typeName groups have unequal counts.\n")
+      print(table(tempPlotDf$typeName))  # Optional: see where they differ
+    }
+    
+    ########################################
+    # Added error metrics #
+    ########################################
+    
+    perCelltypeSampleErr <- absErrorMatrices(plotDf = tempPlotDf, 
+                                             keyColumn = "typeName",
+                                             sOrder = sampleOrder, 
+                                             ctypeOrder = cellTypeOrder)
+    
+    errMatrix <- perCelltypeSampleErr$errMatrix %>%
+      as.data.frame() %>%
+      drop_na() %>% 
+      as.matrix()
+    
+    # Custom diverging color function
+    minValue <- min(errMatrix, na.rm = TRUE)
+    maxValue <- max(errMatrix, na.rm = TRUE)
+    colFun <- colorRamp2(c(minValue, 0, maxValue), c("firebrick1", "white", "blue"))
+    
+
+    errHeatmap <- Heatmap(errMatrix,
+        name = "Truth - Prediction",  # legend label
+        col = colFun,
+        cluster_rows = FALSE,
+        cluster_columns = FALSE,
+        show_row_names = TRUE,
+        show_column_names = TRUE, 
+        column_names_rot = 45)
+    
+    dfLong <- as.data.frame(errMatrix) %>%
+      rownames_to_column("sample") %>%
+      pivot_longer(-sample, names_to = "cellType", values_to = "error") 
+    
+    dfLong$sample <- factor(dfLong$sample, levels = rownames(errMatrix))
+    dfLong$cellType <- factor(dfLong$cellType, levels = colnames(errMatrix))
+    
+    # Plot
+    errDotplot <- ggplot(dfLong, aes(x = cellType, y = sample)) +
+      geom_point(aes(size = abs(error), color = error)) +
+      scale_color_gradient2(low = "firebrick1", mid = "white", high = "blue", midpoint = 0, 
+                            name = "Truth - Prediction") +
+      scale_size(range = c(1, 6), name = "|Error|") +
+      theme_minimal() +
+      theme(axis.text.x = element_text(angle = 45, hjust = 1),
+            panel.grid = element_blank()) +
+      labs(x = "Cell Type", y = "Sample")
+    
+    ggsave(paste0(plotDirDpPropDf, fprefix, "_", mpr, "_absoluteError_dotplot.pdf"), 
+           height=5, 
+           width=5)
+}
+}
+```
+# ---
+# 6 New visualizations
+## 6.1 Global parameters
+```{r}
+source(paste0(scriptDir, "/01_Deconvolution_deconBenchmark_visualizationFunctions.R"))
+source(paste0(scriptDir, "/01_Deconvolution_deconBenchmark_metricFunctions.R"))
+manualColors <- c(
+  "Myeloid"              = "skyblue",  # Red
+  "CAF.Endo"        = "#E41A1C",  # Blue
+  "Tcells" = "forestgreen",  # Green
+  "Bcells"     = "magenta",  # Purple
+  "Plasma"      = "orange",  # Orange
+  "bad" = "darkgrey",
+  "CTVT"           = "purple"   # Brown
+)
+
+# plotDirHmPropDf <- paste0(plotDir, "/heatmaps/propDf/")
+cellTypeOrder <- c("CTVT", "CAF.Endo", "Myeloid", 
+                   "Bcells", "Plasma",  "Tcells", "bad")
+
+sampleGroups <- list(
+  c("Ground truth",  "Reference", "Training data"),
+  # c("sn_3302T1p", "bc_3302T1p"),
+  c("sn_3302T1b", "bn_3302T1b", "bc_3302T1b", "bc_3302T1p"),
+  # c("sn_3302T1p", "bn_3302T1b", "bc_3302T1p"),
+  c("sn_3621T","bn_3621T", "bc_3621T"),
+  c("sn_3203T1A2c", "bn_3203T1A2c", "bc_3203T1A2c"),
+  c("sn_3145T1c","bc_3145T1c" , "bn_3145T1c"),
+  c("sn_3145T11a", "bn_3145T11a", "bc_3145T11a" ),
+  c("bc_3203T1A2b",  "bn_3203T1A2b"),
+  c("bc_3776T"),
+  c("bc_3775T" ),
+  c("bc_3774T"),
+  c("bc_3772T"),
+  c("bc_3770T"),
+  c("bc_3764T"),
+  c("bc_3761T"),
+  c("bc_3760T"),
+  c("bc_3759T"),
+  c("bc_3752T"))
+  
+
+# Flatten list to get sampleOrder (same as yours)
+sampleOrder <- unlist(sampleGroups)
+
+# Determine where to insert gaps: after each group
+rowGaps <- unit(rep(5, length(sampleGroups) - 1), "pt")
+
+# refProp <- read.xlsx(paste0(wDir, "13_Results/relativeProportionCellTypesPerReference.xlsx")) %>%
+#   column_to_rownames("cellTypes") %>%
+#   as.data.frame()
+
+# # Filter only "sn" samples for true proportions df. Never changes. 
+# snDf <- masterPropDf %>%
+#     filter(sampleType == "sn")%>%
+#     mutate(typeName = paste0(sampleType,"_", sampleNameEdit))
+```
+
+## 6.1 Proportion dataframes
+### 6.1.1 Reference proportions
+For each reference (ex. snCounts), we want to compute the average prop of cell types across all samples. 
+```{r}
+snCell <- rowSums(snCellCounts)
+
+snCellProp <- snCell / sum(snCell) 
+```
+
+### 6.1.2 Per Param_Seed
+Per combination of parameters, 
+```{r}
+print(unique(masterPropDf$Reference))
+
+for (ref in unique(masterPropDf$Reference)){
+  
+  print(paste0("Running reference: ", ref))
+  
+  # Create heatmap directory for this reference. 
+  plotDirHmPropDf <- paste0(plotDirScaden, "/heatmaps/", ref, "/")
+  plotDirBpPropDf <- paste0(plotDirScaden, "/bar/", ref, "/")
+  plotDirBarPropDf <- paste0(plotDirScaden, "/bar/", ref, "/")
+  # Will not overwrite any existing directories. 
+  dir.create(plotDirHmPropDf, recursive = T)
+  dir.create(plotDirBpPropDf,recursive = T)
+  dir.create(plotDirBarPropDf,recursive = T)
+  
+  #########################
+  # Get "All samples", "Reference", and "Training data" cell type proportions. 
+  #########################
+  
+  # if ref == "snCounts", rbind the fullRef row twice (because snCounts=fullRef -- not an LOO)
+  
+  
+  
+  refDf <- NULL
+  if (ref == "snCounts"){
+    refDf <- rbind(snCellProp, snCellProp) %>%
+      as.data.frame() %>%
+      select(cellTypeOrder)
+      
+    
+    # Add rownames back! 
+    # colnames(refDf) <- cellTypeOrder
+    rownames(refDf) <- c("Ground truth", "snCounts")
+  
+    }else{
+      
+    refDf <- refProp %>%
+      select(c(fullRef, ref)) %>%
+      t() 
+  }
+
+  # To match sampleGroup names and order. --> For LOO data.
+  rownames(refDf) <- c("Ground truth", "Reference")
+  
+  # To match cell type order in heatmapMatrix.
+  refDf <- refDf[,cellTypeOrder]
+  
+  #########################
+  # Subset masterPropDf on reference for creating heatmapMatrix.
+  #########################
+  
+  # Add column for heatmap rownames to match sampleGroups. Also add column matching seed and   parameters combination
+  masterPropDfEdit <- masterPropDf %>%
+    filter(Reference==ref) %>%
+    mutate(typeName = paste0(sampleType,"_", sampleNameEdit), 
+           Param_Seed = paste0(Parameters,"_", Seed))
+  
+  # Remainder of results df. 
+  resDf <- masterPropDfEdit %>%
+    filter(sampleType != "sn")
+
+  ###########################################
+  ### Loop through Method_Param_Reference ###
+  ### Multiple parameters possible per reference 
+  ### Scripts are split by method so not really looping through methods rn. 
+  ###########################################
+  # a <- setdiff( unique(resDf$Param_Seed), unique(masterPropAvgParamSeed$Param_Seed))
+
+  for (mpr in unique(resDf$Param_Seed)){
+    print(mpr)
+    
+    # Filter sn counts. 
+    resDfTruth <- masterPropDfEdit %>%
+      filter(sampleType == "sn")
+    
+    # Filter mpr
+    resDfPredict <- masterPropDfEdit %>%
+      filter(Param_Seed==mpr)
+    
+    # Filter training data proportions for this Param_Seed and add to refDf
+    tempTrainProp <- masterPropAvgParamSeed %>%
+      filter(Param_Seed == mpr) %>%
+      # select(-c(Parameters, Param_Seed)) %>%
+      ungroup %>%
+      select(colnames(refDf)) %>%
+      # TODO: Check why adding grouping variables?
+      as.matrix()
+    
+    rownames(tempTrainProp) <- "Training data"
+    
+    tempRefDf <- rbind(refDf, 
+                       tempTrainProp)
+   
+    
+    # Rbind results and ground truth. 
+    tempPlotDf <- rbind(resDfPredict, resDfTruth) %>%
+      filter(typeName %in% sampleOrder)
+    
+    # Check to make sure all typeNames have all cell types in df
+    all_counts_equal <- length(unique(table(tempPlotDf$typeName))) == 1
+    
+    if (all_counts_equal==FALSE) {
+      cat("❌ typeName groups have unequal counts.\n")
+      print(table(tempPlotDf$typeName))  # Optional: see where they differ
+    }
+  
+    # Pivot to wide format
+    heatmapMatrix <- tempPlotDf %>%
+      select(typeName, manual.log.anot.fine, cellProportion) %>%
+      pivot_wider(names_from = manual.log.anot.fine, values_from = cellProportion) %>%
+      # Use mutated seq type _ sample name edit for new row names.
+      column_to_rownames("typeName") %>%
+      select(cellTypeOrder) %>%
+      as.matrix() %>%
+      rbind(tempRefDf)
+    
+    # Check to make sure all rownames are included in the ordering column of the samples in the heatmap. 
+    diff <- setdiff(rownames(heatmapMatrix), sampleOrder)
+    
+    if (length(diff)!=0) {
+      cat("❌ Missing sample names in sampleOrder")
+      print(diff)
+    }
+    
+    # Check to make sure all ordering columns are in rownames. 
+    diff <- setdiff(sampleOrder, rownames(heatmapMatrix))
+    if (length(diff)!=0) {
+      cat("❌ Missing sampleOrder names in heatMapmatrix rownames.")
+      print(diff)  
+    }
+    
+    # Reorder for plotting
+    heatmapMatrix <- heatmapMatrix[sampleOrder, cellTypeOrder]
+    
+    # Ensure that the color vector matches matrix columns
+    cellTypes <- colnames(heatmapMatrix)
+    stopifnot(all(cellTypes %in% names(manualColors)))
+    
+    # Create column-specific color functions: white → manual hue
+    col_fun_list <- setNames(
+      lapply(cellTypes, function(cell) {
+        vals <- heatmapMatrix[, cell]
+        colorRamp2(
+          c(min(vals, na.rm = TRUE), max(vals, na.rm = TRUE)),
+          c("white", manualColors[[cell]])
+        )
+      }),
+      cellTypes
+    )
+    
+    # Create a heatmap per cell type - printing values 
+    heatmap_list_values <- lapply(cellTypes, function(cell) {
+      Heatmap(heatmapMatrix[, cell, drop = FALSE],
+              name = cell,
+              col = col_fun_list[[cell]],
+              cluster_rows = FALSE,
+              cluster_columns = FALSE,
+              show_row_names = TRUE,
+              show_column_names = TRUE, 
+              column_names_rot = 45, 
+              row_gap = rowGaps,
+              row_split = rep(seq_along(sampleGroups), lengths(sampleGroups)),
+          cell_fun = function(j, i, x, y, width, height, fill) {
+      grid.text(
+        sprintf("%.2f", heatmapMatrix[i, cell]),
+        x, y,
+        gp = gpar(fontsize = 10, col = "black")
+      )
+      })
+    })
+    
+    # Create a heatmap per cell type - Not printing values
+    heatmap_list <- lapply(cellTypes, function(cell) {
+      Heatmap(heatmapMatrix[, cell, drop = FALSE],
+              name = cell,
+              col = col_fun_list[[cell]],
+              cluster_rows = FALSE,
+              cluster_columns = FALSE,
+              show_row_names = TRUE,
+              show_column_names = TRUE, 
+              column_names_rot = 45, 
+              row_gap = rowGaps,
+              row_split = rep(seq_along(sampleGroups), lengths(sampleGroups)))
+    })
+    
+    # Combine and draw the full heatmap
+    combinedHeatmap <- Reduce(`+`, heatmap_list_values)
+    combinedHeatmapNoValues <- Reduce(`+`, heatmap_list)
+    
+    pdf(paste0(plotDirHmPropDf, fprefix,"_", mpr, "_proportionsHeatmap.pdf"), 
+        height=10, 
+        width = 10)
+    draw(combinedHeatmap, 
+         heatmap_legend_side = "top", 
+         column_title = mpr, 
+         column_title_side = "bottom",
+         column_title_gp = gpar(fontsize = 14, fontface = "bold")) 
+    draw(combinedHeatmapNoValues, 
+         heatmap_legend_side = "top", 
+         column_title = mpr, 
+         column_title_side = "bottom",
+         column_title_gp = gpar(fontsize = 14, fontface = "bold")) 
+    dev.off()
+    
+    
+    
+    
+    
+    ####### Create proportion bars instead of cells. ##########
+    # -------------------- Create grouped stacked barplot --------------------
+
+    # Convert heatmapMatrix to long format
+    barPlotDf <- as.data.frame(heatmapMatrix) %>%
+      rownames_to_column("typeName") %>%
+      pivot_longer(-typeName, names_to = "cellType", values_to = "proportion")
+    
+    # Create sampleGroup labels based on sampleGroups list
+    sampleGroupMap <- do.call(rbind, lapply(seq_along(sampleGroups), function(i) {
+      data.frame(
+        typeName = sampleGroups[[i]],
+        sampleGroup = paste0("Group_", i)
+      )
+    }))
+    
+   # Ensure sample order is respected
+  barPlotDf$typeName <- factor(barPlotDf$typeName, levels = rev(sampleOrder))  # rev() makes top-to-bottom match sampleGroups
+  
+  # Plot
+  ggBar <- ggplot(barPlotDf, aes(y = typeName, x = proportion, fill = cellType)) +
+    geom_bar(stat = "identity", position = "stack", width = 0.8) +
+    scale_fill_manual(values = manualColors) +
+    labs(
+      title = paste("Cell Type Proportions -", mpr),
+      y = "Sample",
+      x = "Proportion"
+    ) +
+    theme_bw(base_size = 12) +
+    theme(
+      axis.text.y = element_text(size = 8),
+      panel.grid = element_blank()
+    )
+
+
+    
+    # Save the plot
+    ggsave(filename = paste0(plotDirBarPropDf, 
+                             fprefix, 
+                             "_",
+                             mpr, 
+                             "_barplotFaceted.pdf"),
+           plot = ggBar, height = 5, width = 6)
+
+  }
+  
+}
+```
+
