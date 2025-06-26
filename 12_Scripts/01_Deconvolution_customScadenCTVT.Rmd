@@ -22,7 +22,7 @@ output: html_document
 # 
 # BiocManager::install("zellkonverter")
 ```
-### 0.1.1 Library
+### 0.1.1 Librar
 ```{r echo=F, message=F, warning=FALSE}
 set.seed(123)
 library(BayesPrism)
