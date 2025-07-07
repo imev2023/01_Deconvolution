@@ -1,0 +1,900 @@
+---
+title: "03_Deconvolution_CTVT_customScadenResults"
+author: "IMEV2"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+# 0 Environment
+## 0.1 Packages
+### 0.1.1 Installs
+```{r echo=F, message=F, warning=FALSE}
+# if (!requireNamespace("devtools", quietly = TRUE)) {
+#    install.packages("devtools")
+# }
+# devtools::install_github("Danko-Lab/BayesPrism/BayesPrism")
+```
+### 0.1.1 Library
+```{r echo=F, message=F, warning=FALSE}
+set.seed(123)
+library(tidyverse)
+library(openxlsx)
+library(SingleCellExperiment)
+setClassUnion("ExpData", c("matrix", "SummarizedExperiment"))
+```
+
+## 0.2 Paths
+```{r echo=F, message=FALSE, warning=FALSE}
+wDir <- paste0("~/gitClones/01_Deconvolution/03_Deconvolution_CTVT/")
+fprefix <- "03_Deconvolution_CTVT_customScaden"
+dataDir <- paste0(wDir, "/031_Data/")
+resDir <- paste0(wDir, "/033_Results/", fprefix, "/")
+plotDir <- paste0(wDir, "/034_Plots/", fprefix, "/")
+scriptDir <-  paste0(wDir, "/032_Scripts/")
+resDirScaden <- paste0(resDir, "4_predict/")
+```
+
+# ----- snCounts only ------
+# 2 Scaden Custom
+## 2.1 Ground truth percentages
+Of note, because for 3302T1b we have b_p and b (for bulk cell), I am duplicating the ground truth results for 3302T1b in the reference counts, but calling these "3302T1bp". This way, every unique sampleNameEdit will have its own reference, which is needed for computing the error metrics. 
+```{r}
+snCountsFinal_colData <- read.xlsx(paste0(resDir, fprefix, "_snCountsFinal_colData.xlsx"))
+
+# Create the cell count matrix: rows = cell types, columns = samples
+snCellCounts <- snCountsFinal_colData %>%
+  as.data.frame() %>%
+  group_by(manual.log.anot.fine,
+           Sample) %>%
+  summarise(cellCount = n()) %>%
+  pivot_wider(names_from = Sample,
+              values_from = cellCount,
+              values_fill = 0) %>%
+  column_to_rownames("manual.log.anot.fine")
+
+# Convert to percentages (column-wise normalization)
+snCellPercentages <- sweep(snCellCounts,
+                           2,
+                           colSums(snCellCounts),
+                           FUN = "/") %>%
+  round(3) %>%
+  t() %>%
+  as.data.frame() %>%
+  rownames_to_column("sample") %>%
+  pivot_longer(
+    cols = -sample,
+    names_to = "manual.log.anot.fine",
+    values_to = "cellProportion"
+  ) %>%
+  # If sample name ends in b_n, type is bn (bulk nuc). Otherwise, it is bc (bulk cell)
+  mutate(
+    sampleType = "sn",
+    sampleName = sample,
+    sampleNameEdit = str_remove(sampleName, "[abc]")
+  ) %>%
+  select(sampleName, sampleType, manual.log.anot.fine, cellProportion, sampleNameEdit) %>%
+  mutate("deconvBenchResType" = "groundTruth", # P for proportion
+         "Method" = NA,
+         "Parameters" = NA,
+         "Reference" = "snCounts",
+         "Seed"=NA)
+
+# rm(snCellCounts, snCountsFinal_colData)
+# gc()
+```
+
+## 2.2 Read in results 
+### 2.2.1 Performance metrics
+#### 2.2.1.1 Set up dataframes 
+```{r}
+masterPropDf <- data.frame(sampleName = c(),
+                           sampleType = c(),
+                           manual.log.anot.fine = c(),
+                           cellProportion =c(),
+                           sampleNameEdit = c(),
+                           deconvBenchResType = c(),
+                           Method = c(),
+                           Parameters = c())
+
+
+masterGlobMetricDf <- data.frame(bulkCellEstimate = c(),
+                             bulkNucEstimate = c(),
+                             Method = c(),
+                             Parameters = c(),
+                             Metric = c())
+
+masterGranularMetricDf <- data.frame(
+  Metric = c(),
+  Value = c(),
+  Subject = c(),
+  Estimate = c()
+)
+
+masterRawPEDf <- data.frame(
+  Colname = c(),
+  Rowname = c(),
+  Estimate = c(),
+  Method = c(),
+  Parameters = c(),
+  Reference = c(),
+  Seed = c()
+)
+
+# Script with functions changes for DFT1 because we are using a different column with the annotations. 
+# TODO for future iterations, add symlink to script so that column name is dynamic. 
+source(paste0(scriptDir, "/03_Deconvolution_CTVT_metricFunctions.R")) 
+# 01_Deconvolution_deconBenchmark_metricFunctions.R
+```
+
+#### 2.2.1.2 Append ground truth results to the dataframes. 
+```{r}
+# Saving with ground truth percentages (only for the first results, otherwise will be repeated each time.)
+masterPropDf <- rbind(masterPropDf,
+                      snCellPercentages)
+```
+
+
+#### 2.2.1.3 Loop through custom results directories. 
+Each directory is named as the model (all params).
+See comment above about 3302T1b (for which we have 2 bulk cell results).
+Therefore adding if statement, if sample name is 3302T1b, the corresponding sampleName should be 3302T1b_p and sampleNameEdit (matched name to the sn reference counts) will be 3302T1bp.
+```{r, warning=FALSE}
+tempResDir <- resDirScaden
+
+subDirs <- list.dirs(tempResDir, full.names = TRUE, recursive = FALSE)
+
+### TODO make pattern and ref dynamic for LOO models.
+pattern <- "snCounts_bal(\\w+)_thresh(\\w+)_ran(\\d+)_var([0-9.]+)_samp(\\d+)_cells(\\d+)_seed(\\d+)_lr([0-9.]+)_steps(\\d+)"
+
+ref <- "snCounts"
+
+paramsPattern <- paste0("(?<=", ref, "_).*?(?=_seed)")
+
+for (sub in subDirs){
+
+  # Get file name and parameters
+  tempPrefix <- basename(sub)
+  matches <- str_match(tempPrefix, pattern)
+  filePath <- list.files(sub,
+                         pattern="_Predicted.txt$",
+                         full.names = T)
+
+  print(paste0("Saving: ", tempPrefix))
+
+  if(length(filePath)!=1){
+    print(paste0("Error with ", tempPrefix))
+    break
+  }
+
+  temp <- read.table(filePath) %>%
+    as.data.frame() %>%
+    rownames_to_column("sample") %>%
+    pivot_longer(
+      cols = -sample,
+      names_to = "manual.log.anot.fine",
+      values_to = "cellProportion"
+    ) %>%
+    # If sample name ends in _n, type is bn (bulk nuc). Otherwise, it is bc (bulk cell)
+    mutate(
+      sampleType = case_when(
+        str_ends(sample, "_n") ~ "bn",
+        TRUE ~ "bc"
+      ),
+      # If sample type is bn, remove b_n to save sample id only.
+      sampleName = case_when(
+        sampleType == "bn" ~ str_remove(sample, "_n$"),
+        TRUE ~ sample
+      ), # If sample type is bn, remove a or b from the end of the sample name.
+      sampleNameEdit = case_when(
+        sampleType == "bn" ~ str_remove(sampleName, "[ab]"),
+        TRUE ~ sampleName
+      ),
+    ) %>%
+    select(sampleName,
+           sampleType,
+           manual.log.anot.fine,
+           cellProportion,
+           sampleNameEdit) %>%
+    # Method details
+    mutate("deconvBenchResType" = "P", # P for proportion
+           "Method" = "Scaden",
+           "Parameters" = str_replace(tempPrefix, "_seed\\d+", ""),
+           "Reference" = ref,
+           "Seed"=matches[,8]) # saves as string
+  
+
+  # Rbind proportion outputs to compute error metrics.
+  tempResGround <- rbind(temp,
+                          snCellPercentages)
+
+  # Append results to masterPropDf.
+  masterPropDf <- rbind(masterPropDf,
+                        temp)
+
+  # Compute and rbind metric outputs
+  tempResMetrics <- deconError(tempResGround,
+                                parameters = str_replace(tempPrefix, "_seed\\d+", ""),
+                                method = "Scaden",
+                                reference=ref,
+                                seed=matches[,8])
+  # Rbind metric measurements
+  masterGlobMetricDf <- rbind(masterGlobMetricDf,
+                              tempResMetrics$overviewMetrics)
+
+  masterGranularMetricDf <- rbind(masterGranularMetricDf,
+                                  tempResMetrics$granularMetrics)
+  
+  masterRawPEDf <- rbind(masterRawPEDf, 
+                         tempResMetrics$rawPredictionError)
+
+  # Cleanup
+  rm(temp,
+     matches,
+     tempResGround,
+     tempResMetrics)
+
+  gc()
+
+}
+
+# 
+masterPropDfNew <- masterPropDf %>%
+  mutate(Param_Seed = paste0(Parameters, "_seed", Seed))
+
+```
+### 2.2.2 Training data distribution
+#### 2.2.2.1 Set up dataframes
+Split by absolute counts and proportions. 
+```{r}
+masterTrainPropDf <- data.frame("CTVT"=c(),
+                             "bad"=c(),
+                             "Bcells"=c(),
+                             "Plasma"=c(),
+                             "CAF.Endo"=c(),
+                             "Tcells"=c() ,
+                             "Myeloid"=c() ,
+                             "SampleID"=c(),
+                             "Dataset"=c(),
+                             "Source"=c(),
+                             "Method"=c(),
+                             "Parameters"=c(),
+                             "Reference"=c(),
+                             "Seed" =c()
+)
+
+masterTrainCountsDf <- data.frame("CTVT"=c(),
+                             "bad"=c(),
+                             "Bcells"=c(),
+                             "Plasma"=c(),
+                             "CAF.Endo"=c(),
+                             "Tcells"=c() ,
+                             "Myeloid"=c() ,
+                             "SampleID"=c(),
+                             "Dataset"=c(),
+                             "Source"=c(),
+                             "Method"=c(),
+                             "Parameters"=c(),
+                             "Reference"=c(),
+                             "Seed" =c()
+)
+```
+
+#### 2.2.2.2 Proportion results
+```{r}
+tempSimDir <- paste0(resDir, "/1_simulate/") # switch with true directory once all results are finished.
+
+subDirs <- list.dirs(tempSimDir,
+                     full.names = TRUE,
+                     recursive = FALSE)
+
+# Get full subdirectory paths in tempSimDir
+# Get only the **directory names** (not full paths)
+subDirNames <- basename(subDirs)
+
+# Get directory names 
+predictResDirNames <- basename(list.dirs(tempResDir, full.names = TRUE, recursive = FALSE))
+
+# Filter subDirs by matching names
+matchedSubDirs <- subDirs[subDirNames %in% predictResDirNames]
+
+# Result: matchedSubDirs contains full paths of matching subdirectories
+matchedSubDirs
+
+### TODO make pattern and ref dynamic for LOO models.
+pattern <- "snCounts_bal(\\w+)_thresh(\\w+)_ran(\\d+)_var([0-9.]+)_samp(\\d+)_cells(\\d+)_seed(\\d+)_lr([0-9.]+)_steps(\\d+)"
+
+ref <- "snCounts"
+
+paramsPattern <- paste0("(?<=", ref, "_).*?(?=_seed)")
+
+for (sub in matchedSubDirs){
+
+  # Get file name and parameters
+  tempPrefix <- basename(sub)
+  matches <- str_match(tempPrefix, pattern)
+  filePath <- list.files(sub,
+                         pattern="Proportions.csv",
+                         full.names = T)
+
+  print(paste0("Saving: ", tempPrefix))
+
+  if(length(filePath)!=1){
+    print(paste0("Error with ", tempPrefix))
+    break
+  }
+
+  temp <- read_csv(filePath,
+                   show_col_types = F) %>%
+    filter(SampleID!="SampleID") %>%
+    mutate("Method" = "Scaden",
+           "Parameters" = str_replace(tempPrefix, "_seed\\d+", ""),
+           "Reference" = ref,
+           "Seed"=matches[,8]) # saves as string
+
+
+    masterTrainPropDf <- rbind(masterTrainPropDf,
+                            temp)
+
+
+}
+
+# Average all proportions for a given training dataset. We can later average over samples, seeds, and/or parameters depending on what we want to look for. But the following df is essential for checking how the training data for a given Prediction.txt file may have been of influence.
+# masterPropAvgSeedSampleParam <- masterTrainPropDf  %>%
+#            group_by(Seed, SampleID, Parameters) %>%
+#            summarise(across(1:6,
+#                             mean,
+#                             na.rm = TRUE)) %>%
+#   mutate(Average = "seedSampleParameters",
+#          Type = "proportions")
+
+masterPropAvgParamSeed <- masterTrainPropDf  %>%
+          mutate(Param_Seed = paste0(Parameters, "_", Seed)) %>%
+           group_by(Param_Seed) %>%
+           summarise(across(1:7,
+                            mean,
+                            na.rm = TRUE)) %>%
+  mutate(Average = "Param_Seed",
+         Type = "proportions")
+
+
+# Now repeating for absolute counts rather than proportions. I.e. if sampling more cells or more pseudobulk samples performs better, could it be because of more in general? Or does it perform even better for unbalanced because you recover the immune cell types?
+
+for (sub in matchedSubDirs){
+
+  # Get file name and parameters
+  tempPrefix <- basename(sub)
+  matches <- str_match(tempPrefix, pattern)
+  filePath <- list.files(sub,
+                         pattern="Counts.csv",
+                         full.names = T)
+
+  print(paste0("Saving: ", tempPrefix))
+
+  if(length(filePath)!=1){
+    print(paste0("Error with ", tempPrefix))
+    break
+  }
+
+  temp <- read_csv(filePath,
+                   show_col_types = F) %>%
+    filter(SampleID!="SampleID") %>%
+    mutate("Method" = "Scaden",
+           "Parameters" = str_extract(tempPrefix, paramsPattern),
+           "Reference" = ref,
+           "Seed"=matches[,8]) # saves as string
+
+
+    masterTrainCountsDf <- rbind(masterTrainCountsDf,
+                            temp)
+}
+
+# Average all proportions for a given training dataset.
+# TODO: Check This works when there are mixed samples (percRan).
+masterCountsAvgParamSeed <- masterTrainCountsDf %>%
+  mutate(Param_Seed = paste0(Parameters, "_", Seed)) %>%
+           group_by(Param_Seed) %>%
+           summarise(across(1:7,
+                            mean,
+                            na.rm = TRUE)) %>%
+  mutate(Average = "Param_Seed",
+         Type = "proportions")
+```
+
+## 2.3 Write results
+### 2.3.1 All training data
+#### 2.3.1.1 Performance metrics
+```{r}
+openxlsx::write.xlsx(masterPropDf,
+           paste0(resDir,
+                  fprefix,
+                  "_masterProportionDf.xlsx"))
+
+
+openxlsx::write.xlsx(masterGlobMetricDf,
+           paste0(resDir,
+                  fprefix,
+                  "_masterGlobalMetricDf.xlsx"))
+
+
+openxlsx::write.xlsx(masterGranularMetricDf,
+           paste0(resDir,
+                  fprefix,
+                  "_masterGranularMetricDf.xlsx"))
+
+
+
+openxlsx::write.xlsx(masterRawPEDf,
+                     paste0(resDir,
+                  fprefix,
+                  "_masterRawPEDf.xlsx"))
+
+
+```
+
+#### 2.3.1.2 Training data distribution
+```{r}
+# openxlsx::write.xlsx(masterPropAvgSeedSampleParam,
+#            paste0(resDir,
+#                   fprefix,
+#                   "_masterPropAvgSeedSampleParam.xlsx"))
+# 
+# openxlsx::write.xlsx(masterCountsAvgSeedSampleParam,
+#            paste0(resDir,
+#                   fprefix,
+#                   "_masterCountsAvgSeedSampleParam.xlsx"))
+
+openxlsx::write.xlsx(masterTrainCountsDf,
+           paste0(resDir,
+                  fprefix,
+                  "_masterTrainCountsDf.xlsx"))
+
+openxlsx::write.xlsx(masterCountsAvgParamSeed,
+           paste0(resDir,
+                  fprefix,
+                  "_masterCountsAvgParamSeed.xlsx"))
+
+openxlsx::write.xlsx(masterTrainPropDf,
+           paste0(resDir,
+                  fprefix,
+                  "_masterTrainPropDf.xlsx"))
+
+
+openxlsx::write.xlsx(masterPropAvgParamSeed,
+           paste0(resDir,
+                  fprefix,
+                  "_masterPropAvgParamSeed.xlsx"))
+```
+
+# ----- snCountsNoBad only ------
+# 2 Scaden Custom
+```{r}
+# Reference == All cells all features
+resDirScaden <- paste0(resDir, "01_Deconvolution_customScadenDFT1/results/")
+fprefix <- "01_Deconvolution_customScadenDFT1"
+plotDirScaden <- paste0(plotDir, fprefix, "/")
+```
+
+## 2.1 Ground truth percentages
+Of note, because for 3302T1b we have b_p and b (for bulk cell), I am duplicating the ground truth results for 3302T1b in the reference counts, but calling these "3302T1bp". This way, every unique sampleNameEdit will have its own reference, which is needed for computing the error metrics. 
+```{r}
+snCountsFinal_colData <- read.xlsx(paste0(dataDir,
+                                          "01_Deconvolution_geneAnnotationsDFT1RefsnCountsFinal_colData.xlsx"))
+
+# Create the cell count matrix: rows = cell types, columns = samples
+snCellCounts <- snCountsFinal_colData %>%
+  group_by(manual.log.anot.fine,
+           Sample) %>%
+  summarise(cellCount = n()) %>%
+  pivot_wider(names_from = Sample,
+              values_from = cellCount,
+              values_fill = 0) %>%
+  column_to_rownames("manual.log.anot.fine")
+
+# Convert to percentages (column-wise normalization)
+snCellPercentages <- sweep(snCellCounts,
+                           2,
+                           colSums(snCellCounts),
+                           FUN = "/") %>%
+  round(3) %>%
+  t() %>%
+  as.data.frame() %>%
+  rownames_to_column("sample") %>%
+  pivot_longer(
+    cols = -sample,
+    names_to = "manual.log.anot.fine",
+    values_to = "cellProportion"
+  ) %>%
+  # If sample name ends in b_n, type is bn (bulk nuc). Otherwise, it is bc (bulk cell)
+  mutate(
+    sampleType = "sn",
+    sampleName = sample,
+    sampleNameEdit = str_remove(sampleName, "[ab]")
+  ) %>%
+  select(sampleName, sampleType, manual.log.anot.fine, cellProportion, sampleNameEdit) %>%
+  mutate("deconvBenchResType" = "groundTruth", # P for proportion
+         "Method" = NA,
+         "Parameters" = NA,
+         "Reference" = "snCounts",
+         "Seed"=NA)
+
+# rm(snCellCounts, snCountsFinal_colData)
+# gc()
+```
+
+## 2.2 Read in results 
+### 2.2.1 Performance metrics
+#### 2.2.1.1 Set up dataframes 
+```{r}
+masterPropDf <- data.frame(sampleName = c(),
+                           sampleType = c(),
+                           manual.log.anot.fine = c(),
+                           cellProportion =c(),
+                           sampleNameEdit = c(),
+                           deconvBenchResType = c(),
+                           Method = c(),
+                           Parameters = c())
+
+
+masterGlobMetricDf <- data.frame(bulkCellEstimate = c(),
+                             bulkNucEstimate = c(),
+                             Method = c(),
+                             Parameters = c(),
+                             Metric = c())
+
+masterGranularMetricDf <- data.frame(
+  Metric = c(),
+  Value = c(),
+  Subject = c(),
+  Estimate = c()
+)
+
+masterRawPEDf <- data.frame(
+  Colname = c(),
+  Rowname = c(),
+  Estimate = c(),
+  Method = c(),
+  Parameters = c(),
+  Reference = c(),
+  Seed = c()
+)
+
+# Script with functions changes for DFT1 because we are using a different column with the annotations. 
+# TODO for future iterations, add symlink to script so that column name is dynamic. 
+source(paste0(scriptDir, "/01_Deconvolution_deconBenchmark_metricFunctions.R")) 
+# 01_Deconvolution_deconBenchmark_metricFunctions.R
+```
+
+#### 2.2.1.2 Append ground truth results to the dataframes. 
+```{r}
+# Saving with ground truth percentages (only for the first results, otherwise will be repeated each time.)
+masterPropDf <- rbind(masterPropDf,
+                      snCellPercentages)
+```
+
+
+#### 2.2.1.3 Loop through custom results directories. 
+Each directory is named as the model (all params).
+See comment above about 3302T1b (for which we have 2 bulk cell results).
+Therefore adding if statement, if sample name is 3302T1b, the corresponding sampleName should be 3302T1b_p and sampleNameEdit (matched name to the sn reference counts) will be 3302T1bp.
+```{r, warning=FALSE}
+tempResDir <- "~/Desktop/1_Deconvolution/13_Results/01_Deconvolution_customScadenDFT1/4_predict/" # switch with true directory once all results are finished.
+
+subDirs <- list.dirs(tempResDir, full.names = TRUE, recursive = FALSE)
+
+### TODO make pattern and ref dynamic for LOO models.
+pattern <- "snCounts_bal(\\w+)_thresh(\\w+)_ran(\\d+)_var([0-9.]+)_samp(\\d+)_cells(\\d+)_seed(\\d+)_lr([0-9.]+)_steps(\\d+)"
+
+ref <- "snCounts"
+
+paramsPattern <- paste0("(?<=", ref, "_).*?(?=_seed)")
+
+for (sub in subDirs){
+
+  # Get file name and parameters
+  tempPrefix <- basename(sub)
+  matches <- str_match(tempPrefix, pattern)
+  filePath <- list.files(sub,
+                         pattern="_Predicted.txt",
+                         full.names = T)
+
+  print(paste0("Saving: ", tempPrefix))
+
+  if(length(filePath)!=1){
+    print(paste0("Error with ", tempPrefix))
+    break
+  }
+
+  temp <- read.table(filePath) %>%
+    as.data.frame() %>%
+    rownames_to_column("sample") %>%
+    pivot_longer(
+      cols = -sample,
+      names_to = "manual.log.anot.fine",
+      values_to = "cellProportion"
+    ) %>%
+    # If sample name ends in _n, type is bn (bulk nuc). Otherwise, it is bc (bulk cell)
+    mutate(
+      sampleType = case_when(
+        str_ends(sample, "_n") ~ "bn",
+        TRUE ~ "bc"
+      ),
+      # If sample type is bn, remove b_n to save sample id only.
+      sampleName = case_when(
+        sampleType == "bn" ~ str_remove(sample, "_n$"),
+        TRUE ~ sample
+      ), # If sample type is bn, remove a or b from the end of the sample name.
+      sampleNameEdit = case_when(
+        sampleType == "bn" ~ str_remove(sampleName, "[ab]"),
+        TRUE ~ sampleName
+      ),
+    ) %>%
+    select(sampleName,
+           sampleType,
+           manual.log.anot.fine,
+           cellProportion,
+           sampleNameEdit) %>%
+    # Method details
+    mutate("deconvBenchResType" = "P", # P for proportion
+           "Method" = "Scaden",
+           "Parameters" = str_replace(tempPrefix, "_seed\\d+", ""),
+           "Reference" = ref,
+           "Seed"=matches[,8]) # saves as string
+  
+
+  # Rbind proportion outputs to compute error metrics.
+  tempResGround <- rbind(temp,
+                          snCellPercentages)
+
+  # Append results to masterPropDf.
+  masterPropDf <- rbind(masterPropDf,
+                        temp)
+
+  # Compute and rbind metric outputs
+  tempResMetrics <- deconError(tempResGround,
+                                parameters = str_replace(tempPrefix, "_seed\\d+", ""),
+                                method = "Scaden",
+                                reference=ref,
+                                seed=matches[,8])
+  # Rbind metric measurements
+  masterGlobMetricDf <- rbind(masterGlobMetricDf,
+                              tempResMetrics$overviewMetrics)
+
+  masterGranularMetricDf <- rbind(masterGranularMetricDf,
+                                  tempResMetrics$granularMetrics)
+  
+  masterRawPEDf <- rbind(masterRawPEDf, 
+                         tempResMetrics$rawPredictionError)
+
+  # Cleanup
+  rm(temp,
+     matches,
+     tempResGround,
+     tempResMetrics)
+
+  gc()
+
+}
+
+# 
+masterPropDfNew <- masterPropDf %>%
+  mutate(Param_Seed = paste0(Parameters, "_seed", Seed))
+
+```
+### 2.2.2 Training data distribution
+#### 2.2.2.1 Set up dataframes
+Split by absolute counts and proportions. 
+```{r}
+masterTrainPropDf <- data.frame("DFT1_cells"=c(),
+                             "Endothelial_cells"=c(),
+                             "Mono.Macro.DC"=c(),
+                             "Plasma_cells"=c(),
+                             "T_cells"=c() ,
+                             "SampleID"=c(),
+                             "Dataset"=c(),
+                             "Source"=c(),
+                             "Method"=c(),
+                             "Parameters"=c(),
+                             "Reference"=c(),
+                             "Seed" =c()
+)
+
+masterTrainCountsDf <- data.frame("DFT1_cells"=c(),
+                             "Endothelial_cells"=c(),
+                             "Mono.Macro.DC"=c(),
+                             "Plasma_cells"=c(),
+                             "T_cells"=c() ,
+                             "SampleID"=c(),
+                             "Dataset"=c(),
+                             "Source"=c(),
+                             "Method"=c(),
+                             "Parameters"=c(),
+                             "Reference"=c(),
+                             "Seed" =c()
+)
+```
+
+#### 2.2.2.2 Proportion results
+```{r}
+tempSimDir <- "~/Desktop/1_Deconvolution/13_Results/01_Deconvolution_customScadenDFT1/1_simulate/" # switch with true directory once all results are finished.
+
+subDirs <- list.dirs(tempSimDir,
+                     full.names = TRUE,
+                     recursive = FALSE)
+
+# Get full subdirectory paths in tempSimDir
+# Get only the **directory names** (not full paths)
+subDirNames <- basename(subDirs)
+
+# Get directory names 
+predictResDirNames <- basename(list.dirs(tempResDir, full.names = TRUE, recursive = FALSE))
+
+# Filter subDirs by matching names
+matchedSubDirs <- subDirs[subDirNames %in% predictResDirNames]
+
+# Result: matchedSubDirs contains full paths of matching subdirectories
+matchedSubDirs
+
+### TODO make pattern and ref dynamic for LOO models.
+pattern <- "snCounts_bal(\\w+)_thresh(\\w+)_ran(\\d+)_var([0-9.]+)_samp(\\d+)_cells(\\d+)_seed(\\d+)_lr([0-9.]+)_steps(\\d+)"
+
+ref <- "snCounts"
+
+paramsPattern <- paste0("(?<=", ref, "_).*?(?=_seed)")
+
+for (sub in matchedSubDirs){
+
+  # Get file name and parameters
+  tempPrefix <- basename(sub)
+  matches <- str_match(tempPrefix, pattern)
+  filePath <- list.files(sub,
+                         pattern="Proportions.csv",
+                         full.names = T)
+
+  print(paste0("Saving: ", tempPrefix))
+
+  if(length(filePath)!=1){
+    print(paste0("Error with ", tempPrefix))
+    break
+  }
+
+  temp <- read_csv(filePath,
+                   show_col_types = F) %>%
+    filter(SampleID!="SampleID") %>%
+    mutate("Method" = "Scaden",
+           "Parameters" = str_replace(tempPrefix, "_seed\\d+", ""),
+           "Reference" = ref,
+           "Seed"=matches[,8]) # saves as string
+
+
+    masterTrainPropDf <- rbind(masterTrainPropDf,
+                            temp)
+
+
+}
+
+# Average all proportions for a given training dataset. We can later average over samples, seeds, and/or parameters depending on what we want to look for. But the following df is essential for checking how the training data for a given Prediction.txt file may have been of influence.
+# masterPropAvgSeedSampleParam <- masterTrainPropDf  %>%
+#            group_by(Seed, SampleID, Parameters) %>%
+#            summarise(across(1:6,
+#                             mean,
+#                             na.rm = TRUE)) %>%
+#   mutate(Average = "seedSampleParameters",
+#          Type = "proportions")
+
+masterPropAvgParamSeed <- masterTrainPropDf  %>%
+          mutate(Param_Seed = paste0(Parameters, "_", Seed)) %>%
+           group_by(Param_Seed) %>%
+           summarise(across(1:6,
+                            mean,
+                            na.rm = TRUE)) %>%
+  mutate(Average = "Param_Seed",
+         Type = "proportions")
+
+
+# Now repeating for absolute counts rather than proportions. I.e. if sampling more cells or more pseudobulk samples performs better, could it be because of more in general? Or does it perform even better for unbalanced because you recover the immune cell types?
+
+for (sub in matchedSubDirs){
+
+  # Get file name and parameters
+  tempPrefix <- basename(sub)
+  matches <- str_match(tempPrefix, pattern)
+  filePath <- list.files(sub,
+                         pattern="Counts.csv",
+                         full.names = T)
+
+  print(paste0("Saving: ", tempPrefix))
+
+  if(length(filePath)!=1){
+    print(paste0("Error with ", tempPrefix))
+    break
+  }
+
+  temp <- read_csv(filePath,
+                   show_col_types = F) %>%
+    filter(SampleID!="SampleID") %>%
+    mutate("Method" = "Scaden",
+           "Parameters" = str_extract(tempPrefix, paramsPattern),
+           "Reference" = ref,
+           "Seed"=matches[,8]) # saves as string
+
+
+    masterTrainCountsDf <- rbind(masterTrainCountsDf,
+                            temp)
+}
+
+# Average all proportions for a given training dataset.
+# TODO: Check This works when there are mixed samples (percRan).
+masterCountsAvgParamSeed <- masterTrainCountsDf %>%
+  mutate(Param_Seed = paste0(Parameters, "_", Seed)) %>%
+           group_by(Param_Seed) %>%
+           summarise(across(1:6,
+                            mean,
+                            na.rm = TRUE)) %>%
+  mutate(Average = "Param_Seed",
+         Type = "proportions")
+```
+
+## 2.3 Write results
+### 2.3.1 All training data
+#### 2.3.1.1 Performance metrics
+```{r}
+openxlsx::write.xlsx(masterPropDf,
+           paste0(resDirScaden,
+                  fprefix,
+                  "_masterProportionDfDFT1Switch.xlsx"))
+
+
+openxlsx::write.xlsx(masterGlobMetricDf,
+           paste0(resDirScaden,
+                  fprefix,
+                  "_masterGlobalMetricDf.xlsx"))
+
+
+openxlsx::write.xlsx(masterGranularMetricDf,
+           paste0(resDirScaden,
+                  fprefix,
+                  "_masterGranularMetricDf.xlsx"))
+
+
+
+openxlsx::write.xlsx(masterRawPEDf,
+                     paste0(resDirScaden,
+                  fprefix,
+                  "_masterRawPEDf.xlsx"))
+
+
+```
+
+#### 2.3.1.2 Training data distribution
+```{r}
+# openxlsx::write.xlsx(masterPropAvgSeedSampleParam,
+#            paste0(resDir,
+#                   fprefix,
+#                   "_masterPropAvgSeedSampleParam.xlsx"))
+# 
+# openxlsx::write.xlsx(masterCountsAvgSeedSampleParam,
+#            paste0(resDir,
+#                   fprefix,
+#                   "_masterCountsAvgSeedSampleParam.xlsx"))
+
+openxlsx::write.xlsx(masterTrainCountsDf,
+           paste0(resDirScaden,
+                  fprefix,
+                  "_masterTrainCountsDf.xlsx"))
+
+openxlsx::write.xlsx(masterCountsAvgParamSeed,
+           paste0(resDirScaden,
+                  fprefix,
+                  "_masterCountsAvgParamSeed.xlsx"))
+
+openxlsx::write.xlsx(masterTrainPropDf,
+           paste0(resDirScaden,
+                  fprefix,
+                  "_masterTrainPropDf.xlsx"))
+
+
+openxlsx::write.xlsx(masterPropAvgParamSeed,
+           paste0(resDirScaden,
+                  fprefix,
+                  "_masterPropAvgParamSeed.xlsx"))
+```

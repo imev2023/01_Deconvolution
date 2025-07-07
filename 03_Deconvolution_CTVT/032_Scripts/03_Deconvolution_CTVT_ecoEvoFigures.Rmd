@@ -1,0 +1,279 @@
+---
+title: "03_Deconvolution_CTVT_geneCorrelations"
+author: "IMEV2"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+# 0 Environment
+## 0.1 Packages
+### 0.1.1 Installs
+```{r echo=F, message=F, warning=FALSE}
+# if (!requireNamespace("devtools", quietly = TRUE)) {
+#    install.packages("devtools")
+# }
+# devtools::install_github("Danko-Lab/BayesPrism/BayesPrism")
+```
+### 0.1.1 Library
+```{r echo=F, message=F, warning=FALSE}
+set.seed(123)
+library(tidyverse)
+library(openxlsx)
+library(SingleCellExperiment)
+library(ggplot2)
+library(dplyr)
+library(patchwork)
+setClassUnion("ExpData", c("matrix", "SummarizedExperiment"))
+```
+
+## 0.2 Paths
+```{r echo=F, message=FALSE, warning=FALSE}
+wDir <- paste0("~/gitClones/01_Deconvolution/03_Deconvolution_CTVT/")
+dataDir <- paste0("~/gitClones/01_Deconvolution_old/03_Deconvolution_CTVT//031_Data/")
+resDir <- paste0(wDir, "/033_Results/")
+plotDir <- paste0(wDir, "/034_Plots/")
+fprefix <- "03_Deconvolution_CTVT_visualizations"
+
+# Define color palette
+cell_type_colors <- c(
+  "#C2697FFF", "#FDDFA4FF", "#B4B9E0FF",
+  "lightpink", "darkblue", "seagreen"
+)
+```
+
+# 1 Data
+Need to see rowData to match to GeneIDs or Symbols in Adrian's table below. 
+```{r}
+obj <- readRDS(paste0(dataDir, "SCE_concat_CTVT_includingAllGenes_logCorrecDone_vstCorrecDone_ClustDone2_ManAnot.rds"))
+
+objNoBad <- obj[,obj$manual.log.anot.fine!="bad"]
+
+rm(obj)
+gc()
+```
+
+# 2 Plot bar plots 
+## 2.1 deconBenchmark
+```{r}
+soi <- "3621T"
+
+deconBenchmark <- read.xlsx("~/Desktop/1_Deconvolution/13_Results/01_Deconvolution_deconBenchmark_CTVT/01_Deconvolution_deconBenchmark_CTVT_masterProportionDf.xlsx") %>%
+  filter(sampleName %in% soi & sampleType == "bc") %>%
+  filter(manual.log.anot.fine != "bad")
+
+table(deconBenchmark$Method)
+
+# Aggregate: average or total cell proportions per method and cell type
+bar_df <- deconBenchmark %>%
+  group_by(Method, manual.log.anot.fine) %>%
+  mutate(percent = round(cellProportion))
+
+bar_df <- deconBenchmark %>%
+  group_by(Method, manual.log.anot.fine) %>%
+  summarise(
+    percent = mean(cellProportion, na.rm = TRUE),
+    .groups = "drop"
+  ) 
+
+# Ensure consistent factor order for plotting
+# bar_df$manual.log.anot.fine <- factor(bar_df$manual.log.anot.fine, levels = names(cell_type_colors))
+
+# Build one horizontal barplot per Method (stacked vertically)
+methods <- unique(bar_df$Method)
+
+barplots <- lapply(seq_along(methods), function(i) {
+  m <- methods[i]
+  p <- ggplot(filter(bar_df, Method == m), aes(x = percent, 
+                                               y = manual.log.anot.fine, 
+                                               fill = manual.log.anot.fine)) +
+    geom_col() +
+    scale_fill_manual(values = cell_type_colors) +
+    theme_minimal(base_size = 10) +
+    labs(title = m, x = if (i == length(methods)) "Estimated Proportion" else NULL, y = NULL) +
+    theme(
+      legend.position = "none",
+      plot.title = element_text(size = 10, face = "bold"),
+      axis.text.y = element_blank(), 
+      axis.text.x= element_text(size = 10), 
+      axis.title.x = element_text(size = 10)
+    ) +
+    scale_x_continuous(expand = expansion(mult = c(0, 0.1)))
+  
+  # Hide x-axis for all but the bottom plot
+  if (i != length(methods)) {
+    p <- p + theme(
+      axis.text.x = element_blank(),
+      axis.ticks.x = element_blank(),
+      axis.title.x = element_blank()
+    )
+  }
+
+  return(p)
+})
+
+# Combine barplots vertically
+(final_barplot <- wrap_plots(barplots, ncol = 1))
+
+png(paste0(plotDir,
+             "bar/",
+             fprefix, 
+             "_barDeconbenchmarkProportions.png"))
+print(final_barplot)
+# print(bar_plot+ggtitle(paste0("CTVT sample: ", s)))
+dev.off()
+
+pdf(paste0(plotDir,
+             "bar/",
+             fprefix, 
+             "_barDeconbenchmarkProportions.pdf"), 
+    height = 5, 
+    width = 4)
+print(final_barplot)
+# print(bar_plot+ggtitle(paste0("CTVT sample: ", s)))
+dev.off()
+```
+
+## 2.2 Scaden + deconBenchmark
+```{r}
+soi <- "3621T"
+
+scaden <- read.xlsx("~/Desktop/1_Deconvolution/13_Results/01_Deconvolution_customScadenCTVT/01_Deconvolution_customScadenCTVT_masterProportionDf.xlsx")%>%
+  filter(sampleName %in% soi & sampleType == "bc") %>%
+  filter(manual.log.anot.fine != "bad") %>%
+ mutate(Param_Seed = paste0(Parameters, "_", Seed)) %>%
+  filter(Param_Seed == "snCounts_balFalse_thresh5_ran30_var0.4_samp1500_cells250_lr0.001_steps1000_1") %>%
+  select(-c(Param_Seed))
+  
+
+table(scaden$Parameters)
+
+scadenDecon <- rbind(deconBenchmark, scaden)
+
+# Aggregate: average or total cell proportions per method and cell type
+
+bar_df <- scadenDecon %>%
+  group_by(Method, manual.log.anot.fine) %>%
+  summarise(
+    percent = mean(cellProportion, na.rm = TRUE),
+    .groups = "drop"
+  ) 
+
+# Ensure consistent factor order for plotting
+# bar_df$manual.log.anot.fine <- factor(bar_df$manual.log.anot.fine, levels = names(cell_type_colors))
+
+# Build one horizontal barplot per Method (stacked vertically)
+methods <- unique(bar_df$Method)
+
+barplots <- lapply(seq_along(methods), function(i) {
+  m <- methods[i]
+  p <- ggplot(filter(bar_df, Method == m), aes(x = percent, 
+                                               y = manual.log.anot.fine, 
+                                               fill = manual.log.anot.fine)) +
+    geom_col() +
+    scale_fill_manual(values = cell_type_colors) +
+    theme_minimal(base_size = 10) +
+    labs(title = m, x = if (i == length(methods)) "Estimated Proportion" else NULL, y = NULL) +
+    theme(
+      legend.position = "none",
+      plot.title = element_text(size = 10, face = "bold"),
+      axis.text.y = element_blank(), 
+      axis.text.x= element_text(size = 10), 
+      axis.title.x = element_text(size = 10)
+    ) +
+    scale_x_continuous(expand = expansion(mult = c(0, 0.1))) +
+    xlim(0,1)
+  
+  # Hide x-axis for all but the bottom plot
+  if (i != length(methods)) {
+    p <- p + theme(
+      axis.text.x = element_blank(),
+      axis.ticks.x = element_blank(),
+      axis.title.x = element_blank()
+    )
+  }
+
+  return(p)
+})
+
+# Combine barplots vertically
+(final_barplot <- wrap_plots(barplots, ncol = 1))
+
+png(paste0(plotDir,
+             "bar/",
+             fprefix, 
+             "_barScadenDeconbenchmarkProportions.png"))
+print(final_barplot)
+# print(bar_plot+ggtitle(paste0("CTVT sample: ", s)))
+dev.off()
+
+pdf(paste0(plotDir,
+             "bar/",
+             fprefix, 
+             "_barScadenDeconbenchmarkProportions.pdf"), 
+    height = 5, 
+    width = 4)
+print(final_barplot)
+# print(bar_plot+ggtitle(paste0("CTVT sample: ", s)))
+dev.off()
+
+
+barplots <- lapply(seq_along(methods), function(i) {
+  m <- methods[i]
+  p <- ggplot(filter(bar_df, Method == m), aes(x = percent, 
+                                               y = manual.log.anot.fine, 
+                                               fill = manual.log.anot.fine)) +
+    geom_col() +
+    scale_fill_manual(values = cell_type_colors) +
+    theme_minimal(base_size = 10) +
+    labs(title = m, x = if (i == length(methods)) "Estimated Proportion" else NULL, y = NULL) +
+    theme(
+      legend.position = "none",
+      plot.title = element_blank(),
+      axis.text.y = element_blank(), 
+      axis.text.x= element_text(size = 10), 
+      axis.title.x = element_text(size = 10)
+    ) +
+    scale_x_continuous(expand = expansion(mult = c(0, 0.1))) +
+    xlim(0,1)
+  
+  # Hide x-axis for all but the bottom plot
+  if (i != length(methods)) {
+    p <- p + theme(
+      axis.text.x = element_blank(),
+      axis.ticks.x = element_blank(),
+      axis.title.x = element_blank()
+    )
+  }
+
+  return(p)
+})
+
+# Combine barplots vertically
+(final_barplot <- wrap_plots(barplots, ncol = 1))
+
+png(paste0(plotDir,
+             "bar/",
+             fprefix, 
+             "_barScadenDeconbenchmarkProportions_noTitle.png"))
+print(final_barplot)
+# print(bar_plot+ggtitle(paste0("CTVT sample: ", s)))
+dev.off()
+
+pdf(paste0(plotDir,
+             "bar/",
+             fprefix, 
+             "_barScadenDeconbenchmarkProportions_noTitle.pdf"), 
+    height = 5, 
+    width = 4)
+print(final_barplot)
+# print(bar_plot+ggtitle(paste0("CTVT sample: ", s)))
+dev.off()
+
+
+```
+
+# 3 Scaden Overfitting
+```{r}
+
+```
+

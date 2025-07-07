@@ -1,0 +1,130 @@
+---
+title: "03_Deconvolution_CTVT_geneAnno"
+author: "IMEV2"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+# 0 Environment
+## 0.1 Packages
+### 0.1.1 Installs
+```{r echo=F, message=F, warning=FALSE}
+# if (!requireNamespace("devtools", quietly = TRUE)) {
+#    install.packages("devtools")
+# }
+# devtools::install_github("Danko-Lab/BayesPrism/BayesPrism")
+```
+### 0.1.1 Library
+```{r echo=F, message=F, warning=FALSE}
+set.seed(123)
+library(tidyverse)
+library(openxlsx)
+library(SingleCellExperiment)
+setClassUnion("ExpData", c("matrix", "SummarizedExperiment"))
+```
+
+## 0.2 Paths
+```{r echo=F, message=FALSE, warning=FALSE}
+wDir <- paste0("~/Desktop/3_Deconvolution_CTVT/")
+dataDir <- paste0(wDir, "/11_Data/")
+resDir <- paste0(wDir, "/13_Results/")
+plotDir <- paste0(wDir, "/14_Plots/")
+fprefix <- "03_Deconvolution_CTVT_geneCorrelations"
+```
+
+# 1 Data
+## 1.1 Read in counts matrix
+Want to replace the current features (rownames of rowData) with the ENSCAF ID's. 
+```{r}
+obj <- readRDS(paste0(dataDir, "SCE_concat_CTVT_includingAllGenes_logCorrecDone_vstCorrecDone_ClustDone2_ManAnot.rds"))
+
+ctvtRowData <- rowData(obj) %>%
+  as.data.frame() %>%
+  mutate(ID_Symbol = paste0(ID, "_", Symbol))
+
+length(unique(rownames(ctvtRowData))) # [1] 15707
+length(unique(ctvtRowData$ID)) # [1] 15684
+length(unique(ctvtRowData$Symbol)) # [1] 15673
+length(unique(ctvtRowData$ID_Symbol)) # [1] 15684
+
+# Create a table of ID counts
+countIDs <- table(ctvtRowData$ID)
+
+# Get IDs that occur more than once
+repeatedIds <- names(countIDs[countIDs > 1])
+
+# Filter the rows with those IDs
+repeatedRowData <- ctvtRowData %>%
+  filter(ID %in% repeatedIds )
+
+# > setdiff(repeatedRowData$ID, adrianDf$GeneID) --> ENSCAF id's not in 
+#  [1] "ENSCAFG00000013279" "ENSCAFG00000030465" "ENSCAFG00000043715" "ENSCAFG00000047802" "ENSCAFG00000035210" "ENSCAFG00000048078"
+#  [7] "ENSCAFG00000046342" "ENSCAFG00000024447" "ENSCAFG00000010890" "ENSCAFG00000043512" "ENSCAFG00000009135"
+
+objCountsRepeated <- counts(obj) %>%
+  as.data.frame() %>%
+  rownames_to_column("rownames") %>%
+  filter(rownames %in% rownames(repeatedRowData)) %>%
+  column_to_rownames("rownames")
+
+objCountsRepeated$rowSums <- rowSums(objCountsRepeated)
+
+objCountsRepeatedRowsums <- objCountsRepeated %>%
+  select(rowSums) %>%
+  rownames_to_column("rownames") %>%
+  left_join(repeatedRowData %>% rownames_to_column("rownames"))
+
+write.xlsx(objCountsRepeatedRowsums, paste0(resDir, "geneAnnotation/", fprefix, "_snObjRepeatedENSCAF_withRowsums.xlsx"))
+```
+
+# 2 Check how counts are spread per sample
+In DFT1, if a gene was duplicated, it was because half of the samples had been annotated using either one gene or the other. This is how we knew we could take the aggregate of the duplicated rows as the true, single, gene count. 
+
+```{r}
+resultsList <- list()
+
+# Filter single-nuc data for ID's of interest.  
+dfsnCountsDuplicated <- counts(obj) %>% 
+  as.data.frame() %>%
+  rownames_to_column("rownames") %>%
+  filter(rownames %in% objCountsRepeatedRowsums$rownames) %>%
+  column_to_rownames("rownames") 
+
+# Check distribution of counts among the three or two rowData rownames. 
+## We wanted to check, at sample level, do cells have counts for the same ID's corresponding to different rowData rownames?
+dfScCheck <- dfsnCountsDuplicated 
+
+
+sampleNames <- colData(obj)$Sample
+
+# Loop over unique samples
+for (sample in unique(sampleNames)) {
+  
+  # Get column indices for this sample
+  cols <- which(sampleNames == sample)
+  
+  # Subset the data for these columns
+  sampleData <- dfScCheck[, cols, drop = FALSE]
+  
+  # Count number of cells with non-zero values per gene.
+  geneCounts <- rowSums(sampleData != 0)
+  
+  # Store results as a data frame
+  dfSample <- data.frame(
+    sample = sample,
+    gene = rownames(dfScCheck),
+    nonZeroCount = geneCounts
+  )
+  
+  # Add to results list
+  resultsList[[sample]] <- dfSample
+}
+
+# Combine all into a single data frame
+finalDf <- do.call(rbind, resultsList)
+
+rownames(finalDf) <- NULL
+
+write.xlsx(objCountsRepeatedRowsums, paste0(resDir, "geneAnnotation/", fprefix, "_snObjRepeatedENSCAF_withRowsumsBySample.xlsx"))
+```
+

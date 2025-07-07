@@ -1,0 +1,496 @@
+---
+title: "03_Deconvolution_CTVT_geneCorrelations"
+author: "IMEV2"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+# 0 Environment
+## 0.1 Packages
+### 0.1.1 Installs
+```{r echo=F, message=F, warning=FALSE}
+# if (!requireNamespace("devtools", quietly = TRUE)) {
+#    install.packages("devtools")
+# }
+# devtools::install_github("Danko-Lab/BayesPrism/BayesPrism")
+```
+### 0.1.1 Library
+```{r echo=F, message=F, warning=FALSE}
+set.seed(123)
+library(tidyverse)
+library(openxlsx)
+library(SingleCellExperiment)
+setClassUnion("ExpData", c("matrix", "SummarizedExperiment"))
+```
+
+## 0.2 Paths
+```{r echo=F, message=FALSE, warning=FALSE}
+wDir <- paste0("~/Desktop/3_Deconvolution_CTVT/")
+dataDir <- paste0(wDir, "/11_Data/")
+resDir <- paste0(wDir, "/13_Results/")
+plotDir <- paste0(wDir, "/14_Plots/")
+fprefix <- "03_Deconvolution_CTVT_geneCorrelations"
+```
+
+# 1 Data
+## 1.1 Read in counts matrix
+Need to see rowData to match to GeneIDs or Symbols in Adrian's table below. 
+```{r}
+obj <- readRDS(paste0(dataDir, "SCE_concat_CTVT_includingAllGenes_logCorrecDone_vstCorrecDone_ClustDone2_ManAnot.rds"))
+
+ctvtRowData <- rowData(obj) %>%
+  as.data.frame() %>%
+  mutate(ID_Symbol = paste0(ID, "_", Symbol))
+
+length(unique(rownames(ctvtRowData))) # [1] 15707
+length(unique(ctvtRowData$ID)) # [1] 15684
+length(unique(ctvtRowData$Symbol)) # [1] 15673
+length(unique(ctvtRowData$ID_Symbol)) # [1] 15684
+
+which(duplicated(ctvtRowData$ID)==TRUE) 
+#  [1] 15204 15582 15603 15613 15629 15634 15635 15639 15640 15642 15650 15661 15663 15666 15668 15669 15673 15683 15684
+# [20] 15685 15686 15694 15695
+
+# Filter on duplicated ID's (15707-15684 = 23)
+```
+
+
+## 1.2 Read in Adrian's purity table
+Specificity = specific to a tumor (T) or host (H)
+We have eT and eH. Of note, a transcript could be tumor specific but have expression only in the host because 
+
+### 1.2.1 Data
+```{r}
+adrianDf <- read_csv(paste0(dataDir, "ctvt_rnaseq_expression-2.csv"))
+```
+### 1.2.2 Data explanation
+```{r}
+# example <- adrianDf %>%
+#   filter(Symbol == "CD19")
+# example[1,]
+
+# > table(example$Specificity)
+#   H   T 
+# 136 132 
+
+# In 1208Ta, 18422072,	Ref - G,	Alt - A,	ENSCAFG00000017303, Specificity - H
+# nAT = 2, nBT = 0. Both alleles are Ref - G in tumor. 
+# nAH = 1, nBH = 1. 1x G and 1x A in host. Therefore, alt is specific to host. 
+# eB = 10, therefore, in host, nA = 10 and nB = 10. 
+# eB + eA = 16, but 16-20 doesn't work then?
+
+
+# example[2,]
+# 18425358	T	C	ENSCAFG00000017303, CD19, Spec H
+# nAT = 2, nBT = 0. Both alleles are Ref - T in tumor. 
+# nAH = 1, nBH = 1. 1x T and 1x C in host. Therefore, alt is specific to host. 
+# eB = 5, therefore, in host, nA = 5 and nB = 5. 
+# eB + eA = 26, so 26-10 = 16 expr in tumor * purity = 13.62... = 0.85 purity. and 10 * purity = 12.56...?
+
+# example <- adrianDf %>%
+#   filter(Symbol == "EPO")
+# example[10,]
+# head()
+```
+### 1.2.3 How many genes are always H/T specific?
+The problem is, directionality. 
+
+Ex. IL37 is always "H" in specificity, but the eT is always > that eH. So it is host specific, but because it is exclusively expressed in tumors. Because hosts express nBH but tumors only have nAT. 
+
+Solution, merging with correlation table. 
+```{r}
+# Summarize counts of Specificity = "T" and "H" per GeneID and Symbol
+specCountDf <- adrianDf %>%
+  group_by(GeneID, Symbol) %>%
+  summarise(
+    Specificity_T_count = sum(Specificity == "T"),
+    Specificity_H_count = sum(Specificity == "H"),
+    .groups = "drop"
+  )
+
+hostOnly <- specCountDf %>%
+  filter(Specificity_T_count == 0 & Specificity_H_count > 0) %>%
+  mutate("Annotation"="hostOnly")
+
+# host90 <- specCountDf %>%
+#   filter(Specificity_H_count*0.10 > Specificity_T_count)
+# 
+# host95 <- specCountDf %>%
+#   filter(Specificity_H_count*0.05 > Specificity_T_count)
+
+# checkHostOnly <- adrianDf %>%
+#   filter(Symbol %in% hostOnly$Symbol & GeneID %in% hostOnly$GeneID)
+
+tumorOnly <- specCountDf %>%
+  filter(Specificity_T_count > 0 & Specificity_H_count == 0)%>%
+  mutate("Annotation"="tumorOnly")
+
+# tumor90 <- specCountDf %>%
+#   filter(Specificity_T_count*0.10 > Specificity_H_count)
+# 
+# tumor95 <- specCountDf %>%
+#   filter(Specificity_T_count*0.05 > Specificity_H_count)
+# 
+# checkTumorOnly <- adrianDf %>%
+#   filter(Symbol %in% tumorOnly$Symbol & GeneID %in% tumorOnly$GeneID)
+
+
+adrianManual <- adrianDf %>%
+  filter(Symbol %in% c("PSMD13", # CTVT-specific, component of 26S proteasome for protein homeostasis.
+                       "NDUFB6", 
+                       "DNAJB1", # CTVT-specific, activity of HSP to prevent misfolded prot. agg. 
+                       "GCSAML", 
+                       "TUBB6", # CTVT-specific, not in figure, microtubule component
+                       "MS4A2", # CTVT-specific, surface of mast cells and basophils (allergic response)
+                       "CMA1", # CTVT-specific, expressed by mast cells related to immune response
+                       "VIM", # CTVT-specific, cell shape and cytoplasm integrity
+                       "FKBP4", # CTVT-specific, immunoregulation by B and T cells
+                       "STMN1", 
+                       ### Host specific ##
+                       "IL24",
+                       "IL36B",
+                       "ANXA1", 
+                       "EPO", # hormone related to erythrocyte proliferation
+                       "IL24", 
+                       "DLA-DRA", # MCH II
+                       "DLA-DQA1", # MCH II
+                       "C1QA", 
+                       "C1R",
+                       "MMP26",
+                       "CEACAM18", # cell adhesion and tumor progression
+                       "TGFBI", # induced by TGFB, inhibiting cell adhesion (immunosupressive?)
+                       "LYZ", # bacteriolytic, associated with monocyte-macrophage system
+                       "BPI")) %>% # antimicrobial protein associated with neutrophil granules
+  group_by(GeneID, Symbol) %>%
+  summarise(
+    Specificity_T_count = sum(Specificity == "T"),
+    Specificity_H_count = sum(Specificity == "H"),
+    .groups = "drop"
+  ) %>%
+  mutate("Annotation"="manualAdrian")
+
+# From Maurine's notebook on bulk RNA seq of CTVT samples. 
+maurineManual <- adrianDf %>%
+  filter(Symbol %in% c(### Host specific ### 
+                      # B-cells
+                      "MS4A1",
+                      "PAX5",
+                      "BANK1",
+                      "BCL11A",
+                      
+                      # T-cells
+                      "CD3E",
+                      "CD3G", 
+                      "CD4", 
+                      "CD8A", 
+                      "ICOS", 
+                      "CTLA4", 
+                      
+                      # MHC-I --> CD8 T-cells (all nucleated) = innate
+                      "TAP1", 
+                      "B2M", 
+                      "DLA-64", 
+                      
+                      # MCH-II --> CD4 T cells = adaptive
+                      "DLA-DRA",
+                      "DLA-DQA1", 
+                      "DLA-DMA", 
+                      
+                      # Plasma
+                      "JCHAIN", 
+                      "IRF4", 
+                      "POU2AF1", 
+                      
+                      # Macro/mono
+                      "LYZ",
+                      "CD80",
+                      "CD86",
+                      "IL18",
+                      "MRC1",
+                      "GAB2",
+                      
+                      # Fibro
+                      "FAP",
+                      "CALD1",
+                      "COL6A3",
+                      "LAMA4",
+                      
+                      # Endo
+                      "ADGRL4",
+                      "VWF",
+                      "PDGFD",
+                      
+                      ### CTVT specific ###
+                      "LSAMP",
+                      "DPP10",
+                      "PDE1C",
+                      "PDGFC",
+                      "DLC1",
+                      "EPO",
+                      "MS4A2",
+                      "KIT"
+                       
+                       )) %>% # antimicrobial protein associated with neutrophil granules
+  group_by(GeneID, Symbol) %>%
+  summarise(
+    Specificity_T_count = sum(Specificity == "T"),
+    Specificity_H_count = sum(Specificity == "H"),
+    .groups = "drop"
+  ) %>%
+  mutate("Annotation"="manualMaurineBulk")
+
+
+finalDf <- rbind(tumorOnly, 
+                 hostOnly, 
+                 adrianManual, 
+                 maurineManual)
+
+# length(unique(finalDf$GeneID # 2438 unique genes.
+```
+
+### 1.2.3 Merge with correlations
+From IL37 above, the purity correlation is positive. So even if it was a H specific variant, its expression more useful as a marker gene for CTVT expression (and non-CTVT cells)?
+```{r}
+adrianCorr <- read.xlsx(paste0(dataDir, "CTVT_expression_purity_correlations.xlsx"))%>%
+  rename("gene"="Symbol")
+
+finalDfCorr <- finalDf %>%
+  left_join(adrianCorr)
+
+write.xlsx(finalDfCorr, paste0(resDir, "/markerGeneSelection/", fprefix, "_finalDfCorr.xlsx"))
+```
+
+## 1.3 Map genes in single-nuc data to finalDf. 
+- First check how many have a corresponding rowData entry because we will be checking against Maurine's annotations, we need to have gene ID's that match the ctvtRowData. 
+
+- Then, merge using rowData. 
+
+### 1.3.1 Genes mapping to rowData
+Going to split by rownames, Symbol column, and ID column in ctvtRowData so that I know what to merge on. 
+```{r}
+repeatedENSCAF <- read.xlsx(paste0(resDir, "/geneAnnotation/03_Deconvolution_CTVT_geneCorrelations_snObjRepeatedENSCAF_withRowsums.xlsx"))
+
+
+finalDfCorrAnno <- finalDfCorr %>%
+        # Matching gene symbols --> each have a unique rowname, but can be duplicated
+  mutate("matchedSymbol"=ifelse(Symbol %in% unique(ctvtRowData$Symbol),
+                                "matchedSymbol",
+                                "No"),
+         # Matching ENSCAF id's --> each have a unique rowname, but can be duplicated
+         "matchedENSCAF" = ifelse(GeneID %in% unique(ctvtRowData$ID),
+                                "matchedENSCAF",
+                                "No"),
+         # Of the ENSCAF id's in Adrian's table, which are repeats in the sn?
+         "repeatedENSCAF" = ifelse(GeneID %in% unique(repeatedENSCAF$ID),
+                                "repeatedENSCAF",
+                                "No"),
+         
+         # Matching gene name or ENSCAF id to a rowname id's --> all unique!
+         "matchedRowname" = ifelse(GeneID %in% unique(rownames(ctvtRowData))|Symbol %in% unique(rownames(ctvtRowData)),
+                                "matchedRowname",
+                                "No"),
+         # Genes not found at all in sn. 
+         "unmatched" = ifelse(matchedSymbol == "No" & matchedENSCAF =="No" & matchedRowname == "No",
+                              "unmatched",
+                              "matched")
+         )
+
+table(finalDfCorrAnno$unmatched)
+# 557 genes in Adrian's table do not match to the sn annotations. 
+
+table(finalDfCorrAnno$repeatedENSCAF)
+          #   No repeatedENSCAF 
+          # 2445              4 
+
+finalDfCorrAnno_notInSn <- finalDfCorrAnno %>%
+  filter(unmatched == "unmatched")
+
+write.xlsx(finalDfCorrAnno, paste0(resDir, 
+                                   "/markerGeneSelection/", 
+                                   fprefix, 
+                                   "_finalDfCorrAnno.xlsx"))
+```
+
+## 1.5 Map Maurine's marker gene assignment to table
+Using multi-sample annotation from integrated data. May need to be adjusted. 
+
+### 1.5.1 Filter out bad cells for now
+
+### 1.5.2 Annotation
+```{r}
+ # findMarkers <- scran::findMarkers(obj,
+ #                                  groups = scAnnoFactor)
+
+# Performs pairwise comparisons between each pair of groups (i.e. celltypes). Summarizes effect sizes. Should be more intuitive than findMarkers, because individual cells inflate p-values. 
+scAnno <- colData(obj)$manual.log.anot.fine
+
+# Groups must be factored. 
+scAnnoFactor <- factor(scAnno, levels = unique(scAnno))
+scoreMarkers <- scran::scoreMarkers(obj, 
+                                    groups = scAnnoFactor,
+                                    assay.type = "logcounts",
+                                    full.stats = T)
+```
+
+### 1.5.1 Interpretation
+mean.*, the mean effect size across all pairwise comparisons involving X. A large value (>0 for log-fold changes, >0.5 for the AUCs) indicates that the gene is upregulated in X compared to the average of the other groups. A small value (<0 for the log-fold changes, <0.5 for the AUCs) indicates that the gene is downregulated in X instead.
+median.*, the median effect size across all pairwise comparisons involving X. A large value indicates that the gene is upregulated in X compared to most (>50%) other groups. A small value indicates that the gene is downregulated in X instead.
+min.*, the minimum effect size across all pairwise comparisons involving X. A large value indicates that the gene is upregulated in X compared to all other groups. A small value indicates that the gene is downregulated in X compared to at least one other group.
+max.*, the maximum effect size across all pairwise comparisons involving X. A large value indicates that the gene is upregulated in X compared to at least one other group. A small value indicates that the gene is downregulated in X compared to all other groups.
+rank.*, the minimum rank (i.e., “min-rank”) across all pairwise comparisons involving X - see ?computeMinRank for details. A small min-rank indicates that the gene is one of the top upregulated genes in at least one comparison to another group.
+
+Keep in mind that the interpretations above also depend on the sign of lfc. The concept of a “large” summary statistic (>0 for Cohen's d, >0.5 for the AUCs) can only be interpreted as upregulation when lfc >= 0. Similarly, the concept of a “small” value (<0 for Cohen's d, <0.5 for the AUCs) cannot be interpreted as downregulation when lfc <= 0. For example, if lfc=1, a positive min.logFC.cohen can still be interpreted as upregulation in 
+𝑋
+X compared to all other groups, but a negative max.logFC.cohen could not be interpreted as downregulation in 
+𝑋
+X compared to all other groups.
+
+When lfc is not zero, the AUC is generalized to the probability of obtaining a random observation in one group that is greater than a random observation plus lfc in the other group. For example, if we had lfc=2 and we obtained an AUC of 0.8, this means that we would observe a difference of lfc or greater between the random observations. Again, we can only unambiguously interpret the direction of the change when it is the same as the sign of the lfc. In this case, an AUC above 0.5 with a positive lfc represents upregulation, but an AUC below 0.5 could mean either downregulation or a log-fold change less than lfc.
+
+A non-zero setting of lfc has no effect on the log-fold change in the proportion of cells with detected expression.
+
+- We are interested most in genes that distinguish cell types from all other cell types, i.e.:
+  - Large mean = gene is upregulated in a cell type compared to the average of other cell types
+  - Low mean = gene is downregulated ""
+  - High min = gene is upregulated in a cell type compared to all other groups
+  - Low max = gene is downregulated in a cell type compared to all other groups
+- On rankings (within a cell type)
+  - More important = ranking closer to 1. 
+```{r}
+masterDf <- data.frame(
+  rownames = c(),
+  cellType = c(),
+  mean.logFC.cohen = c(), 
+  mean.logFC.detected = c(), 
+  mean.AUC = c(), 
+  median.logFC.cohen = c(), 
+  median.logFC.detected = c(), 
+  median.AUC = c(), 
+  min.logFC.cohen = c(), 
+  min.logFC.detected = c(), 
+  min.AUC = c(), 
+  max.logFC.cohen = c(), 
+  max.logFC.detected = c(), 
+  max.AUC = c(),
+  rank.logFC.cohen = c(), 
+                        rank.logFC.detected = c(), 
+                        rank.AUC = c()
+)
+
+for (i in 1:length(scoreMarkers)){
+  temp <- scoreMarkers[[i]]
+  name <- names(scoreMarkers)[i]
+  print(name)
+  
+  tempDf <- data.frame(rownames = rownames(temp),
+                        cellType = rep(name, nrow(temp)),
+                        mean.logFC.cohen = temp$mean.logFC.cohen, 
+                        mean.logFC.detected = temp$mean.logFC.detected, 
+                        mean.AUC = temp$mean.AUC, 
+                        median.logFC.cohen = temp$median.logFC.cohen, 
+                        median.logFC.detected = temp$median.logFC.detected, 
+                        median.AUC = temp$median.AUC, 
+                        min.logFC.cohen = temp$min.logFC.cohen, 
+                        min.logFC.detected = temp$min.logFC.detected, 
+                        min.AUC = temp$min.AUC, 
+                        max.logFC.cohen = temp$max.logFC.cohen, 
+                        max.logFC.detected = temp$max.logFC.detected, 
+                        max.AUC = temp$max.AUC, 
+                       rank.logFC.cohen = temp$rank.logFC.cohen, 
+                        rank.logFC.detected = temp$rank.logFC.detected, 
+                        rank.AUC = temp$rank.AUC
+                      )
+  masterDf <- rbind(masterDf, tempDf)
+}
+```
+
+## 1.6 Merge score markers with Adrian's list for annotation.
+### 1.6.1 First, checking which 
+```{r}
+
+```
+
+# --- Testing
+# 2 Check correlations of marker genes (testing with manualMaurineBulk genes, because all are in Adrian's table AND in the sn)
+## 2.1 Check Adrian's table
+```{r}
+maurineGenes <- c(### Host specific ### 
+                      # B-cells
+                      "MS4A1",
+                      "PAX5",
+                      "BANK1",
+                      "BCL11A",
+                      
+                      # T-cells
+                      "CD3E",
+                      "CD3G", 
+                      "CD4", 
+                      "CD8A", 
+                      "ICOS", 
+                      "CTLA4", 
+                      
+                      # MHC-I --> CD8 T-cells (all nucleated) = innate
+                      "TAP1", 
+                      "B2M", 
+                      "DLA-64", 
+                      
+                      # MCH-II --> CD4 T cells = adaptive
+                      "DLA-DRA",
+                      "DLA-DQA1", 
+                      "DLA-DMA", 
+                      
+                      # Plasma
+                      "JCHAIN", 
+                      "IRF4", 
+                      "POU2AF1", 
+                      
+                      # Macro/mono
+                      "LYZ",
+                      "CD80",
+                      "CD86",
+                      "IL18",
+                      "MRC1",
+                      "GAB2",
+                      
+                      # Fibro
+                      "FAP",
+                      "CALD1",
+                      "COL6A3",
+                      "LAMA4",
+                      
+                      # Endo
+                      "ADGRL4",
+                      "VWF",
+                      "PDGFD",
+                      
+                      ### CTVT specific ###
+                      "LSAMP",
+                      "DPP10",
+                      "PDE1C",
+                      "PDGFC",
+                      "DLC1",
+                      "EPO",
+                      "MS4A2",
+                      "KIT"
+                       
+                       )
+adrianDfMaurineGenes <- adrianDf %>%
+  filter(GeneID %in% maurineGenes)
+
+
+```
+
+## 2.2 How well do Maurine's genes correlate with the proportion of cell types in a sample?
+### 2.2.1 Overall
+Correlate pb expression (total sample level and per cell type) of the marker genes and the a) number of cells of that cell type, and b) the proportion of cells in the same cell type. (eventually, we are doing deconv to get the proportion, so (b) is more important imo). 
+###
+
+### 2.2.2 Pseudosamples simulated by Scaden
+
+
+## 2.3 How well do Maurine's genes correlate between matched sn and bulk cell samples?
+Deviations can be due to either (a) sampling differences (we can test this by correlating with matched bulk nuc data) and (b) ... noise? not quite what I mean. 
+
+
+
+

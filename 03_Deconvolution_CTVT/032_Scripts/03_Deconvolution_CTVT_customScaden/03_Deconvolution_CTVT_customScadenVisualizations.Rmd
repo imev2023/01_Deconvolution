@@ -1,0 +1,715 @@
+---
+title: "03_Deconvolution_CTVT_customScadenVisualizations"
+output: html_document
+---
+
+
+# 0 Environment
+## 0.1 Packages
+### 0.1.1 Installs
+```{r echo=F, message=F, warning=FALSE}
+# if (!requireNamespace("devtools", quietly = TRUE)) {
+#    install.packages("devtools")
+# }
+# devtools::install_github("Danko-Lab/BayesPrism/BayesPrism")
+```
+### 0.1.1 Library
+```{r echo=F, message=F, warning=FALSE}
+set.seed(123)
+library(tidyverse)
+library(openxlsx)
+library(SingleCellExperiment)
+setClassUnion("ExpData", c("matrix", "SummarizedExperiment"))
+```
+
+## 0.2 Paths
+```{r echo=F, message=FALSE, warning=FALSE}
+wDir <- paste0("~/gitClones/01_Deconvolution/03_Deconvolution_CTVT/")
+fprefix <- "03_Deconvolution_CTVT_customScaden"
+dataDir <- paste0(wDir, "/031_Data/")
+resDir <- paste0(wDir, "/033_Results/", fprefix, "/")
+plotDir <- paste0(wDir, "/034_Plots/", fprefix, "/")
+scriptDir <-  paste0(wDir, "/032_Scripts/")
+resDirScaden <- paste0(resDir, "4_predict/")
+```
+
+
+# 6 New visualizations
+## 6.1 Global parameters
+```{r}
+source(paste0(scriptDir, "/03_Deconvolution_CTVT_vizualizationFunctions.R"))
+source(paste0(scriptDir, "/03_Deconvolution_CTVT_metricFunctions.R"))
+
+manualColors <- c(
+  "Plasma"              = "skyblue",  # Red
+  "Bcells"        = "darkblue",  # Blue
+  "CAF.Endo" = "seagreen",  # Green
+  "Myeloid"     = "#A95AA1",  # Purple
+  "Tcells"      = "#F57",  # Orange
+  "bad"           = "lightgrey" ,  # Brown
+  "CTVT"="grey2"
+)
+
+# Define color palette
+cell_type_colors <- c(
+  "#C2697FFF", "#FDDFA4FF", "#B4B9E0FF",
+  "lightpink", "darkblue", "seagreen"
+)
+
+
+cellTypeOrder <- c("CTVT",
+                   "Bcells",
+                   "Plasma",
+                   "CAF.Endo",
+                   "Myeloid",
+                   "Tcells",
+                   "bad")
+
+sampleGroups <- list(
+  c("Ground truth",  "Reference", "Training data"),
+  # c("sn_3302T1p", "bc_3302T1p"),
+  c("sn_3302T1b", "bn_3302T1b", "bc_3302T1b", "bc_3302T1p"),
+  # c("sn_3302T1p", "bn_3302T1b", "bc_3302T1p"),
+  c("sn_3621T","bn_3621T", "bc_3621T"),
+  c("sn_3203T1A2c", "bn_3203T1A2c", "bc_3203T1A2c"),
+  c("sn_3145T1c","bc_3145T1c" , "bn_3145T1c"),
+  c("sn_3145T11a", "bn_3145T11a", "bc_3145T11a" ),
+  c("bc_3203T1A2b",  "bn_3203T1A2b"),
+  c("bc_3776T"),
+  c("bc_3775T" ),
+  c("bc_3774T"),
+  c("bc_3772T"),
+  c("bc_3770T"),
+  c("bc_3764T"),
+  c("bc_3761T"),
+  c("bc_3760T"),
+  c("bc_3759T"),
+  c("bc_3752T"))
+  
+
+# Flatten list to get sampleOrder (same as yours)
+sampleOrder <- unlist(sampleGroups)
+
+# Determine where to insert gaps: after each group
+rowGaps <- unit(rep(5, length(sampleGroups) - 1), "pt")
+
+# refProp <- read.xlsx(paste0(resDir, "13_Results/relativeProportionCellTypesPerReference.xlsx")) %>%
+#   column_to_rownames("cellTypes") %>%
+#   as.data.frame()
+
+
+```
+
+## 6.2 Read in results
+```{r}
+masterGlobMetricDf <- read.xlsx(paste0(resDir, 
+                                       fprefix,
+                                       "_masterGlobalMetricDf.xlsx"))
+
+masterGranularMetricDf <- read.xlsx(paste0(resDir,   
+                                           fprefix, 
+                                           "_masterGranularMetricDf.xlsx"))
+
+masterPropDf <- read.xlsx(paste0(resDir, 
+                                 fprefix, 
+                                 "_masterProportionDf.xlsx"))
+
+# Filter only "sn" samples for true proportions df. Never changes. 
+snDf <- masterPropDf %>%
+    filter(sampleType == "sn")%>%
+    mutate(typeName = paste0(sampleType,"_", sampleNameEdit))
+
+masterRawPEDf <- read.xlsx(paste0(resDir, 
+                                  fprefix, 
+                                  "_masterRawPEDf.xlsx"))
+```
+
+## 6.3 Proportion dataframes
+### 6.3.1 Reference proportions
+For each reference (ex. snCounts), we want to compute the average prop of cell types across all samples. 
+```{r}
+snCell <- rowSums(snCellCounts)
+
+snCellProp <- snCell / sum(snCell) 
+
+
+masterPropAvgParamSeed <- read.xlsx(paste0(resDir,
+                  fprefix,
+                  "_masterPropAvgParamSeed.xlsx"))
+```
+
+### 6.3.2 Per Param_Seed
+Per combination of parameters, 
+```{r}
+print(unique(masterPropDf$Reference))
+
+for (ref in unique(masterPropDf$Reference)){
+  
+  print(paste0("Running reference: ", ref))
+  
+  # Create heatmap directory for this reference. 
+  plotDirHmPropDf <- paste0(plotDir, "/heatmaps/", ref, "/")
+  plotDirBarPropDf <- paste0(plotDir, "/bar/", ref, "/")
+  # Will not overwrite any existing directories. 
+  dir.create(plotDirHmPropDf, recursive = T)
+  dir.create(plotDirBarPropDf,recursive = T)
+  
+  #########################
+  # Get "All samples", "Reference", and "Training data" cell type proportions. 
+  #########################
+  
+  # if ref == "snCounts", rbind the fullRef row twice (because snCounts=fullRef -- not an LOO)
+  
+  
+  
+  refDf <- NULL
+  if (ref == "snCounts"){
+    refDf <- rbind(snCellProp, snCellProp) %>%
+      as.data.frame() %>%
+      select(cellTypeOrder)
+      
+    
+    # Add rownames back! 
+    # colnames(refDf) <- cellTypeOrder
+    rownames(refDf) <- c("Ground truth", "snCounts")
+  
+    }else{
+      
+    refDf <- refProp %>%
+      select(c(fullRef, ref)) %>%
+      t() 
+  }
+
+  # To match sampleGroup names and order. --> For LOO data.
+  rownames(refDf) <- c("Ground truth", "Reference")
+  
+  # To match cell type order in heatmapMatrix.
+  refDf <- refDf[,cellTypeOrder]
+  
+  #########################
+  # Subset masterPropDf on reference for creating heatmapMatrix.
+  #########################
+  
+  # Add column for heatmap rownames to match sampleGroups. Also add column matching seed and   parameters combination
+  masterPropDfEdit <- masterPropDf %>%
+    filter(Reference==ref) %>%
+    mutate(typeName = paste0(sampleType,"_", sampleNameEdit), 
+           Param_Seed = paste0(Parameters,"_", Seed))
+  
+  # Remainder of results df. 
+  resDf <- masterPropDfEdit %>%
+    filter(sampleType != "sn")
+
+  ###########################################
+  ### Loop through Method_Param_Reference ###
+  ### Multiple parameters possible per reference 
+  ### Scripts are split by method so not really looping through methods rn. 
+  ###########################################
+  # a <- setdiff( unique(resDf$Param_Seed), unique(masterPropAvgParamSeed$Param_Seed))
+
+  for (mpr in unique(resDf$Param_Seed)){
+    print(mpr)
+    
+    # Filter sn counts. 
+    resDfTruth <- masterPropDfEdit %>%
+      filter(sampleType == "sn")
+    
+    # Filter mpr
+    resDfPredict <- masterPropDfEdit %>%
+      filter(Param_Seed==mpr)
+    
+    # Filter training data proportions for this Param_Seed and add to refDf
+    tempTrainProp <- masterPropAvgParamSeed %>%
+      filter(Param_Seed == mpr) %>%
+      # select(-c(Parameters, Param_Seed)) %>%
+      ungroup %>%
+      select(colnames(refDf)) %>%
+      # TODO: Check why adding grouping variables?
+      as.matrix()
+    
+    rownames(tempTrainProp) <- "Training data" # TODO: Add stdev of proportions for average!
+    
+    tempRefDf <- rbind(refDf, 
+                       tempTrainProp)
+   
+    
+    # Rbind results and ground truth. 
+    tempPlotDf <- rbind(resDfPredict, resDfTruth) %>%
+      filter(typeName %in% sampleOrder)
+    
+    # Check to make sure all typeNames have all cell types in df
+    all_counts_equal <- length(unique(table(tempPlotDf$typeName))) == 1
+    
+    if (all_counts_equal==FALSE) {
+      cat("❌ typeName groups have unequal counts.\n")
+      print(table(tempPlotDf$typeName))  # Optional: see where they differ
+    }
+  
+    # Pivot to wide format
+    heatmapMatrix <- tempPlotDf %>%
+      select(typeName, manual.log.anot.fine, cellProportion) %>%
+      pivot_wider(names_from = manual.log.anot.fine, values_from = cellProportion) %>%
+      # Use mutated seq type _ sample name edit for new row names.
+      column_to_rownames("typeName") %>%
+      select(cellTypeOrder) %>%
+      as.matrix() %>%
+      rbind(tempRefDf)
+    
+    # Check to make sure all rownames are included in the ordering column of the samples in the heatmap. 
+    diff <- setdiff(rownames(heatmapMatrix), sampleOrder)
+    
+    if (length(diff)!=0) {
+      cat("❌ Missing sample names in sampleOrder")
+      print(diff)
+    }
+    
+    # Check to make sure all ordering columns are in rownames. 
+    diff <- setdiff(sampleOrder, rownames(heatmapMatrix))
+    if (length(diff)!=0) {
+      cat("❌ Missing sampleOrder names in heatMapmatrix rownames.")
+      print(diff)  
+    }
+    
+    # Reorder for plotting
+    heatmapMatrix <- heatmapMatrix[sampleOrder, cellTypeOrder]
+    
+    # Ensure that the color vector matches matrix columns
+    cellTypes <- colnames(heatmapMatrix)
+    stopifnot(all(cellTypes %in% names(manualColors)))
+    
+    # Create column-specific color functions: white → manual hue
+    col_fun_list <- setNames(
+      lapply(cellTypes, function(cell) {
+        vals <- heatmapMatrix[, cell]
+        colorRamp2(
+          c(min(vals, na.rm = TRUE), max(vals, na.rm = TRUE)),
+          c("white", manualColors[[cell]])
+        )
+      }),
+      cellTypes
+    )
+    
+    # Create a heatmap per cell type - printing values 
+    heatmap_list_values <- lapply(cellTypes, function(cell) {
+      Heatmap(heatmapMatrix[, cell, drop = FALSE],
+              name = cell,
+              col = col_fun_list[[cell]],
+              cluster_rows = FALSE,
+              cluster_columns = FALSE,
+              show_row_names = TRUE,
+              show_column_names = TRUE, 
+              column_names_rot = 45, 
+              row_gap = rowGaps,
+              row_split = rep(seq_along(sampleGroups), lengths(sampleGroups)),
+          cell_fun = function(j, i, x, y, width, height, fill) {
+      grid.text(
+        sprintf("%.2f", heatmapMatrix[i, cell]),
+        x, y,
+        gp = gpar(fontsize = 10, col = "black")
+      )
+      })
+    })
+    
+    # Create a heatmap per cell type - Not printing values
+    heatmap_list <- lapply(cellTypes, function(cell) {
+      Heatmap(heatmapMatrix[, cell, drop = FALSE],
+              name = cell,
+              col = col_fun_list[[cell]],
+              cluster_rows = FALSE,
+              cluster_columns = FALSE,
+              show_row_names = TRUE,
+              show_column_names = TRUE, 
+              column_names_rot = 45, 
+              row_gap = rowGaps,
+              row_split = rep(seq_along(sampleGroups), lengths(sampleGroups)))
+    })
+    
+    # Combine and draw the full heatmap
+    combinedHeatmap <- Reduce(`+`, heatmap_list_values)
+    combinedHeatmapNoValues <- Reduce(`+`, heatmap_list)
+    
+    pdf(paste0(plotDirHmPropDf, fprefix,"_", mpr, "_proportionsHeatmap.pdf"), 
+        height=10, 
+        width = 10)
+    draw(combinedHeatmap, 
+         heatmap_legend_side = "top", 
+         column_title = mpr, 
+         column_title_side = "bottom",
+         column_title_gp = gpar(fontsize = 14, fontface = "bold")) 
+    draw(combinedHeatmapNoValues, 
+         heatmap_legend_side = "top", 
+         column_title = mpr, 
+         column_title_side = "bottom",
+         column_title_gp = gpar(fontsize = 14, fontface = "bold")) 
+    dev.off()
+    
+    
+    
+    
+    
+    ####### Create proportion bars instead of cells. ##########
+    # -------------------- Create grouped stacked barplot --------------------
+
+    # Convert heatmapMatrix to long format
+    barPlotDf <- as.data.frame(heatmapMatrix) %>%
+      rownames_to_column("typeName") %>%
+      pivot_longer(-typeName, names_to = "cellType", values_to = "proportion")
+    
+    # Create sampleGroup labels based on sampleGroups list
+    sampleGroupMap <- do.call(rbind, lapply(seq_along(sampleGroups), function(i) {
+      data.frame(
+        typeName = sampleGroups[[i]],
+        sampleGroup = paste0("Group_", i)
+      )
+    }))
+    
+   # Ensure sample order is respected
+  barPlotDf$typeName <- factor(barPlotDf$typeName, levels = rev(sampleOrder))  # rev() makes top-to-bottom match sampleGroups
+  
+  # Plot
+  ggBar <- ggplot(barPlotDf, aes(y = typeName, x = proportion, fill = cellType)) +
+    geom_bar(stat = "identity", position = "stack", width = 0.8) +
+    scale_fill_manual(values = manualColors) +
+    labs(
+      title = paste("Cell Type Proportions -", mpr),
+      y = "Sample",
+      x = "Proportion"
+    ) +
+    theme_bw(base_size = 6) +
+    theme(
+      axis.text.y = element_text(size = 8),
+      panel.grid = element_blank()
+    )
+
+
+    
+    # Save the plot
+    ggsave(filename = paste0(plotDirBarPropDf, 
+                             fprefix, 
+                             "_",
+                             mpr, 
+                             "_barplotFaceted.pdf"),
+           plot = ggBar, height = 5, width = 6)
+
+  }
+}
+```
+
+## 6.4 RMSE 
+### 6.3.1 RMSE Heatmaps
+```{r}
+masterPropDfNew <- masterPropDf %>%
+  mutate(Param_Seed = paste0(Parameters, "_seed", Seed))
+```
+
+#### 6.3.1.1 All samples with all cell type proportions. 
+```{r}
+# Compute RMSE using adjusted sample names for with sn matrix. Then left join with original sample names for each result. Then rbind all results and use original sample name as rows in pheatmap. 
+rmseNucDf <- masterPropDfNew %>%
+    filter(sampleType %in% c("bn")) %>%
+    select(sampleNameEdit, 
+           sampleName) %>%
+  unique()
+
+
+rmseNuc <- rmseBySampleMedian(masterPropDfNew, 
+                            pred_type = "bn", 
+                            col="Param_Seed") %>%
+  filter(sampleNameEdit %in% rmseNucDf$sampleNameEdit) %>%
+  left_join(rmseNucDf) %>%
+  select(-sampleNameEdit)
+  
+rmseCellDf <- masterPropDfNew %>%
+    filter(sampleType %in% c("bc")) %>%
+    select(sampleNameEdit, 
+           sampleName) %>%
+  unique()
+
+rmseCell <- rmseBySampleMedian(masterPropDfNew, 
+                               pred_type = "bc", 
+                               col = "Param_Seed")%>%
+  filter(sampleNameEdit %in% rmseCellDf$sampleNameEdit) %>%
+  left_join(rmseCellDf) %>%
+  select(-sampleNameEdit)
+
+rmseAllSamples <- rbind(rmseNuc, rmseCell)
+
+# Step 1: Calculate proportions of all cell types
+all_celltype_props <- masterPropDf %>%
+  filter(sampleType %in% c("sn")) %>%
+  select(sampleName, manual.log.anot.fine, cellProportion) %>%
+  unique() %>%
+  pivot_wider(
+    names_from = manual.log.anot.fine,
+    values_from = cellProportion,
+    values_fill = 0  # fill missing with 0
+  ) %>% 
+  select(-"CTVT") # For color mapping
+
+rmseMat <- rmseAllSamples %>%
+      pivot_wider(names_from = "Param_Seed", 
+                  values_from = RMSE) %>%
+  as.data.frame() %>%
+  filter(sampleName %in% all_celltype_props$sampleName) %>%
+      column_to_rownames("sampleName") %>%
+      as.matrix() 
+
+# Step 2: Match row order of rmseMat
+all_celltype_props <- all_celltype_props %>%
+  filter(sampleName %in% rownames(rmseMat)) %>%
+  column_to_rownames("sampleName")
+
+# Reorder to match matrix rows
+all_celltype_props <- all_celltype_props[rownames(rmseMat), , drop = FALSE]
+
+# Step 3: Create color scales for each cell type
+celltype_colors <- lapply(all_celltype_props, function(x) {
+  colorRamp2(
+    range(x, na.rm = TRUE),
+    c("white", scales::hue_pal()(1))  # assign different color per column later
+  )
+})
+
+# Assign unique colors to each cell type (using hue palette), except DFT1
+celltype_names <- colnames(all_celltype_props)[colnames(all_celltype_props)!="CTVT"]
+
+hues <- scales::hue_pal()(length(celltype_names))
+
+celltype_colors <- setNames(
+  lapply(seq_along(celltype_names), function(i) {
+    colorRamp2(range(all_celltype_props[[i]], na.rm = TRUE), c("white", hues[i]))
+  }),
+  celltype_names
+)
+
+# Step 4: Create row annotation for all cell types - add DFT1 from chunk above back in!
+rmseRefDf <- masterPropDf %>%
+    filter(sampleType %in% c("sn")) %>%
+  filter(manual.log.anot.fine %in% c("CTVT")) %>%
+    select(
+           sampleName, 
+           cellProportion) %>%
+  unique()
+
+annot_df <- rmseRefDf %>%
+  filter(sampleName %in% rownames(rmseMat)) %>%
+  column_to_rownames("sampleName") %>%
+  dplyr::rename("CTVT_snProportion"="cellProportion")
+
+# Reorder to match matrix rows
+annot_df <- annot_df[rownames(rmseMat), , drop = FALSE]
+
+multi_celltype_annotation <- rowAnnotation(
+  df = cbind(all_celltype_props, 
+             CTVT_proportion = annot_df$CTVT_snProportion),
+  col = c(celltype_colors, 
+          CTVT_proportion = colorRamp2(
+    range(annot_df$CTVT_snProportion, na.rm = TRUE),
+    c("white","#0F2080"))),
+  annotation_name_side = "top"
+)
+
+# Step 5: Combine with CTVT annotation if you want both
+combined_row_ha <- multi_celltype_annotation  # replace with next line if you want both
+# combined_row_ha <- row_ha + multi_celltype_annotation
+
+# Define min, median, and max RMSE values
+rmse_range <- range(rmseAllSamples$RMSE, na.rm = TRUE)
+rmse_mid <- mean(rmseAllSamples$RMSE, na.rm = TRUE)
+
+# Define color function correctly
+rmse_col_fun <- colorRamp2(
+  c(rmse_range[1], rmse_mid, rmse_range[2]),
+  c("white", "pink", "red"))
+
+
+###################################
+# Code column information
+###################################
+# Extract column information
+paramDf <- data.frame(
+  colname = colnames(rmseMat),
+  stringsAsFactors = FALSE
+)
+
+pattern <- "snCounts_bal([^_]+)_thresh([0-9.]+)_ran([0-9.]+)_var([0-9.]+)_samp(\\d+)_cells(\\d+)_seed(\\d+)_lr([0-9eE.-]+)_steps(\\d+)"
+
+
+paramDf$bal <- str_remove(str_extract(paramDf$colname, "bal(True|False)"), "bal")
+
+paramDf$thresh <- str_remove(str_extract(paramDf$colname, "thresh(None|[0-9.]+)"), "thresh")
+
+paramDf$ran <- str_remove(str_extract(paramDf$colname, "ran(\\d+)"), "ran") |> as.numeric()
+
+paramDf$var <- str_remove(str_extract(paramDf$colname, "var([0-9.]+)"), "var") |> as.numeric()
+
+paramDf$cran <- str_remove(str_extract(paramDf$colname, "cran([0-9.]+)"), "cran") |> as.numeric()
+
+paramDf$samp <- str_remove(str_extract(paramDf$colname, "samp(\\d+)"), "samp") |> as.integer()
+
+paramDf$cells <- str_remove(str_extract(paramDf$colname, "cells(\\d+)"), "cells") |> as.integer()
+
+paramDf$seed <- str_remove(str_extract(paramDf$colname, "seed(\\d+)"), "seed") |> as.integer()
+
+paramDf$lr <- str_remove(str_extract(paramDf$colname, "lr([0-9eE.-]+)"), "lr") |> as.numeric()
+
+paramDf$steps <- str_remove(str_extract(paramDf$colname, "steps\\d+"), "steps") |> as.integer()
+
+# paramDf$cran <- str_remove(str_extract(paramDf$colname, "cran([0-9.]+)"), "cran") |> as.numeric()
+
+# Subset only the levels that are present in the data
+# Define full color maps
+bal_colors <- c("True" = "forestgreen", "False" = "orange")
+thresh_colors <- c("None" = "blue", 
+                   "0" = "blue",
+                   # "10"="firebrick2",
+                   "0.2"="pink"
+                   )
+
+  # Subset only the levels that are present in the data
+bal_colors_present <- bal_colors[names(bal_colors) %in% unique(paramDf$bal)]
+thresh_colors_present <- thresh_colors[names(thresh_colors) %in% unique(paramDf$thresh)]
+
+ha_column = HeatmapAnnotation(
+  bal = paramDf$bal,
+  thresh = paramDf$thresh,
+  ran = paramDf$ran,
+  var = paramDf$var,
+  samp = paramDf$samp,
+  cells = paramDf$cells,
+  cran = paramDf$cran,
+  seed = paramDf$seed,
+  col = list(
+    bal = bal_colors_present,
+    thresh = thresh_colors_present,
+    ran = structure(colorRampPalette(c("darkseagreen1", "darkseagreen4"))(length(unique(paramDf$ran))),
+                    names = sort(unique(paramDf$ran))),
+    var = structure(colorRampPalette(c("cadetblue1", "cadetblue4"))(length(unique(paramDf$var))),
+                    names = sort(unique(paramDf$var))),
+    samp = structure(colorRampPalette(c("pink", "maroon"))(length(unique(paramDf$samp))),
+                     names = sort(unique(paramDf$samp))),
+    cells = structure(colorRampPalette(c("darkgoldenrod1", "darkgoldenrod"))(length(unique(paramDf$cells))),
+                      names = sort(unique(paramDf$cells))),
+    seed = structure(colorRampPalette(c("azure", "azure4"))(length(unique(paramDf$seed))),
+                     names = sort(unique(paramDf$seed))), 
+    steps = structure(colorRampPalette(c("magenta", "purple3"))(length(unique(paramDf$steps))),
+                     names = sort(unique(paramDf$steps))), 
+    lr = structure(colorRampPalette(c("salmon1", "salmon4"))(length(unique(paramDf$lr))),
+                     names = sort(unique(paramDf$lr))), 
+    cran = structure(colorRampPalette(c("blue","whitesmoke", "firebrick2"))(length(unique(paramDf$cran))),
+                     names = sort(unique(paramDf$cran)))
+  ),
+  annotation_name_side = "left",
+  annotation_legend_param = list(title_gp = gpar(fontsize = 8))
+)
+
+
+
+###################################
+# Clust columns and rows = T 
+###################################
+
+# Step 6: Add annotation to Heatmap
+htClustRowCol <- Heatmap(
+  rmseMat,
+  name = "Median RMSE",
+  col = rmse_col_fun,
+  cluster_rows = TRUE,
+  cluster_columns = TRUE,
+  show_column_names = F, 
+  row_names_gp = gpar(fontsize = 8),
+  column_names_gp = gpar(fontsize = 8),
+  bottom_annotation = ha_column,
+  left_annotation = combined_row_ha,
+  heatmap_legend_param = list(title = "RMSE"),
+  cell_fun = function(j, i, x, y, width, height, fill){
+    grid.text(sprintf("%.1f", rmseMat[i, j]), x, y, gp = gpar(fontsize = 6))}
+)
+
+
+###################################
+# Clust rows but not columns 
+###################################
+
+# Step 6: Add annotation to Heatmap
+htClustRow <- Heatmap(
+  rmseMat,
+  name = "Median RMSE",
+  col = rmse_col_fun,
+  cluster_rows = TRUE,
+  cluster_columns = F,
+  row_names_gp = gpar(fontsize = 8),
+  column_names_gp = gpar(fontsize = 8),
+  left_annotation = combined_row_ha,
+  show_column_names = F, 
+  bottom_annotation = ha_column,
+  heatmap_legend_param = list(title = "RMSE"),
+  cell_fun = function(j, i, x, y, width, height, fill){
+    grid.text(sprintf("%.1f", rmseMat[i, j]), x, y, gp = gpar(fontsize = 6))}
+)
+
+###################################
+# Clust neither rows nor columns
+###################################
+
+samples <- c(
+  "3145T11a",
+  "3145T1c",
+  "3203T1A2c",
+  "3302T1b" ,
+  "3302T1p",
+  "3621T"
+)
+
+rmseMatManual <- rmseMat[samples,]
+
+# Step 6: Add annotation to Heatmap
+ht <- Heatmap(
+  rmseMatManual,
+  name = "Median RMSE",
+  col = rmse_col_fun,
+  cluster_rows = F,
+  cluster_columns = F,
+  row_names_gp = gpar(fontsize = 8),
+  column_names_gp = gpar(fontsize = 8),
+  left_annotation = combined_row_ha,
+  show_column_names = F, 
+  bottom_annotation = ha_column,
+  heatmap_legend_param = list(title = "RMSE"),
+  cell_fun = function(j, i, x, y, width, height, fill){
+    grid.text(sprintf("%.1f", rmseMat[i, j]), x, y, gp = gpar(fontsize = 6))}
+)
+
+###################################
+# Save
+###################################
+
+# Step 7: Output to PDF
+pdf(paste0(plotDir, "/heatmaps/", fprefix, "_medianRmse_withAllCelltypeProps_paramSeed.pdf"), 
+    height = 10, width = 20)
+
+draw(
+    htClustRowCol,
+    heatmap_legend_side = "right",         # RMSE legend
+    
+    annotation_legend_side = "bottom",     # Annotation legend (e.g., column info)
+    merge_legend = FALSE                   # Keep separate legends
+)
+
+draw(
+    htClustRow,
+    heatmap_legend_side = "right",         # RMSE legsend
+    annotation_legend_side = "bottom",     # Annotation legend (e.g., column info)
+    merge_legend = FALSE                   # Keep separate legends
+)
+
+draw(
+    ht,
+    heatmap_legend_side = "right",         # RMSE legsend
+    annotation_legend_side = "bottom",     # Annotation legend (e.g., column info)
+    merge_legend = FALSE                   # Keep separate legends
+)
+
+
+dev.off()
+```
