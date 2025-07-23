@@ -1,0 +1,2996 @@
+---
+title: "01_Deconvolution_deconBenchmark"
+author: "IMEV2"
+date: "`r Sys.Date()`"
+output: html_document
+---
+# 0 Environment
+## 0.1 Packages
+### 0.1.1 Installs
+```{r echo=F, message=F, warning=FALSE}
+# if (!requireNamespace("devtools", quietly = TRUE)) {
+#    install.packages("devtools")
+# }
+# devtools::install_github("Danko-Lab/BayesPrism/BayesPrism")
+# install.packages("pheatmap")
+```
+
+### 0.1.1 Library
+```{r echo=F, message=F, warning=FALSE}
+set.seed(123)
+library(babelwhale)
+library(DeconBenchmark)
+library(tidyverse)
+library(SingleCellExperiment)
+library(openxlsx)
+library(readxl)
+library(ggplot2)
+library(patchwork)
+library(pheatmap)
+library(dplyr)
+```
+
+## 0.2 Paths
+```{r echo=F, message=FALSE, warning=FALSE}
+fprefix <- "03_Deconvolution_CTVT_deconBenchmark"
+wDir <- paste0("~/gitClones/01_Deconvolution/03_Deconvolution_CTVT/")
+dataDir <- paste0(wDir, "/031_Data/")
+resDir <- paste0(wDir, "/033_Results/", fprefix, "/")
+plotDir <- paste0(wDir, "/034_Plots/", fprefix, "/")
+```
+
+# 1.0 Inputs
+BayesPrism will take intersect of genes in reference and bulk samples.
+Use unnormalized and untransformed count data.
+
+## 1.1 Reference
+Reference - cellxgene dense matrix.
+### 1.1.1 Matrix
+```{r}
+obj <- readRDS(paste0(dataDir, "SCE_concat_CTVT_includingAllGenes_logCorrecDone_vstCorrecDone_ClustDone2_ManAnot.rds"))
+
+objNoBad <- obj[,obj$manual.log.anot.fine!="bad"]
+
+rm(obj)
+gc()
+
+
+geneCorr_famDegs <- read.xlsx("~/gitClones/01_Deconvolution/03_Deconvolution_CTVT/033_Results/03_Deconvolution_CTVT_geneCorrelations/03_Deconvolution_CTVT_geneCorrelations_geneCorrelations_famDegs.xlsx")
+
+snCountsFinal <- counts(objNoBad) %>%
+  as.data.frame() %>%
+  rownames_to_column("Symbol") %>%
+  filter(Symbol %in% geneCorr_famDegs$Gene)
+
+# Map Symbol to ID (in bulk)
+rowData <- rowData(objNoBad) %>% 
+  as.data.frame() %>%
+  filter(Symbol %in% geneCorr_famDegs$Gene) %>%
+  dplyr::select(Symbol, ID) 
+
+### Each gene from snCountsFinal has a matching symbol. 
+
+setdiff(snCountsFinal$Symbol, rowData$Symbol)
+
+snCountsFinal <- snCountsFinal %>%
+  left_join(rowData) %>%
+  select(-Symbol) %>%
+  column_to_rownames("ID")
+  
+snCountsFinal_colData <- colData(objNoBad) 
+
+rm(objNoBad)
+gc()
+
+bulk <- readRDS(paste0(dataDir, "01_Deconvolution_matchedBulkMatrixCTVT_bulkCountsFinal.rds"))
+
+setdiff(rownames(snCountsFinal), rownames(bulk))
+```
+
+### 1.1.2 Cell type annotations
+Cell type labels - character vector same length as # cells in reference.
+Cell state labels - optional, finer granularity character vector. (i.e. myeloid 1 vs myeloid 2). 
+Labels should have at least 20 to 50 cells. 
+```{r}
+snAnno <- snCountsFinal_colData$manual.log.anot.fine
+print(ncol(snCountsFinal)==length(snAnno))
+print(sort(table(snAnno)))
+
+# Create the cell count matrix: rows = cell types, columns = samples
+snCellCounts <- snCountsFinal_colData %>%
+  as.data.frame() %>%
+  group_by(manual.log.anot.fine, 
+           Sample) %>%
+  summarise(cellCount = n()) %>%
+  pivot_wider(names_from = Sample, 
+              values_from = cellCount, 
+              values_fill = 0) %>%
+  column_to_rownames("manual.log.anot.fine")
+```
+
+# 1.3 Bulk
+### 1.2.1 Matrix
+```{r}
+bulkCountsFinal <- readRDS(paste0(dataDir, "01_Deconvolution_matchedBulkMatrixCTVT_bulkCountsFinal.rds"))
+rm(bulk)
+```
+
+### 1.2.2 Metadata
+```{r}
+bulkCountsFinal_metadata <- read.xlsx(paste0(dataDir, "01_Deconvolution_matchedBulkMatrixCTVT_bulkCountsFinal_metadata.xlsx"))
+```
+
+# 3 Loop reference based deconvolution methods
+
+## 3.1 Relative proportions
+
+### 3.1.1 HVGs
+
+### 3.1.2 All genes
+
+## 3.2 Balanced proportions
+
+### 2.2.2 All genes
+
+## 3.1 Reference-based
+I have included the method behind each method in the comment, as well as whether the method worked for this person who tested them all (https://github.com/tinnlab/DeconBenchmark/issues/4)
+```{r}
+print(getSupportedMethods())
+
+masterPropDf <- data.frame(sampleName = c(), 
+                           sampleType = c(), 
+                           manual.log.anot.fine = c(), 
+                           cellProportion =c(), 
+                           sampleNameEdit = c(), 
+                           deconvBenchResType = c(), 
+                           Method = c(), 
+                           Parameters = c())
+
+
+masterMetricDf <- data.frame(bulkCellEstimate = c(), 
+                             bulkNucEstimate = c(), 
+                             Method = c(), 
+                             Parameters = c(), 
+                             Metric = c())
+```
+
+### 3.0.1 Debugging notes
+See 00_deconBenchmark for more info. 
+```{r}
+babelwhale::test_docker_installation(detailed = TRUE) # Docker application needs to be running!!
+Sys.getenv("DOCKER_DEFAULT_PLATFORM") # Should return [1] "linux/amd64" on Sanger Mac's. Change in .Rprofile if not the case. 
+```
+
+## 3.1 Relative proportions
+
+### 3.1.1 HVGs
+#### 3.1.1.1 Set 1
+##### 3.1.1.1.1 MuSiC - Runs, second time not running?? 
+- Can max out memory so lowered m to 14G (also check Activity Monitor - do not have Zotero running at the same time.)
+```{r, warning=F, error=T, message=F}
+MuSiC <- runDeconvolution("MuSiC", 
+                         bulk = bulkCountsFinal,  # 23 Samples
+                         singleCellExpr = snCountsFinal, 
+                         singleCellLabels = snAnno,
+                         dockerArgs = c("--cpus=8.0",
+                                        "-m=14G", 
+                                        "--memory-reservation=8G"))
+
+# Pivot results to "long" to be able to merge with the ground truth proportions from sn reference. 
+musicRes <- MuSiC$MuSiC$P %>%
+  as.data.frame() %>%
+  rownames_to_column("sample") %>%
+  pivot_longer(
+    cols = -sample,
+    names_to = "manual.log.anot.fine",
+    values_to = "cellProportion"
+  ) %>%
+    # If sample name ends in _n, type is bn (bulk nuc). Otherwise, it is bc (bulk cell)
+    mutate(
+      sampleType = case_when(
+        str_ends(sample, "_n") ~ "bn",
+        TRUE ~ "bc"
+      ),
+      # If sample type is bn, remove b_n to save sample id only.
+      sampleName = case_when(
+        sampleType == "bn" ~ str_remove(sample, "_n$"),
+        TRUE ~ sample
+      ),
+      sampleName = case_when(
+        sampleName == "3302T1b_p" ~ "3302T1p",
+        TRUE ~ sampleName
+      ),
+      # If sample type is bc, remove only _p, or _2 to match sample name edit of bn samples. Because we have b_p and b in some cases, we will need to loop through unique $sample and then extract the corresponding sample name edit for the matched bulk. 
+      sampleNameEdit = case_when(
+        sampleType == "bc" ~ str_remove(sampleName, "_p$|_2$"),
+        TRUE ~ sampleName
+      ),
+       # BUT, if sample name is 3302T1b, the sampleNameEdit should be 3302T1bp, so that there is no duplicate sampleNameEdit for the error calculations. TODO: When doing the bulk cell vs bulk nuc, we will need to check that the two bulk cell errors for are grouped together. We could also duplicate the bn results for this sample. 
+
+    ) %>%
+  select(sampleName, sampleType, manual.log.anot.fine, cellProportion, sampleNameEdit) %>%
+  # Method details
+  mutate("deconvBenchResType" = "P", # P for proportion
+         "Method" = "MuSiC", 
+         "Parameters" = "Default", 
+         "Reference" = "subSampledHVGs",
+         "Seed"=123)
+
+# Rbind proportion outputs
+musicResGround <- rbind(musicRes, snCellPercentages_subSample_relProp)
+
+masterPropDf <- rbind(masterPropDf, musicResGround)
+
+# Compute and rbind metric outputs
+musicResMetrics <- deconError(musicResGround, 
+                              parameters = "Default",
+                              method = "MuSiC", 
+                              reference="subSampledHVGs",
+                              seed=123)
+# masterMetricDf <- rbind(masterMetricDf, musicResMetrics)
+# 
+
+# Cleanup
+rm(musicResGround, musicRes, musicResMetrics, MuSiC)
+gc()
+```
+##### 3.1.1.1.2 RNA-Sieve - Runs
+```{r}
+# RNASieve <- runDeconvolution("RNA-Sieve", 
+#                          bulk = bulkCountsFinal,  # 20 Samples
+#                          singleCellExpr = snCountsFinal, 
+#                          singleCellLabels = snAnno,
+#                          dockerArgs = c("--cpus=8.0",
+#                                         "-m=16G", 
+#                                         "--memory-reservation=8G"))
+# 
+# rnasieveRes <-RNASieve$`RNA-Sieve`$P %>%
+#   as.data.frame() %>%
+#   rownames_to_column("sample") %>%
+#   pivot_longer(
+#     cols = -sample,
+#     names_to = "manual.log.anot.fine",
+#     values_to = "cellProportion"
+#   ) %>%
+#     # If sample name ends in _n, type is bn (bulk nuc). Otherwise, it is bc (bulk cell)
+#     mutate(
+#       sampleType = case_when(
+#         str_ends(sample, "_n") ~ "bn",
+#         TRUE ~ "bc"
+#       ),
+#       # If sample type is bn, remove b_n to save sample id only.
+#       sampleName = case_when(
+#         sampleType == "bn" ~ str_remove(sample, "_n$"),
+#         TRUE ~ sample
+#       ),
+#       sampleName = case_when(
+#         sampleName == "3302T1b_p" ~ "3302T1p",
+#         TRUE ~ sampleName
+#       ),
+#       # If sample type is bc, remove only _p, or _2 to match sample name edit of bn samples. Because we have b_p and b in some cases, we will need to loop through unique $sample and then extract the corresponding sample name edit for the matched bulk. 
+#       sampleNameEdit = case_when(
+#         sampleType == "bc" ~ str_remove(sampleName, "_p$|_2$"),
+#         TRUE ~ sampleName
+#       ),
+#        # BUT, if sample name is 3302T1b, the sampleNameEdit should be 3302T1bp, so that there is no duplicate sampleNameEdit for the error calculations. TODO: When doing the bulk cell vs bulk nuc, we will need to check that the two bulk cell errors for are grouped together. We could also duplicate the bn results for this sample. 
+# 
+#     ) %>%
+# 
+#   select(sampleName, sampleType, manual.log.anot.fine, cellProportion, sampleNameEdit) %>%
+#   # Method details
+#   mutate("deconvBenchResType" = "P", # P for proportion
+#          "Method" = "RNA-Sieve", 
+#          "Parameters" = "Default", 
+#          "Reference" = "subSampledHVGs",
+#          "Seed"=123)
+# 
+# # Rbind proportion outputs to compute error metrics.
+# rnasieveResGround <- rbind(rnasieveRes, snCellPercentages_subSample_relProp)
+# 
+# # snCellPercentages have already been rbound to masterPropDf in the "MuSiC" chunk above, so will filter these out after error calculations.
+# masterPropDf <- rbind(masterPropDf, rnasieveRes)
+# 
+# 
+# # Compute and rbind metric outputs
+# rnasieveResMetrics <- deconError(rnasieveResGround, 
+#                               parameters = "Default",
+#                               method = "RNA-Sieve", 
+#                               reference="subSampledHVGs",
+#                               seed=123)
+# # Rbind metric measurements 
+# masterMetricDf <- rbind(masterMetricDf, rnasieveResMetrics)
+# 
+# 
+# # Cleanup
+# rm(rnasieveResGround, rnasieveRes, rnasieveResMetrics, RNASieve)
+# gc()
+```
+##### 3.1.1.1.3 Scaden - Need to fix
+```{r}
+
+```
+
+##### 3.1.1.1.4 Adroit - Runs
+```{r}
+AdRoit <- runDeconvolution("AdRoit", 
+                         bulk = bulkCountsFinal,  # 20 Samples
+                         singleCellExpr = snCountsFinal, 
+                         singleCellLabels = snAnno,
+                         dockerArgs = c("--cpus=8.0",
+                                        "-m=16G", 
+                                        "--memory-reservation=8G"))
+
+adroitResP <- AdRoit$AdRoit$P %>%
+  as.data.frame() %>%
+  rownames_to_column("sample") %>%
+  pivot_longer(
+    cols = -sample,
+    names_to = "manual.log.anot.fine",
+    values_to = "cellProportion"
+  ) %>%
+    # If sample name ends in _n, type is bn (bulk nuc). Otherwise, it is bc (bulk cell)
+    mutate(
+      sampleType = case_when(
+        str_ends(sample, "_n") ~ "bn",
+        TRUE ~ "bc"
+      ),
+      # If sample type is bn, remove b_n to save sample id only.
+      sampleName = case_when(
+        sampleType == "bn" ~ str_remove(sample, "_n$"),
+        TRUE ~ sample
+      ),
+      sampleName = case_when(
+        sampleName == "3302T1b_p" ~ "3302T1p",
+        TRUE ~ sampleName
+      ),
+      # If sample type is bc, remove only _p, or _2 to match sample name edit of bn samples. Because we have b_p and b in some cases, we will need to loop through unique $sample and then extract the corresponding sample name edit for the matched bulk. 
+      sampleNameEdit = case_when(
+        sampleType == "bc" ~ str_remove(sampleName, "_p$|_2$"),
+        TRUE ~ sampleName
+      ),
+       # BUT, if sample name is 3302T1b, the sampleNameEdit should be 3302T1bp, so that there is no duplicate sampleNameEdit for the error calculations. TODO: When doing the bulk cell vs bulk nuc, we will need to check that the two bulk cell errors for are grouped together. We could also duplicate the bn results for this sample. 
+
+    ) %>%
+  select(sampleName, sampleType, manual.log.anot.fine, cellProportion, sampleNameEdit) %>%
+  # Method details
+  mutate("deconvBenchResType" = "P", # P for proportion
+         "Method" = "AdRoit", 
+         "Parameters" = "Default", 
+         "Reference" = "subSampledHVGs",
+         "Seed"=123)
+
+# Rbind proportion outputs to compute error metrics.
+adroitResGround <- rbind(adroitResP, snCellPercentages_subSample_relProp)
+
+# snCellPercentages have already been rbound to masterPropDf in the "MuSiC" chunk above, so will filter these out after error calculations.
+masterPropDf <- rbind(masterPropDf, adroitResP)
+
+
+# # Compute and rbind metric outputs
+# adroitResMetrics <- deconError(adroitResGround, 
+#                               parameters = "Default",
+#                               method = "AdRoit", 
+#                               reference="subSampledHVGs",
+#                               seed=123)
+# # Rbind metric measurements 
+# masterMetricDf <- rbind(masterMetricDf, adroitResMetrics$overviewMetrics)
+
+
+# Cleanup
+rm(adroitResGround, adroitResP, adroitResMetrics, AdRoit)
+gc()
+
+# adroitResS <- AdRoit$AdRoit$S %>%
+#   mutate("deconvBenchResType" = "S",
+#          "Method" = "AdRoit")
+```
+##### 3.1.1.1.5 digitalDLSorter 
+Package no longer available on CRAN, requires editing docker. 
+```{r}
+# digitalDLSorter <- runDeconvolution("digitalDLSorter", 
+#                          bulk = bulkCountsFinal,  # 20 Samples
+#                          singleCellExpr = snCountsFinal, 
+#                          singleCellLabels = snAnno,
+#                          dockerArgs = c("--cpus=8.0",
+#                                         "-m=16G", 
+#                                         "--memory-reservation=8G"))
+# 
+# ddlsRes <- digitalDLSorter  %>%
+#   mutate()
+```
+
+#### 3.1.1.2 Set 2
+Of note, requires defining a signature matrix.
+Interesting to see how many of the signature genes will overlap with the HVGs list using the full sn matrix. 
+TODO: Check what method is "under the hood" for this function. 
+```{r}
+methodsToRunSet2 <- c("DWLS", # WWCLS
+                  "MIXTURE", # vWCLS # Worked
+                  "FARDEEP", # CLS # Worked
+                  "LinDeconSeq",# WWCLS # Worked
+                  "CIBERSORT", # Is this CIBERSORTx? # vWCLS
+                  "BayesPrism", # Bayesian
+                  "DecOT", # Ensembl
+                  "AutoGeneS") # CLS/SVR
+```
+
+##### 3.1.1.2.1 DWLS
+<!-- Check messages: -->
+<!-- No dimnames in `exprsArray`, assuming `fData` and `cData` are sorted according to `exprsArray` -->
+<!-- Assuming data assay in position 1, with name Et is log-transformed. -->
+```{r}
+# # $DWLS
+# # [1] "bulk"             "singleCellExpr"   "singleCellLabels"
+# DWLS <- runDeconvolution("DWLS", 
+#                          bulk = bulkCountsFinal,  # 20 Samples
+#                          singleCellExpr = snCountsFinal, 
+#                          singleCellLabels = snAnno,
+#                          dockerArgs = c("--cpus=8.0",
+#                                         "-m=16G", 
+#                                         "--memory-reservation=8G"))
+# dwlsResP <- DWLS$DWLS$P %>%
+#   as.data.frame() %>%
+#   
+#   as.data.frame() %>%
+#   rownames_to_column("sample") %>%
+#   pivot_longer(
+#     cols = -sample,
+#     names_to = "manual.log.anot.fine",
+#     values_to = "cellProportion"
+#   ) %>%
+#     # If sample name ends in _n, type is bn (bulk nuc). Otherwise, it is bc (bulk cell)
+#     mutate(
+#       sampleType = case_when(
+#         str_ends(sample, "_n") ~ "bn",
+#         TRUE ~ "bc"
+#       ),
+#       # If sample type is bn, remove b_n to save sample id only.
+#       sampleName = case_when(
+#         sampleType == "bn" ~ str_remove(sample, "_n$"),
+#         TRUE ~ sample
+#       ),
+#       sampleName = case_when(
+#         sampleName == "3302T1b_p" ~ "3302T1p",
+#         TRUE ~ sampleName
+#       ),
+#       # If sample type is bc, remove only _p, or _2 to match sample name edit of bn samples. Because we have b_p and b in some cases, we will need to loop through unique $sample and then extract the corresponding sample name edit for the matched bulk. 
+#       sampleNameEdit = case_when(
+#         sampleType == "bc" ~ str_remove(sampleName, "_p$|_2$"),
+#         TRUE ~ sampleName
+#       ),
+#        # BUT, if sample name is 3302T1b, the sampleNameEdit should be 3302T1bp, so that there is no duplicate sampleNameEdit for the error calculations. TODO: When doing the bulk cell vs bulk nuc, we will need to check that the two bulk cell errors for are grouped together. We could also duplicate the bn results for this sample. 
+# 
+#     ) %>%
+#   select(sampleName, sampleType, manual.log.anot.fine, cellProportion, sampleNameEdit) %>%
+#   # Method details
+#   mutate("deconvBenchResType" = "P", # P for proportion
+#          "Method" = "DWLS", 
+#          "Parameters" = "Default", 
+#          "Reference" = "subSampledHVGs",
+#          "Seed"=123)
+# 
+# # Rbind proportion outputs to compute error metrics.
+# dwlsResGround <- rbind(dwlsResP, snCellPercentages_subSample_relProp)
+# 
+# # snCellPercentages have already been rbound to masterPropDf in the "MuSiC" chunk above, so will filter these out after error calculations.
+# masterPropDf <- rbind(masterPropDf, dwlsResP)
+# 
+# 
+# # Compute and rbind metric outputs
+# # dwlsResMetrics <- deconError(dwlsResGround, 
+# #                               parameters = "Default",
+# #                               method = "DWLS", 
+# #                               reference="subSampledHVGs",
+# #                               seed=123)
+# # Rbind metric measurements 
+# # masterMetricDf <- rbind(masterMetricDf, dwlsResMetrics)
+# 
+# 
+# # Cleanup
+# rm(dwlsResGround, dwlsResP, dwlsResMetrics, DWLS)
+# gc()
+
+# dwlsResS <- DWLS$DWLS$S %>%
+#   as.data.frame() %>%
+#   mutate("deconvBenchResType" = "S",
+#          "Method" = "DWLS")
+```
+
+##### 3.1.1.2.2 MIXTURE
+###### 3.1.1.2.2.2 All cell signature 
+Still subset on HVGs
+```{r}
+# $MIXTURE
+# [1] "bulk"      "signature"
+
+
+MIXTURE_fullRef <- runDeconvolution("MIXTURE", 
+                         bulk = bulkCountsFinal,  # 20 Samples
+                         signature = reference_HVGs$signature, # 195 genes creating reference from hvgs and all cells rather than subsample. This could be indicative that we need to loop over multiple seeds for the true best method.  
+                         dockerArgs = c("--cpus=8.0",
+                                        "-m=16G", 
+                                        "--memory-reservation=8G"))
+
+mixtureResP_fullRef <- MIXTURE_fullRef$MIXTURE$P %>%
+  as.data.frame() %>%
+  rownames_to_column("sample") %>%
+  pivot_longer(
+    cols = -sample,
+    names_to = "manual.log.anot.fine",
+    values_to = "cellProportion"
+  ) %>%
+    # If sample name ends in _n, type is bn (bulk nuc). Otherwise, it is bc (bulk cell)
+    mutate(
+      sampleType = case_when(
+        str_ends(sample, "_n") ~ "bn",
+        TRUE ~ "bc"
+      ),
+      # If sample type is bn, remove b_n to save sample id only.
+      sampleName = case_when(
+        sampleType == "bn" ~ str_remove(sample, "_n$"),
+        TRUE ~ sample
+      ),
+      sampleName = case_when(
+        sampleName == "3302T1b_p" ~ "3302T1p",
+        TRUE ~ sampleName
+      ),
+      # If sample type is bc, remove only _p, or _2 to match sample name edit of bn samples. Because we have b_p and b in some cases, we will need to loop through unique $sample and then extract the corresponding sample name edit for the matched bulk. 
+      sampleNameEdit = case_when(
+        sampleType == "bc" ~ str_remove(sampleName, "_p$|_2$"),
+        TRUE ~ sampleName
+      ),
+       # BUT, if sample name is 3302T1b, the sampleNameEdit should be 3302T1bp, so that there is no duplicate sampleNameEdit for the error calculations. TODO: When doing the bulk cell vs bulk nuc, we will need to check that the two bulk cell errors for are grouped together. We could also duplicate the bn results for this sample. 
+
+    ) %>%
+  select(sampleName, sampleType, manual.log.anot.fine, cellProportion, sampleNameEdit) %>%
+  # Method details
+  mutate("deconvBenchResType" = "P", # P for proportion
+         "Method" = "MIXTURE", 
+         "Parameters" = "fullSignatureMatrix", 
+         "Reference" = "subSampledHVGs",
+         "Seed"=123)
+
+# # Rbind proportion outputs to compute error metrics.
+# mixtureResGround <- rbind(mixtureResP_fullRef, snCellPercentages_subSample_relProp)
+
+# snCellPercentages have already been rbound to masterPropDf in the "MuSiC" chunk above, so will filter these out after error calculations.
+masterPropDf <- rbind(masterPropDf, mixtureResP_fullRef)
+
+
+# # Compute and rbind metric outputs
+# mixtureResMetrics <- deconError(mixtureResGround, 
+#                               parameters = "fullSignatureMatrix",
+#                               method = "MIXTURE", 
+#                               reference="subSampledHVGs",
+#                               seed=123)
+# # Rbind metric measurements 
+# masterMetricDf <- rbind(masterMetricDf, mixtureResMetrics)
+
+
+# Cleanup
+rm(mixtureResGround, mixtureResP, mixtureResMetrics, MIXTURE_fullRef)
+gc()
+
+
+# mixtureResS_fullRef <- MIXTURE_fullRef$MIXTURE$S %>%
+#   as.data.frame() %>%
+#   mutate("deconvBenchResType" = "S",
+#          "Method" = "MIXTURE_fullRef")
+```
+##### 3.1.1.2.3 FARDEEP 
+###### 3.1.1.2.3.1 All cell signature
+```{r}
+# # $FARDEEP
+# # [1] "bulk"      "signature" --> technically our subset of genes is "signature
+# 
+# FARDEEP_fullRef <- runDeconvolution("FARDEEP", 
+#                          bulk = bulkCountsFinal,  # 20 Samples
+#                          signature = reference_HVGs$signature, # 195 marker genes only!! 
+#                          dockerArgs = c("--cpus=8.0",
+#                                         "-m=16G", 
+#                                         "--memory-reservation=8G"))
+# 
+# fardeepResP_fullRef <- FARDEEP_fullRef$FARDEEP$P %>%
+#   as.data.frame() %>%
+#   rownames_to_column("sample") %>%
+#   pivot_longer(
+#     cols = -sample,
+#     names_to = "manual.log.anot.fine",
+#     values_to = "cellProportion"
+#   ) %>%
+#     # If sample name ends in _n, type is bn (bulk nuc). Otherwise, it is bc (bulk cell)
+#     mutate(
+#       sampleType = case_when(
+#         str_ends(sample, "_n") ~ "bn",
+#         TRUE ~ "bc"
+#       ),
+#       # If sample type is bn, remove b_n to save sample id only.
+#       sampleName = case_when(
+#         sampleType == "bn" ~ str_remove(sample, "_n$"),
+#         TRUE ~ sample
+#       ),
+#       sampleName = case_when(
+#         sampleName == "3302T1b_p" ~ "3302T1p",
+#         TRUE ~ sampleName
+#       ),
+#       # If sample type is bc, remove only _p, or _2 to match sample name edit of bn samples. Because we have b_p and b in some cases, we will need to loop through unique $sample and then extract the corresponding sample name edit for the matched bulk. 
+#       sampleNameEdit = case_when(
+#         sampleType == "bc" ~ str_remove(sampleName, "_p$|_2$"),
+#         TRUE ~ sampleName
+#       ),
+#        # BUT, if sample name is 3302T1b, the sampleNameEdit should be 3302T1bp, so that there is no duplicate sampleNameEdit for the error calculations. TODO: When doing the bulk cell vs bulk nuc, we will need to check that the two bulk cell errors for are grouped together. We could also duplicate the bn results for this sample. 
+# 
+#     ) %>%
+#   select(sampleName, sampleType, manual.log.anot.fine, cellProportion, sampleNameEdit) %>%
+#   # Method details
+#   mutate("deconvBenchResType" = "P", # P for proportion
+#          "Method" = "FARDEEP", 
+#          "Parameters" = "fullSignatureMatrix", 
+#          "Reference" = "subSampledHVGs",
+#          "Seed"=123)
+# 
+# # Rbind proportion outputs to compute error metrics.
+# # fardeepResGround <- rbind(fardeepResP_fullRef , snCellPercentages_subSample_relProp)
+# 
+# # snCellPercentages have already been rbound to masterPropDf in the "MuSiC" chunk above, so will filter these out after error calculations.
+# masterPropDf <- rbind(masterPropDf, fardeepResP_fullRef)
+# 
+# 
+# # # Compute and rbind metric outputs
+# # fardeepResMetrics <- deconError(fardeepResGround, 
+# #                               parameters = "fullSignatureMatrix",
+# #                               method = "FARDEEP", 
+# #                               reference="subSampledHVGs",
+# #                               seed=123)
+# # # Rbind metric measurements 
+# # masterMetricDf <- rbind(masterMetricDf, fardeepResMetrics)
+# 
+# 
+# # Cleanup
+# rm(fardeepResGround, fardeepResP_fullRef , fardeepResMetrics, FARDEEP_fullRef)
+# gc()
+# 
+# # fardeepResS <- FARDEEP_fullRef$FARDEEP$S %>%
+# #   as.data.frame() %>%
+# #   mutate("deconvBenchResType" = "S",
+# #          "Method" = "FARDEEP")
+# 
+# ## Add full sig results. 
+```
+##### 3.1.1.2.4 LinDeconSeq
+
+###### 3.1.1.2.4.1 All cell signature
+```{r}
+# # $LinDeconSeq
+# # [1] "bulk"      "signature"
+# LinDeconSeq_fullRef <- runDeconvolution("LinDeconSeq", 
+#                          bulk = bulkCountsFinal,  # 20 Samples
+#                          signature = reference_HVGs$signature,
+#                          dockerArgs = c("--cpus=8.0",
+#                                         "-m=16G", 
+#                                         "--memory-reservation=8G"))
+# 
+# lindeconseqResP_fullRef <- LinDeconSeq_fullRef$LinDeconSeq$P %>%
+#   as.data.frame() %>%
+#   rownames_to_column("sample") %>%
+#   pivot_longer(
+#     cols = -sample,
+#     names_to = "manual.log.anot.fine",
+#     values_to = "cellProportion"
+#   ) %>%
+#     # If sample name ends in _n, type is bn (bulk nuc). Otherwise, it is bc (bulk cell)
+#     mutate(
+#       sampleType = case_when(
+#         str_ends(sample, "_n") ~ "bn",
+#         TRUE ~ "bc"
+#       ),
+#       # If sample type is bn, remove b_n to save sample id only.
+#       sampleName = case_when(
+#         sampleType == "bn" ~ str_remove(sample, "_n$"),
+#         TRUE ~ sample
+#       ),
+#       sampleName = case_when(
+#         sampleName == "3302T1b_p" ~ "3302T1p",
+#         TRUE ~ sampleName
+#       ),
+#       # If sample type is bc, remove only _p, or _2 to match sample name edit of bn samples. Because we have b_p and b in some cases, we will need to loop through unique $sample and then extract the corresponding sample name edit for the matched bulk. 
+#       sampleNameEdit = case_when(
+#         sampleType == "bc" ~ str_remove(sampleName, "_p$|_2$"),
+#         TRUE ~ sampleName
+#       ),
+#        # BUT, if sample name is 3302T1b, the sampleNameEdit should be 3302T1bp, so that there is no duplicate sampleNameEdit for the error calculations. TODO: When doing the bulk cell vs bulk nuc, we will need to check that the two bulk cell errors for are grouped together. We could also duplicate the bn results for this sample. 
+# 
+#     ) %>%
+#   select(sampleName, sampleType, manual.log.anot.fine, cellProportion, sampleNameEdit) %>%
+#   # Method details
+#   mutate("deconvBenchResType" = "P", # P for proportion
+#          "Method" = "LinDeconSeq", 
+#          "Parameters" = "fullSignatureMatrix", 
+#          "Reference" = "subSampledHVGs",
+#          "Seed"=123)
+# 
+# # Rbind proportion outputs to compute error metrics.
+# lindeconseqResGround <- rbind(lindeconseqResP_fullRef, snCellPercentages_subSample_relProp)
+# 
+# # snCellPercentages have already been rbound to masterPropDf in the "MuSiC" chunk above, so will filter these out after error calculations.
+# masterPropDf <- rbind(masterPropDf, lindeconseqResP_fullRef)
+# 
+# 
+# # # Compute and rbind metric outputs
+# # lindeconseqResMetrics <- deconError(lindeconseqResGround, 
+# #                               parameters = "fullSignatureMatrix",
+# #                               method = "LinDeconSeq", 
+# #                               reference="subSampledHVGs",
+# #                               seed=123)
+# # # Rbind metric measurements 
+# # masterMetricDf <- rbind(masterMetricDf, lindeconseqResMetrics)
+# 
+# 
+# # Cleanup
+# rm(lindeconseqResGround, lindeconseqResP, lindeconseqResMetrics, LinDeconSeq_fullRef)
+# gc()
+```
+
+##### 3.1.1.2.5 CIBERSORT 
+Docker repo doesn't seem to exist??
+```{r}
+# CIBERSORT <- runDeconvolution("CIBERSORT", 
+#                          bulk = bulkCountsFinal,  # 20 Samples
+#                          singleCellExpr = snCountsFinal, 
+#                          singleCellLabels = snAnno,
+#                          dockerArgs = c("--cpus=8.0",
+#                                         "-m=16G", 
+#                                         "--memory-reservation=8G"))
+```
+##### 3.1.1.2.6 BayesPrism
+Takes veeeery long. Especially compared to Bayes Prism custom script. 
+Will run seperately.
+```{r}
+# $BayesPrism
+# [1] "bulk"             "singleCellExpr"   "singleCellLabels"
+
+bayesPrism <- runDeconvolution("BayesPrism",
+                         bulk = bulkCountsFinal,  # 20 Samples
+                         singleCellExpr = snCountsFinal,
+                         singleCellLabels = snAnno,
+                         dockerArgs = c("--cpus=8.0",
+                                        "-m=14G",
+                                        "--memory-reservation=8G"))
+
+bayesprismResP <- bayesPrism$BayesPrism$P %>%
+  as.data.frame() %>%
+  
+  as.data.frame() %>%
+  rownames_to_column("sample") %>%
+  pivot_longer(
+    cols = -sample,
+    names_to = "manual.log.anot.fine",
+    values_to = "cellProportion"
+  ) %>%
+    # If sample name ends in _n, type is bn (bulk nuc). Otherwise, it is bc (bulk cell)
+    mutate(
+      sampleType = case_when(
+        str_ends(sample, "_n") ~ "bn",
+        TRUE ~ "bc"
+      ),
+      # If sample type is bn, remove b_n to save sample id only.
+      sampleName = case_when(
+        sampleType == "bn" ~ str_remove(sample, "_n$"),
+        TRUE ~ sample
+      ),
+      sampleName = case_when(
+        sampleName == "3302T1b_p" ~ "3302T1p",
+        TRUE ~ sampleName
+      ),
+      # If sample type is bc, remove only _p, or _2 to match sample name edit of bn samples. Because we have b_p and b in some cases, we will need to loop through unique $sample and then extract the corresponding sample name edit for the matched bulk. 
+      sampleNameEdit = case_when(
+        sampleType == "bc" ~ str_remove(sampleName, "_p$|_2$"),
+        TRUE ~ sampleName
+      ),
+       # BUT, if sample name is 3302T1b, the sampleNameEdit should be 3302T1bp, so that there is no duplicate sampleNameEdit for the error calculations. TODO: When doing the bulk cell vs bulk nuc, we will need to check that the two bulk cell errors for are grouped together. We could also duplicate the bn results for this sample. 
+
+    ) %>%
+  select(sampleName, sampleType, manual.log.anot.fine, cellProportion, sampleNameEdit) %>%
+  # Method details
+  mutate("deconvBenchResType" = "P", # P for proportion
+         "Method" = "BayesPrism", 
+         "Parameters" = "Default", 
+         "Reference" = "subSampledHVGs",
+         "Seed"=123)
+
+# Rbind proportion outputs to compute error metrics.
+bayesprismResGround <- rbind(bayesprismResP, snCellPercentages_subSample_relProp)
+
+# snCellPercentages have already been rbound to masterPropDf in the "MuSiC" chunk above, so will filter these out after error calculations.
+masterPropDf <- rbind(masterPropDf, bayesprismResP)
+
+
+# # Compute and rbind metric outputs
+# bayesprismResMetrics <- deconError(bayesprismResGround, 
+#                               parameters = "Default",
+#                               method = "BayesPrism", 
+#                               reference="subSampledHVGs",
+#                               seed=123)
+# # Rbind metric measurements 
+# masterMetricDf <- rbind(masterMetricDf, bayesprismResMetrics)
+
+
+# Cleanup
+rm(bayesprismResGround, bayesprismResP, bayesprismResMetrics, AutoGeneS)
+gc()
+
+```
+
+##### 3.1.1.2.7 DecOT
+Add MATLAB License. I can't find the license file here...
+```{r}
+# # $DecOT
+# # [1] "bulk"               "singleCellExpr"     "singleCellLabels"  
+# # [4] "singleCellSubjects"
+# DecOT <- runDeconvolution("DecOT", 
+#                          bulk = bulkCountsFinal,  # 20 Samples
+#                          singleCellExpr = snCountsFinal, 
+#                          singleCellLabels = snAnno,
+#                          singleCellSubjects = snSample_subSample_relProp,
+#                          matlabLicenseFile = "~/Library/Application Support/MathWorks/MATLAB/R2024b/thisMatlab.pem",
+#                          dockerArgs = c("--cpus=8.0",
+#                                         "-m=16G", 
+#                                         "--memory-reservation=8G"))
+```
+##### 3.1.1.2.8 AutoGeneS
+
+###### 3.1.1.2.8.1 All cell cell type expr
+```{r}
+AutoGeneS_full <- runDeconvolution("AutoGeneS", 
+                         bulk = bulkCountsFinal,  # 20 Samples
+                         cellTypeExpr = reference_HVGs$cellTypeExpr,
+                         dockerArgs = c("--cpus=8.0",
+                                        "-m=16G", 
+                                        "--memory-reservation=8G"))
+
+autogenesResP <- AutoGeneS_full$AutoGeneS$P %>%
+  as.data.frame() %>%
+  rownames_to_column("sample") %>%
+  pivot_longer(
+    cols = -sample,
+    names_to = "manual.log.anot.fine",
+    values_to = "cellProportion"
+  ) %>%
+    # If sample name ends in _n, type is bn (bulk nuc). Otherwise, it is bc (bulk cell)
+    mutate(
+      sampleType = case_when(
+        str_ends(sample, "_n") ~ "bn",
+        TRUE ~ "bc"
+      ),
+      # If sample type is bn, remove b_n to save sample id only.
+      sampleName = case_when(
+        sampleType == "bn" ~ str_remove(sample, "_n$"),
+        TRUE ~ sample
+      ),
+      sampleName = case_when(
+        sampleName == "3302T1b_p" ~ "3302T1p",
+        TRUE ~ sampleName
+      ),
+      # If sample type is bc, remove only _p, or _2 to match sample name edit of bn samples. Because we have b_p and b in some cases, we will need to loop through unique $sample and then extract the corresponding sample name edit for the matched bulk. 
+      sampleNameEdit = case_when(
+        sampleType == "bc" ~ str_remove(sampleName, "_p$|_2$"),
+        TRUE ~ sampleName
+      ),
+       # BUT, if sample name is 3302T1b, the sampleNameEdit should be 3302T1bp, so that there is no duplicate sampleNameEdit for the error calculations. TODO: When doing the bulk cell vs bulk nuc, we will need to check that the two bulk cell errors for are grouped together. We could also duplicate the bn results for this sample. 
+
+    ) %>%
+  select(sampleName, sampleType, manual.log.anot.fine, cellProportion, sampleNameEdit) %>%
+  # Method details
+  mutate("deconvBenchResType" = "P", # P for proportion
+         "Method" = "AutoGeneS", 
+         "Parameters" = "fullCellTypeExpr", 
+         "Reference" = "subSampledHVGs",
+         "Seed"=123)
+
+# Rbind proportion outputs to compute error metrics.
+autogenesResGround <- rbind(autogenesResP, snCellPercentages_subSample_relProp)
+
+# snCellPercentages have already been rbound to masterPropDf in the "MuSiC" chunk above, so will filter these out after error calculations.
+masterPropDf <- rbind(masterPropDf, autogenesResP)
+
+
+# # Compute and rbind metric outputs
+# autogenesResMetrics <- deconError(autogenesResGround, 
+#                               parameters = "fullCellTypeExpr",
+#                               method = "AutoGeneS", 
+#                               reference="subSampledHVGs",
+#                               seed=123)
+# # Rbind metric measurements 
+# masterMetricDf <- rbind(masterMetricDf, autogenesResMetrics)
+
+
+# Cleanup
+rm(autogenesResGround, autogenesResP, autogenesResMetrics, AutoGeneS_full)
+gc()
+```
+
+# 4 Save results
+```{r}
+write.xlsx(masterPropDf, paste0(resDir, fprefix, "_masterProportionDf.xlsx"))
+# write.xlsx(masterMetricDf, paste0(resDir, fprefix, "_masterMetricDf.xlsx"))
+```
+
+
+# 5 Visualizations
+## 5.1 Read in results 
+```{r}
+masterPropDf <- read.xlsx(paste0(resDir, fprefix, "_masterProportionDf.xlsx")) %>%
+  mutate("Method_Param"=paste0(Method, "_", Parameters))
+
+# masterMetricDf <- read.xlsx(paste0(resDir, fprefix, "_masterMetricDf.xlsx")) %>%
+  mutate("Method_Param"=paste0(Method, "_", Parameters))
+```
+
+## 5.2 Global Metrics 
+```{r}
+# Of note, not all bulk samples were in snData
+# > setdiff(dfPred$sampleNameEdit, dfTruth$sampleNameEdit)
+# [1] "3177T4" "3177T5" "3177T6"
+# > # Weirdly, saving with write.xlsx preserves rownames, but can't read them in? 
+# > snCountsFinal_colData <- read.xlsx(paste0(dataDir, "01_Deconvolution_geneAnnotationsCTVTRefsnCountsFinal_colData.xlsx"))
+# > bulkCountsFinal_metadata <- read.xlsx(paste0(dataDir, "01_Deconvolution_matchedBulkMatrixCTVTf_bulkCountsFinal_metadata.xlsx"))
+# > View(bulkCountsFinal_metadata)
+# > setdiff(bulkCountsFinal_metadata$sampleName, snCountsFinal_colData$Sample)
+#  [1] "3176T3"    "3176T3b_n" "3177T2"    "3177T2a_n" "3177T4"    "3177T4a_n" "3177T5"    "3177T5a_n" "3177T6"    "3177T6a_n"
+# [11] "3178T1"    "3178T1b_n" "3179T2"    "3179T2a_n" "3179T3"    "3179T3a_n" "3180T3"    "3180T3a_n" "3181T1"    "3181T1a_n"
+# --> "3177T4"    "3177T4a_n"
+# --> "3177T5"    "3177T5a_n"
+# --> "3177T6"    "3177T6a_n"
+```
+
+### 5.2.1 RMSE
+#### 5.2.1.1 Heatmap functions
+Inspired by https://www.nature.com/articles/s41467-023-41385-5#Fig3. 
+Takes average, should we take median? 
+```{r}
+rmseByCellTypeMean <- function(df, pred_type) {
+  
+  dfPred <- df %>%
+    filter(sampleType %in% c(pred_type)) %>%
+    select(sampleNameEdit, 
+           sampleName, 
+           manual.log.anot.fine, 
+           cellProportion, 
+           Method_Param)
+  
+  dfTruth <- df %>%
+    filter(sampleType == "sn") %>%
+    select(sampleNameEdit, 
+           sampleName, 
+           manual.log.anot.fine, 
+           cellProportion) %>%
+    dplyr::rename(truth = cellProportion)
+  
+  # 7 single-cell samples, 10 bulk cell and 10 bulk nuc samples. 
+  intersect <- intersect(dfPred$sampleNameEdit, dfTruth$sampleNameEdit)
+  
+  dfPredIntersect <- dfPred %>%
+    filter(sampleNameEdit %in% c(intersect))
+  
+  dfTruthIntersect <- dfTruth %>%
+    filter(sampleNameEdit %in% c(intersect))
+
+  # Join and compute RMSE
+  rmseDf <- dfPredIntersect %>%
+    left_join(dfTruthIntersect, 
+              by = c("sampleNameEdit", "manual.log.anot.fine")) %>%
+    group_by(manual.log.anot.fine, 
+             Method_Param) %>%
+    summarise(RMSE = sqrt(mean(((cellProportion - truth) * 100)^2)), 
+              .groups = "drop")
+  
+  return(rmseDf)
+}
+
+rmseByCellTypeMedian <- function(df, pred_type) {
+  
+  dfPred <- df %>%
+    filter(sampleType %in% c(pred_type)) %>%
+    select(sampleNameEdit, 
+           sampleName, 
+           manual.log.anot.fine, 
+           cellProportion, 
+           Method_Param)
+  
+  dfTruth <- df %>%
+    filter(sampleType == "sn") %>%
+    select(sampleNameEdit, 
+           sampleName, 
+           manual.log.anot.fine, 
+           cellProportion) %>%
+    dplyr::rename(truth = cellProportion)
+  
+  # 7 single-cell samples, 10 bulk cell and 10 bulk nuc samples. 
+  intersect <- intersect(dfPred$sampleNameEdit, dfTruth$sampleNameEdit)
+  
+  dfPredIntersect <- dfPred %>%
+    filter(sampleNameEdit %in% c(intersect))
+  
+  dfTruthIntersect <- dfTruth %>%
+    filter(sampleNameEdit %in% c(intersect))
+
+  # Join and compute RMSE
+  rmseDf <- dfPredIntersect %>%
+    left_join(dfTruthIntersect, 
+              by = c("sampleNameEdit", "manual.log.anot.fine")) %>%
+    group_by(manual.log.anot.fine, 
+             Method_Param) %>%
+    summarise(RMSE = sqrt(median(((cellProportion - truth) * 100)^2)), 
+              .groups = "drop") 
+  
+  return(rmseDf)
+}
+
+rmseBySampleMean <- function(df, pred_type) {
+  
+  dfPred <- df %>%
+    filter(sampleType %in% c(pred_type)) %>%
+    select(sampleNameEdit, 
+           sampleName, 
+           manual.log.anot.fine, 
+           cellProportion, 
+           Method_Param)
+  
+  dfTruth <- df %>%
+    filter(sampleType == "sn") %>%
+    select(sampleNameEdit, 
+           sampleName, 
+           manual.log.anot.fine, 
+           cellProportion) %>%
+    dplyr::rename(truth = cellProportion)
+  
+  # 7 single-cell samples, 10 bulk cell and 10 bulk nuc samples. 
+  intersect <- intersect(dfPred$sampleNameEdit, dfTruth$sampleNameEdit)
+  
+  dfPredIntersect <- dfPred %>%
+    filter(sampleNameEdit %in% c(intersect))
+  
+  dfTruthIntersect <- dfTruth %>%
+    filter(sampleNameEdit %in% c(intersect))
+
+  # Join and compute RMSE
+  rmseDf <- dfPredIntersect %>%
+    left_join(dfTruthIntersect, 
+              by = c("sampleNameEdit", "manual.log.anot.fine")) %>%
+    group_by(sampleNameEdit, 
+             Method_Param) %>%
+    summarise(RMSE = sqrt(mean(((cellProportion - truth) * 100)^2)), 
+              .groups = "drop") 
+  
+  return(rmseDf)
+}
+
+rmseBySampleMedian <- function(df, pred_type) {
+  
+  dfPred <- df %>%
+    filter(sampleType %in% c(pred_type)) %>%
+    select(sampleNameEdit, 
+           sampleName, 
+           manual.log.anot.fine, 
+           cellProportion, 
+           Method_Param)
+  
+  dfTruth <- df %>%
+    filter(sampleType == "sn") %>%
+    select(sampleNameEdit, 
+           sampleName, 
+           manual.log.anot.fine, 
+           cellProportion) %>%
+    dplyr::rename(truth = cellProportion)
+  
+  # 7 single-cell samples, 10 bulk cell and 10 bulk nuc samples. 
+  intersect <- intersect(dfPred$sampleNameEdit, dfTruth$sampleNameEdit)
+  
+  dfPredIntersect <- dfPred %>%
+    filter(sampleNameEdit %in% c(intersect))
+  
+  dfTruthIntersect <- dfTruth %>%
+    filter(sampleNameEdit %in% c(intersect))
+
+  # Join and compute RMSE
+  rmseDf <- dfPredIntersect %>%
+    left_join(dfTruthIntersect, 
+              by = c("sampleNameEdit", "manual.log.anot.fine")) %>%
+    group_by(sampleNameEdit, 
+             Method_Param) %>%
+    summarise(RMSE = sqrt(median(((cellProportion - truth) * 100)^2)), 
+              .groups = "drop") 
+  
+  return(rmseDf)
+}
+
+rmseCombinedCellNucSampleMean <- function(df, pred_type) {
+  
+  dfPred <- df %>%
+    # filter(sampleType %in% c(pred_type)) %>%
+    select(sampleNameEdit, 
+           sampleName, 
+           manual.log.anot.fine, 
+           cellProportion, 
+           Method_Param) %>%
+    mutate(sampleName)
+  
+  dfTruth <- df %>%
+    # filter(sampleType == "sn") %>%
+    select(sampleNameEdit, 
+           sampleName, 
+           manual.log.anot.fine, 
+           cellProportion) %>%
+    dplyr::rename(truth = cellProportion)
+  
+  # 7 single-cell samples, 10 bulk cell and 10 bulk nuc samples. 
+  intersect <- intersect(dfPred$sampleNameEdit, dfTruth$sampleNameEdit)
+  
+  dfPredIntersect <- dfPred %>%
+    filter(sampleNameEdit %in% c(intersect))
+  
+  dfTruthIntersect <- dfTruth %>%
+    filter(sampleNameEdit %in% c(intersect))
+
+  # Join and compute RMSE
+  rmseDf <- dfPredIntersect %>%
+    left_join(dfTruthIntersect, 
+              by = c("sampleNameEdit", "manual.log.anot.fine")) %>%
+    group_by(sampleNameEdit, 
+             Method_Param) %>%
+    summarise(RMSE = sqrt(mean(((cellProportion - truth) * 100)^2)), 
+              .groups = "drop") 
+  
+  return(rmseDf)
+}
+```
+#### 5.2.2.1 Plot and save results
+##### 5.2.2.1.1 By cell type - mean
+```{r}
+allRmseList <- list()
+
+# Plot
+pdf(paste0(plotDir, "/heatmaps/", fprefix, "_meanRmse_byCellType.pdf"), 
+      height = 6, width = 6)
+
+for (ptype in c("bn", "bc")) {
+    
+    name <- ifelse(ptype=="bn", "bulkNuc", "bulkCell")
+    rmse <- rmseByCellTypeMean(df = masterPropDf, 
+                               pred_type = ptype)
+    
+    # Cast into matrix for heatmap
+    rmseMat <- rmse %>%
+      pivot_wider(names_from = Method_Param, 
+                  values_from = RMSE) %>%
+      column_to_rownames("manual.log.anot.fine") %>%
+      as.matrix()
+    
+    pheatmap(rmseMat,
+             main = paste0("RMSE - Matched Samples\n", name),
+             color = colorRampPalette(c("white","pink", "red"))(100),
+             breaks = seq(0, 100, length.out = 101), 
+             angle_col = 45, fontsize_col = 5) 
+    
+    # Save for export
+    allRmseList[[name]] <- rmse
+  }
+
+dev.off()
+```
+
+
+
+##### 5.2.1.1.1 By cell type - median
+```{r}
+allRmseList <- list()
+
+# Plot
+pdf(paste0(plotDir, "/heatmaps/", fprefix, "_medianRmse_byCellType.pdf"), 
+      height = 6, width = 6)
+
+for (ptype in c("bn", "bc")) {
+    
+    name <- ifelse(ptype=="bn", "bulkNuc", "bulkCell")
+    rmse <- rmseByCellTypeMedian(df = masterPropDf, 
+                               pred_type = ptype)
+    
+    # Cast into matrix for heatmap
+    rmseMat <- rmse %>%
+      pivot_wider(names_from = Method_Param, 
+                  values_from = RMSE) %>%
+      column_to_rownames("manual.log.anot.fine") %>%
+      as.matrix()
+    
+    pheatmap(rmseMat,
+             main = paste0("RMSE - Matched Samples\n", name),
+             color = colorRampPalette(c("white","pink", "red"))(100),
+             # breaks = seq(0, 100, length.out = 101), 
+             angle_col = 90, fontsize_col = 6) 
+    
+    # Save for export
+    allRmseList[[name]] <- rmse
+  }
+
+dev.off()
+```
+
+##### 5.2.1.1.1 By sample - mean
+```{r}
+allRmseList <- list()
+
+# Plot
+pdf(paste0(plotDir, "/heatmaps/", fprefix, "_meanRmse_bySampleNameEdit.pdf"), 
+      height = 6, width = 6)
+
+for (ptype in c("bn", "bc")) {
+    
+    name <- ifelse(ptype=="bn", "bulkNuc", "bulkCell")
+    rmse <- rmseBySampleMean(df = masterPropDf, 
+                               pred_type = ptype)
+    
+    # Cast into matrix for heatmap
+    rmseMat <- rmse %>%
+      pivot_wider(names_from = Method_Param, 
+                  values_from = RMSE) %>%
+      column_to_rownames("sampleNameEdit") %>%
+      as.matrix()
+    
+    pheatmap(rmseMat,
+             main = paste0("RMSE - Matched Samples\n", name),
+             color = colorRampPalette(c("white","pink", "red"))(100),
+             breaks = seq(0, 100, length.out = 101), 
+             angle_col = 90, fontsize_col = 6) 
+    
+    # Save for export
+    allRmseList[[name]] <- rmse
+  }
+
+dev.off()
+```
+
+##### 5.2.1.1.1 By sample - median
+```{r}
+allRmseList <- list()
+
+# Plot
+pdf(paste0(plotDir, "/heatmaps/", fprefix, "_medianRmse_bySampleNameEdit.pdf"), 
+      height = 6, width = 6)
+
+for (ptype in c("bn", "bc")) {
+    
+    name <- ifelse(ptype=="bn", "bulkNuc", "bulkCell")
+    rmse <- rmseBySampleMedian(df = masterPropDf, 
+                               pred_type = ptype)
+    
+    # Cast into matrix for heatmap
+    rmseMat <- rmse %>%
+      pivot_wider(names_from = Method_Param, 
+                  values_from = RMSE) %>%
+      column_to_rownames("sampleNameEdit") %>%
+      as.matrix()
+    
+    pheatmap(rmseMat,
+             main = paste0("RMSE - Matched Samples\n", name),
+             color = colorRampPalette(c("white","pink", "red"))(100),
+             breaks = seq(0, 100, length.out = 101), 
+             angle_col = 90, fontsize_col = 6) 
+    
+    # Save for export
+    allRmseList[[name]] <- rmse
+  }
+
+dev.off()
+```
+##### 5.2.2.1.5 All samples - mean
+```{r}
+# Compute RMSE using adjusted sample names for with sn matrix. Then left join with original sample names for each result. Then rbind all results and use original sample name as rows in pheatmap. 
+rmseNucDf <- masterPropDf %>%
+    filter(sampleType %in% c("bn")) %>%
+    select(sampleNameEdit, 
+           sampleName) %>%
+  unique()
+
+
+rmseNuc <- rmseBySampleMean(masterPropDf, 
+                            pred_type = "bn") %>%
+  left_join(rmseNucDf) %>%
+  select(-sampleNameEdit)
+  
+rmseCellDf <- masterPropDf %>%
+    filter(sampleType %in% c("bc")) %>%
+    select(sampleNameEdit, 
+           sampleName) %>%
+  unique()
+
+rmseCell <- rmseBySampleMean(masterPropDf, pred_type = "bc")%>%
+  left_join(rmseCellDf) %>%
+  select(-sampleNameEdit)
+
+rmseAllSamples <- rbind(rmseNuc, rmseCell)
+
+   
+
+rmseMat <- rmseAllSamples %>%
+      pivot_wider(names_from = Method_Param, 
+                  values_from = RMSE) %>%
+      column_to_rownames("sampleName") %>%
+      as.matrix()
+
+
+pdf(paste0(plotDir, "/heatmaps/", fprefix, "_meanRmse_bySampleName_allMatchedSamples.pdf"), 
+      height = 6, width = 6)
+pheatmap(rmseMat,
+             main = paste0("RMSE - Matched Samples\n"),
+             color = colorRampPalette(c("white","pink", "red"))(100),
+             breaks = seq(0, 100, length.out = 101), 
+             angle_col = 90, fontsize_col = 6) 
+dev.off()
+```
+
+##### 5.2.2.1.5 All samples - median
+```{r}
+# Compute RMSE using adjusted sample names for with sn matrix. Then left join with original sample names for each result. Then rbind all results and use original sample name as rows in pheatmap. 
+rmseNucDf <- masterPropDf %>%
+    filter(sampleType %in% c("bn")) %>%
+    select(sampleNameEdit, 
+           sampleName) %>%
+  unique()
+
+
+rmseNuc <- rmseBySampleMedian(masterPropDf, 
+                            pred_type = "bn") %>%
+  left_join(rmseNucDf) %>%
+  select(-sampleNameEdit)
+  
+rmseCellDf <- masterPropDf %>%
+    filter(sampleType %in% c("bc")) %>%
+    select(sampleNameEdit, 
+           sampleName) %>%
+  unique()
+
+rmseCell <- rmseBySampleMedian(masterPropDf, pred_type = "bc")%>%
+  left_join(rmseCellDf) %>%
+  select(-sampleNameEdit)
+
+rmseAllSamples <- rbind(rmseNuc, rmseCell)
+
+   
+
+rmseMat <- rmseAllSamples %>%
+      pivot_wider(names_from = Method_Param, 
+                  values_from = RMSE) %>%
+      column_to_rownames("sampleName") %>%
+      as.matrix()
+
+
+pdf(paste0(plotDir, "/heatmaps/", fprefix, "_medianRmse_bySampleName_allMatchedSamples_noRange.pdf"), 
+      height = 6, width = 6)
+pheatmap(rmseMat,
+             main = paste0("RMSE - Matched Samples\n"),
+             color = colorRampPalette(c("white","pink", "red"))(100),
+             # breaks = seq(0, 100, length.out = 101), 
+             angle_col = 90, fontsize_col = 6) 
+dev.off()
+
+rmseRefDf <- masterPropDf %>%
+    filter(sampleType %in% c("sn")) %>%
+  filter(manual.log.anot.fine %in% c("CTVT_cells")) %>%
+    select(
+           sampleName, 
+           cellProportion) %>%
+  unique()
+
+annot_df <- rmseRefDf %>%
+  filter(sampleName %in% rownames(rmseMat)) %>%
+  column_to_rownames("sampleName") %>%
+  dplyr::rename("CTVT_snProportion"="cellProportion")
+
+# Reorder to match matrix rows
+annot_df <- annot_df[rownames(rmseMat), , drop = FALSE]
+
+# Create the row annotation with a continuous color scale
+row_ha <- rowAnnotation(
+  CTVT_proportion = annot_df$CTVT_snProportion,
+  col = list(CTVT_snProportion = colorRamp2(
+    range(annot_df$CTVT_snProportion, na.rm = TRUE),
+    c("white", "purple")
+  )),
+  annotation_name_side = "top"
+)
+# Define min, median, and max RMSE values
+rmse_range <- range(rmseMat, na.rm = TRUE)
+rmse_mid <- median(rmseMat, na.rm = TRUE)
+
+# Define color function correctly
+rmse_col_fun <- colorRamp2(
+  c(rmse_range[1], rmse_mid, rmse_range[2]),
+  c("white", "pink", "red")
+  
+  
+)
+
+ht <- Heatmap(
+  rmseMat,
+  name = "Median RMSE",
+  col = rmse_col_fun,
+  cluster_rows = TRUE,
+  cluster_columns = TRUE,
+  row_names_gp = gpar(fontsize = 8),
+  column_names_gp = gpar(fontsize = 8),
+  left_annotation = row_ha,
+  heatmap_legend_param = list(title = "RMSE")
+)
+
+
+pdf(paste0(plotDir, "/heatmaps/", fprefix, "_medianRmse_bySampleName_allMatchedSamples_noRange_withCTVTProp.pdf"), 
+      height = 6, width = 6)
+
+print(ht)
+
+dev.off()
+
+```
+
+### 5.2.2 All samples all cell types
+#### 5.2.2.1 Line plots
+##### 5.2.2.1.1 Bulk nucleus vs bulk cell estimates 
+```{r}
+bulkComparison <- ggplot(masterMetricDf, aes(x = bulkCellEstimate, y = bulkNucEstimate, color = Method_Param)) +
+  geom_point(alpha = 0.7) +
+  facet_wrap(~ Metric, scales = "free") +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "gray") +
+  theme_minimal() +
+  labs(
+    title = "Comparison of Estimates by Metric",
+    x = "Prediction on Bulk Cell Samples",
+    y = "Prediction on Bulk Nucleus Samples"
+  ) 
+
+ggsave(paste0(plotDir,"line/", fprefix, "_masterMetricDf_bulkNuc_vs_bulkCell.pdf"),
+       bulkComparison,
+       height = 5, 
+       width = 9)
+```
+##### 5.2.2.1.2 Dummy data
+```{r}
+# Create dummy limits per metric to control axis scaling
+limits_df <- data.frame(
+  Metric = c("MAE", "MAECorr", "SCorr", "CCorr"),
+  x_min = c(0, 0, -1, -1),
+  x_max = c(1, 1, 1, 1),
+  y_min = c(0, 0, -1, -1),
+  y_max = c(1, 1, 1, 1)
+)
+
+# Join dummy limits to your main data
+plot_df <- masterMetricDf %>%
+  left_join(limits_df, by = "Metric")
+
+# Plot using geom_blank() with dummy limits to force correct axis ranges
+blankPlot <- ggplot(plot_df, aes(x = bulkCellEstimate, y = bulkNucEstimate)) +
+  geom_blank(aes(x = x_min, y = y_min)) +
+  geom_blank(aes(x = x_max, y = y_max)) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "gray") +
+  facet_wrap(~ Metric, scales = "free") +
+  theme_minimal() +
+  labs(
+    title = "",
+    x = "Bulk Cell Estimate",
+    y = "Bulk Nucleus Estimate"
+  )
+
+ggsave(paste0(plotDir,"line/", fprefix, "_masterMetricDf_blankData.pdf"),
+       blankPlot,
+       height = 5, 
+       width = 7)
+```
+#### 5.2.2.2 Tile plots (MAE, MAECorr, SCorr, CCorr)
+
+##### 5.2.2.2.1 Bulk Nuc
+```{r}
+# Reshape data to long format
+plot_df <- masterMetricDf %>%
+  pivot_longer(cols = c(bulkCellEstimate, bulkNucEstimate), 
+               names_to = "EstimateType", values_to = "Value") %>%
+  mutate(
+    Metric = factor(Metric, levels = c("MAE", "MAECorr", "SCorr", "CCorr")),
+    Method_Param = fct_rev(factor(Method_Param))  # Reverse for y-axis
+  )
+
+# plot_metric_tile <- function(data, estimate_type, metric_name, fill_low, fill_high, reverse = FALSE) {
+#   
+#   df <- data %>%
+#     filter(EstimateType == estimate_type, Metric == metric_name)
+#   
+#   p <- ggplot(df, aes(x = Metric, y = Method_Param, fill = Value)) +
+#     geom_tile(color = "white") +
+#     scale_y_discrete(expand = expansion(mult = c(0, 0))) +
+#     scale_x_discrete(expand = expansion(mult = c(0, 0))) +
+#     (if (reverse) scale_fill_gradient(high = fill_low, low = fill_high, na.value = "white")
+#      else scale_fill_gradient(low = fill_low, high = fill_high, na.value = "white")) +
+#     theme_minimal(base_size = 14) +
+#     labs(x = NULL, y = NULL, fill = metric_name) +
+#     ggtitle(metric_name) +
+#     theme(
+#       axis.text.x = element_blank(),
+#       axis.ticks.x = element_blank(),
+#       strip.text = element_text(size = 14),
+#       plot.title = element_text(hjust = 0.5),
+#       legend.title = element_blank()
+#     )
+#   
+#   return(p)
+# }
+
+plot_metric_tile <- function(data, 
+                             estimate_type, 
+                             metric_name, 
+                             fill_low, 
+                             fill_high, 
+                             title,
+                             reverse = FALSE) {
+  
+  df <- data %>%
+    filter(EstimateType == estimate_type, Metric == metric_name)
+  
+  # Define the color scale limits based on the metric name
+  color_limits <- if (metric_name %in% c("SCorr", "CCorr")) {
+    c(-1, 1)  # for SCorr or CCorr
+  } else {
+    c(0, 1)   # for MAE or MAECorr
+  }
+  
+  # Create the plot
+  # p <- ggplot(df, aes(x = Metric, y = Method_Param_Reference, fill = Value)) +
+  #   geom_tile(color = "white") +
+  #   scale_y_discrete(expand = expansion(mult = c(0, 0))) +
+  #   scale_x_discrete(
+  #   expand = expansion(mult = c(0, 0)),
+  #   labels = function(x) str_wrap(x, width = 10)
+  # ) +
+  #   (if (reverse) 
+  #       scale_fill_gradient(low = fill_high, high = fill_low, na.value = "white", limits = color_limits)
+  #    else 
+  #       scale_fill_gradient(low = fill_low, high = fill_high, na.value = "white", limits = color_limits)) +
+  #   theme_minimal(base_size = 14) +
+  #   labs(x = NULL, y = NULL, fill = metric_name) +
+  #   ggtitle(title) +
+  #   theme(
+  #     axis.text.x = element_blank(),
+  #     axis.ticks.x = element_blank(),
+  #     strip.text = element_text(size = 14),
+  #     plot.title = element_text(hjust = 0.5),
+  #     legend.title = element_blank(),
+  #     axis.text.y = element_text(angle = 45, size = 8, hjust = 1)  # Rotate y-axis labels
+  #   )
+  
+  # With text 
+  p <- ggplot(df, aes(x = Metric, y = Method_Param, fill = Value)) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = round(Value, 2)), size = 3) +  # <-- Add this line
+  scale_y_discrete(expand = expansion(mult = c(0, 0))) +
+  scale_x_discrete(
+    expand = expansion(mult = c(0, 0)),
+    labels = function(x) str_wrap(x, width = 10)
+  ) +
+  (if (reverse) 
+      scale_fill_gradient(low = fill_high, high = fill_low, na.value = "white", limits = color_limits)
+   else 
+      scale_fill_gradient(low = fill_low, high = fill_high, na.value = "white", limits = color_limits)) +
+  theme_minimal(base_size = 14) +
+  labs(x = NULL, y = NULL, fill = metric_name) +
+  ggtitle(title) +
+  theme(
+    axis.text.x = element_blank(),
+    axis.ticks.x = element_blank(),
+    strip.text = element_text(size = 14),
+    plot.title = element_text(hjust = 0.5),
+    legend.title = element_blank(),
+    axis.text.y = element_text(angle = 45, size = 8, hjust = 1)
+  )
+
+  
+  return(p)
+}
+
+
+
+# Bulk Nucleus Plots
+p1_nuc <- plot_metric_tile(plot_df, 
+                           "bulkNucEstimate", 
+                           "MAE", 
+                           fill_low = "firebrick3", 
+                           fill_high = "lightyellow", 
+                           title = "Nuc",
+                           reverse = T) # Lower MAE is better. 
+p2_nuc <- plot_metric_tile(plot_df, 
+                           "bulkNucEstimate", 
+                           "MAECorr", 
+                           "navyblue", 
+                           "lightblue", 
+                           title = "Nuc",
+                           reverse = T) # Lower MAECorr is better. 
+p3_nuc <- plot_metric_tile(plot_df, 
+                           "bulkNucEstimate", 
+                           "SCorr", 
+                           "deeppink", 
+                           "mistyrose",
+                           title = "Nuc",
+                           reverse = F) # Higher Corr is better
+p4_nuc <- plot_metric_tile(plot_df, 
+                           "bulkNucEstimate", 
+                           "CCorr", 
+                           
+                           "darkgreen", 
+                           "palegreen", 
+                           title = "Nuc",
+                           reverse = F)# Higher Corr is better
+
+# Combine into one row
+# nucleus_plot <- p1_nuc + p2_nuc + p3_nuc + p4_nuc + plot_layout(ncol = 4) +
+#   plot_annotation(title = "Metric Heatmap for Bulk Nucleus Estimates")
+ 
+# bulknucMetricsPerMethodParam <- wrap_plots(p1_nuc,
+#                    p2_nuc,
+#                    p3_nuc,
+#                    p4_nuc,
+#                    ncol=4,
+#                    axis_titles="collect",
+#                    axes="collect") +
+#   plot_layout(guides = "collect") &
+#   theme(legend.position = "bottom") 
+# 
+# 
+# ggsave(paste0(plotDir, 
+#               "tile/", 
+#               fprefix, "_bulkNucMetricsPerMethodParam.pdf"), 
+#        bulknucMetricsPerMethodParam,
+#        height = 5, 
+#        width= 10)
+```
+##### 5.2.2.2.2 Bulk Cell
+```{r}
+# Bulk Cellleus Plots
+p1_cell <- plot_metric_tile(plot_df, 
+                            "bulkCellEstimate", 
+                            "MAE", 
+                            "firebrick3", 
+                            "lightyellow", 
+                            title = "Cell",
+                            reverse = T)
+p2_cell <- plot_metric_tile(plot_df, 
+                            "bulkCellEstimate", 
+                            "MAECorr", 
+                            "navyblue", 
+                            "lightblue", 
+                            title = "Cell",
+                            reverse = T)
+p3_cell <- plot_metric_tile(plot_df, 
+                            "bulkCellEstimate", 
+                            "SCorr", 
+                            "deeppink", 
+                            "mistyrose",
+                            title = "Cell",
+                            reverse = F)
+p4_cell <- plot_metric_tile(plot_df, 
+                            "bulkCellEstimate", 
+                            "CCorr", 
+                            "darkgreen", 
+                            "palegreen", 
+                            title = "Cell",
+                            reverse = F)
+
+# Combine into one row
+# cellleus_plot <- p1_cell + p2_cell + p3_cell + p4_cell + plot_layout(ncol = 4) +
+#   plot_annotation(title = "Metric Heatmap for Bulk Cellleus Estimates")
+ 
+# bulkcellMetricsPerMethodParam <- wrap_plots(p1_cell,
+#                    p2_cell,
+#                    p3_cell,
+#                    p4_cell,
+#                    ncol=4,
+#                    axis_titles="collect",
+#                    axes="collect") +
+#   plot_layout(guides = "collect") &
+#   theme(legend.position = "bottom") &
+#   theme(
+#     legend.text = element_text(size = 8),        
+#     legend.title = element_text(size = 9)         
+#   ) +
+#   theme(
+#   axis.text.x = element_blank(),
+#   axis.ticks.x = element_blank(),
+#   strip.text = element_text(size = 14),
+#   plot.title = element_text(hjust = 0.5),
+#   legend.title = element_blank(),
+#   axis.text.y = element_text(angle = 45, 
+#                              size = 10, 
+#                              hjust = 1) 
+# )
+# 
+# 
+# ggsave(paste0(plotDir, 
+#               "tile/", 
+#               fprefix, "_bulkCellMetricsPerMethodParam.pdf"), 
+#        bulkcellMetricsPerMethodParam,
+#        height = 5, 
+#        width= 10)
+```
+##### 5.2.2.2.2 Bulk Nuc and Cell (Nuc Cell Nuc Cell)
+
+```{r}
+# # Combine side-by-side
+# combinedPlot <- wrap_plots(
+#   bulknucMetricsPerMethodParam, 
+#   bulkcellMetricsPerMethodParam, nrow=2) +
+#   plot_layout(guides = "collect") &
+#   theme(legend.position = "bottom")
+
+(bulknuccellMetricsPerMethodParam <- wrap_plots(p1_nuc,
+                                            p1_cell,
+                                            p2_nuc,
+                                            p2_cell,
+                                            p3_nuc,
+                                            p3_cell,
+                                            p4_nuc,
+                                            p4_cell,
+                                            ncol=8,
+                                            nrow=1,
+                                            axis_titles="collect",
+                                            axes="collect") +
+  plot_layout(guides = "collect") &
+  theme(legend.position = "bottom") &
+  theme(
+    legend.text = element_text(size = 8),        
+    legend.title = element_text(size = 9)         
+  ) +
+  theme(
+  axis.text.x = element_blank(),
+  axis.ticks.x = element_blank(),
+  strip.text = element_text(size = 14),
+  plot.title = element_text(hjust = 0.5),
+  # legend.title = element_blank(),
+  axis.text.y = element_text(angle = 45, 
+                             size = 10, 
+                             hjust = 1) 
+))
+
+ggsave(paste0(plotDir, 
+              "tile/", 
+              fprefix, "_bulkNucCellMetricsPerMethodParam_long.pdf"), 
+       bulknuccellMetricsPerMethodParam,
+       height = 8, 
+       width= 12)
+```
+
+
+#### 5.2.2.2 Tile plots ("RMSE", "MAE", "Pearsonr", "RPE")
+
+## 5.3 Granular Metrics
+```{r}
+
+```
+# ---
+# 6 New visualizations
+## 6.1 Global parameters
+```{r}
+scriptDir <- paste0(wDir, "/12_Scripts/deconBenchmark/")
+source(paste0(scriptDir, "/01_Deconvolution_deconBenchmark_visualizationFunctions_CTVT.R"))
+source(paste0(scriptDir, "/01_Deconvolution_deconBenchmark_metricFunctions_CTVT.R"))
+
+manualColors <- c(
+  "Myeloid"              = "#85C0F9",  # Red
+  "CAF.Endo"        = "maroon",  # Blue
+  "Tcells" = "seagreen",  # Green
+  "Bcells"     = "#A95AA1",  # Purple
+  "Plasma"      = "lightpink",  # Orange
+  "bad" = "darkgrey",
+  "CTVT"           = "#0F2080"   # Brown
+)
+
+# plotDirHmPropDf <- paste0(plotDir, "/heatmaps/propDf/")
+cellTypeOrder <- c("CTVT", "CAF.Endo", "Myeloid", 
+                   "Bcells", "Plasma",  "Tcells", "bad")
+sampleGroups <- list(
+  c("Ground truth",  "Reference"),
+  # c("sn_3302T1p", "bc_3302T1p"),
+  c("sn_3302T1b", "bn_3302T1b", "bc_3302T1b", "bc_3302T1p"),
+  # c("sn_3302T1p", "bn_3302T1b", "bc_3302T1p"),
+  c("sn_3621T","bn_3621T", "bc_3621T"),
+  c("sn_3203T1A2c", "bn_3203T1A2c", "bc_3203T1A2c"),
+  c("sn_3145T1c","bc_3145T1c" , "bn_3145T1c"),
+  c("sn_3145T11a", "bn_3145T11a", "bc_3145T11a" ),
+  c("bc_3203T1A2b",  "bn_3203T1A2b"),
+  c("bc_3776T"),
+  c("bc_3775T" ),
+  c("bc_3774T"),
+  c("bc_3772T"),
+  c("bc_3770T"),
+  c("bc_3764T"),
+  c("bc_3761T"),
+  c("bc_3760T"),
+  c("bc_3759T"),
+  c("bc_3752T"))
+
+# Flatten list to get sampleOrder (same as yours)
+sampleOrder <- unlist(sampleGroups)
+
+# Determine where to insert gaps: after each group
+rowGaps <- unit(rep(5, length(sampleGroups) - 1), "pt")
+
+# refProp <- read.xlsx(paste0(wDir, "13_Results/relativeProportionCellTypesPerReference.xlsx")) %>%
+#   column_to_rownames("cellTypes") %>%
+#   as.data.frame()
+
+# Filter only "sn" samples for true proportions df. Never changes. 
+masterPropDf <- read.xlsx(paste0(resDir, fprefix, "_masterProportionDf.xlsx")) %>%
+  mutate("Method_Param"=paste0(Method, "_", Parameters))
+
+
+snDf <- masterPropDf %>%
+    filter(sampleType == "sn")%>%
+    mutate(typeName = paste0(sampleType,"_", sampleNameEdit))
+```
+
+## 6.1 Proportion dataframes
+### 6.1.1 Reference proportions
+For each reference (ex. snCounts), we want to compute the average prop of cell types across all samples. 
+```{r}
+snCell <- rowSums(snCellCounts)
+
+snCellProp <- snCell / sum(snCell) 
+
+snCellSubSampleRelProp <- rowSums(snCellCounts_subSample_relProp)
+
+snCellPropSubSampleRelProp <- snCellSubSampleRelProp / sum(snCellSubSampleRelProp) 
+```
+
+### 6.1.2 Per Method_Param
+Per combination of parameters, 
+```{r}
+print(unique(masterPropDf$Reference))
+
+for (ref in unique(masterPropDf$Reference)){
+  
+  print(paste0("Running reference: ", ref))
+  
+  # Create heatmap directory for this reference. 
+  plotDirHmPropDf <- paste0(plotDir, "/heatmaps/", ref, "/")
+  plotDirBpPropDf <- paste0(plotDir, "/bar/", ref, "/")
+  plotDirBarPropDf <- paste0(plotDir, "/bar/", ref, "/")
+  # Will not overwrite any existing directories. 
+  dir.create(plotDirHmPropDf, recursive = T)
+  dir.create(plotDirBpPropDf,recursive = T)
+  dir.create(plotDirBarPropDf,recursive = T)
+  
+  #########################
+  # Get "All samples", "Reference", and "Training data" cell type proportions. 
+  #########################
+  
+  # if ref == "snCounts", rbind the fullRef row twice (because snCounts=fullRef -- not an LOO)
+  
+  
+  
+  refDf <- NULL
+  if (ref == "subSampledHVGs"){
+    refDf <- rbind(snCellProp, snCellPropSubSampleRelProp) %>%
+      as.data.frame() %>%
+      select(cellTypeOrder)
+
+
+    # Add rownames back!
+    # colnames(refDf) <- cellTypeOrder
+    rownames(refDf) <- c("Ground truth", "Reference")
+
+    }else{
+
+    refDf <- refProp %>%
+      select(c(fullRef, ref)) %>%
+      t()
+  }
+  
+  
+
+  # To match sampleGroup names and order. --> For LOO data.
+  rownames(refDf) <- c("Ground truth", "Reference")
+  
+  # To match cell type order in heatmapMatrix.
+  refDf <- refDf[,cellTypeOrder]
+  
+  #########################
+  # Subset masterPropDf on reference for creating heatmapMatrix.
+  #########################
+  
+  # Add column for heatmap rownames to match sampleGroups. Also add column matching seed and   parameters combination
+  masterPropDfEdit <- masterPropDf %>%
+    filter(Reference==ref) %>%
+    mutate(typeName = paste0(sampleType,"_", sampleNameEdit))
+  
+  # Remainder of results df. 
+  resDf <- masterPropDfEdit %>%
+    filter(sampleType != "sn")
+
+  
+
+  for (mpr in unique(resDf$Method_Param)){
+    print(mpr)
+    
+    # Filter sn counts. 
+    resDfTruth <- masterPropDfEdit %>%
+      filter(sampleType == "sn")
+    
+    # Filter mpr
+    resDfPredict <- masterPropDfEdit %>%
+      filter(Method_Param==mpr)
+    
+    # # Filter training data proportions for this Method_Param and add to refDf
+    # tempTrainProp <- masterPropAvgParamSeed %>%
+    #   filter(Method_Param == mpr) %>%
+    #   # select(-c(Parameters, Method_Param)) %>%
+    #   ungroup %>%
+    #   select(colnames(refDf)) %>%
+    #   # TODO: Check why adding grouping variables?
+    #   as.matrix()
+    # 
+    # rownames(tempTrainProp) <- "Training data"
+    
+    tempRefDf <- rbind(refDf)
+   
+    
+    # Rbind results and ground truth. 
+    tempPlotDf <- rbind(resDfPredict, resDfTruth) %>%
+      filter(typeName %in% sampleOrder)
+    
+    # Check to make sure all typeNames have all cell types in df
+    all_counts_equal <- length(unique(table(tempPlotDf$typeName))) == 1
+    
+    if (all_counts_equal==FALSE) {
+      cat("❌ typeName groups have unequal counts.\n")
+      print(table(tempPlotDf$typeName))  # Optional: see where they differ
+    }
+  
+    # Pivot to wide format
+    heatmapMatrix <- tempPlotDf %>%
+      select(typeName, manual.log.anot.fine, cellProportion) %>%
+      pivot_wider(names_from = manual.log.anot.fine, values_from = cellProportion) %>%
+      # Use mutated seq type _ sample name edit for new row names.
+      column_to_rownames("typeName") %>%
+      select(cellTypeOrder) %>%
+      as.matrix() %>%
+      rbind(tempRefDf)
+    
+    # Check to make sure all rownames are included in the ordering column of the samples in the heatmap. 
+    diff <- setdiff(rownames(heatmapMatrix), sampleOrder)
+    
+    if (length(diff)!=0) {
+      cat("❌ Missing sample names in sampleOrder")
+      print(diff)
+    }
+    
+    # Check to make sure all ordering columns are in rownames. 
+    diff <- setdiff(sampleOrder, rownames(heatmapMatrix))
+    if (length(diff)!=0) {
+      cat("❌ Missing sampleOrder names in heatMapmatrix rownames.")
+      print(diff)  
+    }
+    
+    # Reorder for plotting
+    heatmapMatrix <- heatmapMatrix[sampleOrder, cellTypeOrder]
+    
+    # Ensure that the color vector matches matrix columns
+    cellTypes <- colnames(heatmapMatrix)
+    stopifnot(all(cellTypes %in% names(manualColors)))
+    
+    # Create column-specific color functions: white → manual hue
+    col_fun_list <- setNames(
+      lapply(cellTypes, function(cell) {
+        vals <- heatmapMatrix[, cell]
+        colorRamp2(
+          c(min(vals, na.rm = TRUE), max(vals, na.rm = TRUE)),
+          c("white", manualColors[[cell]])
+        )
+      }),
+      cellTypes
+    )
+    
+    # Create a heatmap per cell type - printing values 
+    heatmap_list_values <- lapply(cellTypes, function(cell) {
+      Heatmap(heatmapMatrix[, cell, drop = FALSE],
+              name = cell,
+              col = col_fun_list[[cell]],
+              cluster_rows = FALSE,
+              cluster_columns = FALSE,
+              show_row_names = TRUE,
+              show_column_names = TRUE, 
+              column_names_rot = 45, 
+              row_gap = rowGaps,
+              row_split = rep(seq_along(sampleGroups), lengths(sampleGroups)),
+          cell_fun = function(j, i, x, y, width, height, fill) {
+      grid.text(
+        sprintf("%.2f", heatmapMatrix[i, cell]),
+        x, y,
+        gp = gpar(fontsize = 10, col = "black")
+      )
+      })
+    })
+    
+    # Create a heatmap per cell type - Not printing values
+    heatmap_list <- lapply(cellTypes, function(cell) {
+      Heatmap(heatmapMatrix[, cell, drop = FALSE],
+              name = cell,
+              col = col_fun_list[[cell]],
+              cluster_rows = FALSE,
+              cluster_columns = FALSE,
+              show_row_names = TRUE,
+              show_column_names = TRUE, 
+              column_names_rot = 45, 
+              row_gap = rowGaps,
+              row_split = rep(seq_along(sampleGroups), lengths(sampleGroups)))
+    })
+    
+    # Combine and draw the full heatmap
+    combinedHeatmap <- Reduce(`+`, heatmap_list_values)
+    combinedHeatmapNoValues <- Reduce(`+`, heatmap_list)
+    
+    pdf(paste0(plotDirHmPropDf, fprefix,"_", mpr, "_proportionsHeatmap.pdf"), 
+        height=10, 
+        width = 10)
+    draw(combinedHeatmap, 
+         heatmap_legend_side = "top", 
+         column_title = mpr, 
+         column_title_side = "bottom",
+         column_title_gp = gpar(fontsize = 8, fontface = "bold")) 
+    draw(combinedHeatmapNoValues, 
+         heatmap_legend_side = "top", 
+         column_title = mpr, 
+         column_title_side = "bottom",
+         column_title_gp = gpar(fontsize = 8, fontface = "bold")) 
+    dev.off()
+    
+    
+    
+    
+    
+    ####### Create proportion bars instead of cells. ##########
+    # -------------------- Create grouped stacked barplot --------------------
+
+    # Convert heatmapMatrix to long format
+    barPlotDf <- as.data.frame(heatmapMatrix) %>%
+      rownames_to_column("typeName") %>%
+      pivot_longer(-typeName, names_to = "cellType", values_to = "proportion")
+    
+    # Create sampleGroup labels based on sampleGroups list
+    sampleGroupMap <- do.call(rbind, lapply(seq_along(sampleGroups), function(i) {
+      data.frame(
+        typeName = sampleGroups[[i]],
+        sampleGroup = paste0("Group_", i)
+      )
+    }))
+    
+   # Ensure sample order is respected
+  barPlotDf$typeName <- factor(barPlotDf$typeName, levels = rev(sampleOrder))  # rev() makes top-to-bottom match sampleGroups
+  
+  # Plot
+  ggBar <- ggplot(barPlotDf, aes(y = typeName, x = proportion, fill = cellType)) +
+    geom_bar(stat = "identity", position = "stack", width = 0.8) +
+    scale_fill_manual(values = manualColors) +
+    labs(
+      title = paste("Cell Type Proportions -", mpr),
+      y = "Sample",
+      x = "Proportion"
+    ) +
+    theme_bw(base_size = 6) +
+    theme(
+      axis.text.y = element_text(size = 8),
+      panel.grid = element_blank()
+    )
+
+
+    
+    # Save the plot
+    ggsave(filename = paste0(plotDirBarPropDf, 
+                             fprefix, 
+                             "_",
+                             mpr, 
+                             "_barplotFaceted.pdf"),
+           plot = ggBar, height = 5, width = 6)
+
+  }
+  
+}
+```
+## 6.4 RMSE 
+### 6.3.1 RMSE Heatmaps
+```{r}
+masterPropDfNew <- masterPropDf 
+```
+
+#### 6.3.1.1 All samples with all cell type proportions. 
+```{r}
+# Compute RMSE using adjusted sample names for with sn matrix. Then left join with original sample names for each result. Then rbind all results and use original sample name as rows in pheatmap. 
+rmseNucDf <- masterPropDfNew %>%
+    filter(sampleType %in% c("bn")) %>%
+    select(sampleNameEdit, 
+           sampleName) %>%
+  unique()
+
+
+rmseNuc <- rmseBySampleMedian(masterPropDfNew, 
+                            pred_type = "bn", 
+                            col="Method_Param") %>%
+  filter(sampleNameEdit %in% rmseNucDf$sampleNameEdit) %>%
+  left_join(rmseNucDf) %>%
+  select(-sampleNameEdit)
+  
+rmseCellDf <- masterPropDfNew %>%
+    filter(sampleType %in% c("bc")) %>%
+    select(sampleNameEdit, 
+           sampleName) %>%
+  unique()
+
+rmseCell <- rmseBySampleMedian(masterPropDfNew, 
+                               pred_type = "bc", 
+                               col = "Method_Param")%>%
+  filter(sampleNameEdit %in% rmseCellDf$sampleNameEdit) %>%
+  left_join(rmseCellDf) %>%
+  select(-sampleNameEdit)
+
+rmseAllSamples <- rbind(rmseNuc, rmseCell)
+
+rmseMat <- rmseAllSamples %>%
+      pivot_wider(names_from = "Method_Param", 
+                  values_from = RMSE) %>%
+      column_to_rownames("sampleName") %>%
+      as.matrix() 
+
+# Step 1: Calculate proportions of all cell types
+all_celltype_props <- masterPropDf %>%
+  filter(sampleType %in% c("sn")) %>%
+  select(sampleName, manual.log.anot.fine, cellProportion) %>%
+  unique() %>%
+  pivot_wider(
+    names_from = manual.log.anot.fine,
+    values_from = cellProportion,
+    values_fill = 0  # fill missing with 0
+  ) %>% 
+  select(-"CTVT_cells") # For color mapping
+
+# Step 2: Match row order of rmseMat
+all_celltype_props <- all_celltype_props %>%
+  filter(sampleName %in% rownames(rmseMat)) %>%
+  column_to_rownames("sampleName")
+
+# Reorder to match matrix rows
+all_celltype_props <- all_celltype_props[rownames(rmseMat), , drop = FALSE]
+
+# Step 3: Create color scales for each cell type
+celltype_colors <- lapply(all_celltype_props, function(x) {
+  colorRamp2(
+    range(x, na.rm = TRUE),
+    c("white", scales::hue_pal()(1))  # assign different color per column later
+  )
+})
+
+# Assign unique colors to each cell type (using hue palette), except CTVT
+celltype_names <- colnames(all_celltype_props)[colnames(all_celltype_props)!="CTVT_cells"]
+
+hues <- scales::hue_pal()(length(celltype_names))
+
+celltype_colors <- setNames(
+  lapply(seq_along(celltype_names), function(i) {
+    colorRamp2(range(all_celltype_props[[i]], na.rm = TRUE), c("white", hues[i]))
+  }),
+  celltype_names
+)
+
+# Step 4: Create row annotation for all cell types - add CTVT from chunk above back in!
+rmseRefDf <- masterPropDf %>%
+    filter(sampleType %in% c("sn")) %>%
+  filter(manual.log.anot.fine %in% c("CTVT_cells")) %>%
+    select(
+           sampleName, 
+           cellProportion) %>%
+  unique()
+
+annot_df <- rmseRefDf %>%
+  filter(sampleName %in% rownames(rmseMat)) %>%
+  column_to_rownames("sampleName") %>%
+  dplyr::rename("CTVT_snProportion"="cellProportion")
+
+# Reorder to match matrix rows
+annot_df <- annot_df[rownames(rmseMat), , drop = FALSE]
+
+multi_celltype_annotation <- rowAnnotation(
+  df = cbind(all_celltype_props, 
+             CTVT_proportion = annot_df$CTVT_snProportion),
+  col = c(celltype_colors, 
+          CTVT_proportion = colorRamp2(
+    range(annot_df$CTVT_snProportion, na.rm = TRUE),
+    c("white", "purple"))),
+  annotation_name_side = "top"
+)
+
+# Step 5: Combine with CTVT annotation if you want both
+combined_row_ha <- multi_celltype_annotation  # replace with next line if you want both
+# combined_row_ha <- row_ha + multi_celltype_annotation
+
+# Define min, median, and max RMSE values
+rmse_range <- range(rmseMat, na.rm = TRUE)
+rmse_mid <- median(rmseMat, na.rm = TRUE)
+
+# Define color function correctly
+rmse_col_fun <- colorRamp2(
+  c(rmse_range[1], rmse_mid, rmse_range[2]),
+  c("white", "pink", "red"))
+
+
+###################################
+# Code column information
+###################################
+# Extract column information
+paramDf <- data.frame(
+  colname = colnames(rmseMat),
+  stringsAsFactors = FALSE
+)
+
+pattern <- "snCounts_bal([^_]+)_thresh([0-9.]+)_ran([0-9.]+)_var([0-9.]+)_samp(\\d+)_cells(\\d+)_seed(\\d+)_lr([0-9eE.-]+)_steps(\\d+)_cran([0-9.]+)"
+
+
+paramDf$method <- str_extract(paramDf$colname, "^(AdRoit|AutoGeneS|BayesPrism|DWLS|FARDEEP|LinDeconSeq|MIXTURE|MuSiC|RNA-Sieve)")
+
+paramDf$reference <- str_remove(str_extract(paramDf$colname, "_(Default|fullCellTypeExpr|fullSignatureMatrix|subSampledSignatureMatrix)"), "_")
+
+
+# Subset only the levels that are present in the data
+# Define full color maps
+method_colors <- c("True" = "forestgreen", 
+                   "False" = "orange")
+thresh_colors <- c("0" = "blue", 
+                   # "thresh0" = "red",
+                   # "thresh5"="purple",
+                   "0.2"="pink"
+                   )
+
+  # Subset only the levels that are present in the data
+bal_colors_present <- bal_colors[names(bal_colors) %in% unique(paramDf$bal)]
+thresh_colors_present <- thresh_colors[names(thresh_colors) %in% unique(paramDf$thresh)]
+
+ha_column = HeatmapAnnotation(
+  method = paramDf$method,
+  reference = paramDf$reference,
+  col = list(
+    method = structure(colorRampPalette(c("darkseagreen1", "darkseagreen4"))(length(unique(paramDf$method))),
+                    names = sort(unique(paramDf$method))),
+    reference = structure(colorRampPalette(c("blue", "whitesmoke", "firebrick2"))(length(unique(paramDf$reference))),
+                     names = sort(unique(paramDf$reference)))
+  ),
+  annotation_name_side = "left",
+  annotation_legend_param = list(title_gp = gpar(fontsize = 8))
+)
+
+
+
+###################################
+# Clust columns and rows = T 
+###################################
+
+# Step 6: Add annotation to Heatmap
+htClustRowCol <- Heatmap(
+  rmseMat,
+  name = "Median RMSE",
+  col = rmse_col_fun,
+  cluster_rows = TRUE,
+  cluster_columns = TRUE,
+  show_column_names = F, 
+  row_names_gp = gpar(fontsize = 8),
+  column_names_gp = gpar(fontsize = 8),
+  bottom_annotation = ha_column,
+  left_annotation = combined_row_ha,
+  heatmap_legend_param = list(title = "RMSE"),
+  cell_fun = function(j, i, x, y, width, height, fill){
+    grid.text(sprintf("%.1f", rmseMat[i, j]), x, y, gp = gpar(fontsize = 6))}
+)
+
+
+###################################
+# Clust rows but not columns 
+###################################
+
+# Step 6: Add annotation to Heatmap
+htClustRow <- Heatmap(
+  rmseMat,
+  name = "Median RMSE",
+  col = rmse_col_fun,
+  cluster_rows = TRUE,
+  cluster_columns = F,
+  row_names_gp = gpar(fontsize = 8),
+  column_names_gp = gpar(fontsize = 8),
+  left_annotation = combined_row_ha,
+  show_column_names = F, 
+  bottom_annotation = ha_column,
+  heatmap_legend_param = list(title = "RMSE"),
+  cell_fun = function(j, i, x, y, width, height, fill){
+    grid.text(sprintf("%.1f", rmseMat[i, j]), x, y, gp = gpar(fontsize = 6))}
+)
+
+###################################
+# Clust neither rows nor columns
+###################################
+
+samples <- c(
+  "3176T3b",
+  "3176T3",
+  "3177T2a",
+  "3177T2",
+  "3178T1b",
+  "3178T1",
+  "3179T2a",
+  "3179T2",
+  "3179T3a",
+  "3179T3",
+  "3180T3a",
+  "3180T3",
+  "3181T1a",
+  "3181T1"
+)
+
+rmseMatManual <- rmseMat[samples,]
+
+# Step 6: Add annotation to Heatmap
+ht <- Heatmap(
+  rmseMatManual,
+  name = "Median RMSE",
+  col = rmse_col_fun,
+  cluster_rows = F,
+  cluster_columns = F,
+  row_names_gp = gpar(fontsize = 8),
+  column_names_gp = gpar(fontsize = 8),
+  left_annotation = combined_row_ha,
+  show_column_names = F, 
+  bottom_annotation = ha_column,
+  heatmap_legend_param = list(title = "RMSE"),
+  cell_fun = function(j, i, x, y, width, height, fill){
+    grid.text(sprintf("%.1f", rmseMat[i, j]), x, y, gp = gpar(fontsize = 6))}
+)
+
+###################################
+# Save
+###################################
+
+# Step 7: Output to PDF
+pdf(paste0(plotDir, "/heatmaps/", fprefix, "_medianRmse_withAllCelltypeProps_paramSeed.pdf"), 
+    height = 10, width = 20)
+
+draw(
+    htClustRowCol,
+    heatmap_legend_side = "right",         # RMSE legend
+    
+    annotation_legend_side = "bottom",     # Annotation legend (e.g., column info)
+    merge_legend = FALSE                   # Keep separate legends
+)
+
+draw(
+    htClustRow,
+    heatmap_legend_side = "right",         # RMSE legsend
+    annotation_legend_side = "bottom",     # Annotation legend (e.g., column info)
+    merge_legend = FALSE                   # Keep separate legends
+)
+
+draw(
+    ht,
+    heatmap_legend_side = "right",         # RMSE legsend
+    annotation_legend_side = "bottom",     # Annotation legend (e.g., column info)
+    merge_legend = FALSE                   # Keep separate legends
+)
+
+
+dev.off()
+```
+
+# 6 New visualizations
+## 6.1 Global parameters
+```{r}
+source(paste0(scriptDir, "/01_Deconvolution_deconBenchmark_visualizationFunctions_CTVT.R"))
+source(paste0(scriptDir, "/01_Deconvolution_deconBenchmark_metricFunctions_CTVT.R"))
+manualColors <- c(
+  "Myeloid"              = "skyblue",  # Red
+  "CAF.Endo"        = "#E41A1C",  # Blue
+  "Tcells" = "forestgreen",  # Green
+  "Bcells"     = "magenta",  # Purple
+  "Plasma"      = "orange",  # Orange
+  "bad" = "darkgrey",
+  "CTVT"           = "purple"   # Brown
+)
+
+# plotDirHmPropDf <- paste0(plotDir, "/heatmaps/propDf/")
+cellTypeOrder <- c("CTVT", "CAF.Endo", "Myeloid", 
+                   "Bcells", "Plasma",  "Tcells", "bad")
+
+sampleGroups <- list(
+  c("Ground truth",  "Reference", "Training data"),
+  # c("sn_3302T1p", "bc_3302T1p"),
+  c("sn_3302T1b", "bn_3302T1b", "bc_3302T1b", "bc_3302T1p"),
+  # c("sn_3302T1p", "bn_3302T1b", "bc_3302T1p"),
+  c("sn_3621T","bn_3621T", "bc_3621T"),
+  c("sn_3203T1A2c", "bn_3203T1A2c", "bc_3203T1A2c"),
+  c("sn_3145T1c","bc_3145T1c" , "bn_3145T1c"),
+  c("sn_3145T11a", "bn_3145T11a", "bc_3145T11a" ),
+  c("bc_3203T1A2b",  "bn_3203T1A2b"),
+  c("bc_3776T"),
+  c("bc_3775T" ),
+  c("bc_3774T"),
+  c("bc_3772T"),
+  c("bc_3770T"),
+  c("bc_3764T"),
+  c("bc_3761T"),
+  c("bc_3760T"),
+  c("bc_3759T"),
+  c("bc_3752T"))
+  
+
+# Flatten list to get sampleOrder (same as yours)
+sampleOrder <- unlist(sampleGroups)
+
+# Determine where to insert gaps: after each group
+rowGaps <- unit(rep(5, length(sampleGroups) - 1), "pt")
+
+# refProp <- read.xlsx(paste0(wDir, "13_Results/relativeProportionCellTypesPerReference.xlsx")) %>%
+#   column_to_rownames("cellTypes") %>%
+#   as.data.frame()
+
+# # Filter only "sn" samples for true proportions df. Never changes. 
+# snDf <- masterPropDf %>%
+#     filter(sampleType == "sn")%>%
+#     mutate(typeName = paste0(sampleType,"_", sampleNameEdit))
+```
+## 6.2 Read in results
+```{r}
+masterGlobMetricDf <- read.xlsx(paste0(resDir, fprefix, "_masterGlobalMetricDf.xlsx"))
+
+masterGranularMetricDf <- read.xlsx(paste0(resDir,  fprefix, "_masterGranularMetricDf.xlsx"))
+
+masterPropDf <- read.xlsx(paste0(resDir,  fprefix, "_masterProportionDf.xlsx"))
+
+masterRawPEDf <- read.xlsx(paste0(resDir,  fprefix, "_masterRawPEDf.xlsx"))
+```
+
+## 6.1 Proportion dataframes
+### 6.1.1 Reference proportions
+For each reference (ex. snCounts), we want to compute the average prop of cell types across all samples. 
+```{r}
+snCell <- rowSums(snCellCounts_subSample_relProp)
+
+snCellProp <- snCell / sum(snCell) 
+```
+
+### 6.1.2 Per Param_Seed
+Per combination of parameters, 
+```{r}
+print(unique(masterPropDf$Reference))
+
+for (ref in unique(masterPropDf$Reference)){
+  
+  print(paste0("Running reference: ", ref))
+  
+  # Create heatmap directory for this reference. 
+  plotDirHmPropDf <- paste0(plotDirScaden, "/heatmaps/", ref, "/")
+  plotDirBpPropDf <- paste0(plotDirScaden, "/bar/", ref, "/")
+  plotDirBarPropDf <- paste0(plotDirScaden, "/bar/", ref, "/")
+  # Will not overwrite any existing directories. 
+  dir.create(plotDirHmPropDf, recursive = T)
+  dir.create(plotDirBpPropDf,recursive = T)
+  dir.create(plotDirBarPropDf,recursive = T)
+  
+  #########################
+  # Get "All samples", "Reference", and "Training data" cell type proportions. 
+  #########################
+  
+  # if ref == "snCounts", rbind the fullRef row twice (because snCounts=fullRef -- not an LOO)
+  
+  
+  
+  refDf <- NULL
+  if (ref == "snCounts"){
+    refDf <- rbind(snCellProp, snCellProp) %>%
+      as.data.frame() %>%
+      select(cellTypeOrder)
+      
+    
+    # Add rownames back! 
+    # colnames(refDf) <- cellTypeOrder
+    rownames(refDf) <- c("Ground truth", "snCounts")
+  
+    }else{
+      
+    refDf <- refProp %>%
+      select(c(fullRef, ref)) %>%
+      t() 
+  }
+
+  # To match sampleGroup names and order. --> For LOO data.
+  rownames(refDf) <- c("Ground truth", "Reference")
+  
+  # To match cell type order in heatmapMatrix.
+  refDf <- refDf[,cellTypeOrder]
+  
+  #########################
+  # Subset masterPropDf on reference for creating heatmapMatrix.
+  #########################
+  
+  # Add column for heatmap rownames to match sampleGroups. Also add column matching seed and   parameters combination
+  masterPropDfEdit <- masterPropDf %>%
+    filter(Reference==ref) %>%
+    mutate(typeName = paste0(sampleType,"_", sampleNameEdit), 
+           Param_Seed = paste0(Parameters,"_", Seed))
+  
+  # Remainder of results df. 
+  resDf <- masterPropDfEdit %>%
+    filter(sampleType != "sn")
+
+  ###########################################
+  ### Loop through Method_Param_Reference ###
+  ### Multiple parameters possible per reference 
+  ### Scripts are split by method so not really looping through methods rn. 
+  ###########################################
+  # a <- setdiff( unique(resDf$Param_Seed), unique(masterPropAvgParamSeed$Param_Seed))
+
+  for (mpr in unique(resDf$Param_Seed)){
+    print(mpr)
+    
+    # Filter sn counts. 
+    resDfTruth <- masterPropDfEdit %>%
+      filter(sampleType == "sn")
+    
+    # Filter mpr
+    resDfPredict <- masterPropDfEdit %>%
+      filter(Param_Seed==mpr)
+    
+    # Filter training data proportions for this Param_Seed and add to refDf
+    tempTrainProp <- snCellProp
+    
+    rownames(tempTrainProp) <- "Training data"
+    
+    tempRefDf <- rbind(refDf, 
+                       tempTrainProp)
+   
+    
+    # Rbind results and ground truth. 
+    tempPlotDf <- rbind(resDfPredict, resDfTruth) %>%
+      filter(typeName %in% sampleOrder)
+    
+    # Check to make sure all typeNames have all cell types in df
+    all_counts_equal <- length(unique(table(tempPlotDf$typeName))) == 1
+    
+    if (all_counts_equal==FALSE) {
+      cat("❌ typeName groups have unequal counts.\n")
+      print(table(tempPlotDf$typeName))  # Optional: see where they differ
+    }
+  
+    # Pivot to wide format
+    heatmapMatrix <- tempPlotDf %>%
+      select(typeName, manual.log.anot.fine, cellProportion) %>%
+      pivot_wider(names_from = manual.log.anot.fine, values_from = cellProportion) %>%
+      # Use mutated seq type _ sample name edit for new row names.
+      column_to_rownames("typeName") %>%
+      select(cellTypeOrder) %>%
+      as.matrix() %>%
+      rbind(tempRefDf)
+    
+    # Check to make sure all rownames are included in the ordering column of the samples in the heatmap. 
+    diff <- setdiff(rownames(heatmapMatrix), sampleOrder)
+    
+    if (length(diff)!=0) {
+      cat("❌ Missing sample names in sampleOrder")
+      print(diff)
+    }
+    
+    # Check to make sure all ordering columns are in rownames. 
+    diff <- setdiff(sampleOrder, rownames(heatmapMatrix))
+    if (length(diff)!=0) {
+      cat("❌ Missing sampleOrder names in heatMapmatrix rownames.")
+      print(diff)  
+    }
+    
+    # Reorder for plotting
+    heatmapMatrix <- heatmapMatrix[sampleOrder, cellTypeOrder]
+    
+    # Ensure that the color vector matches matrix columns
+    cellTypes <- colnames(heatmapMatrix)
+    stopifnot(all(cellTypes %in% names(manualColors)))
+    
+    # Create column-specific color functions: white → manual hue
+    col_fun_list <- setNames(
+      lapply(cellTypes, function(cell) {
+        vals <- heatmapMatrix[, cell]
+        colorRamp2(
+          c(min(vals, na.rm = TRUE), max(vals, na.rm = TRUE)),
+          c("white", manualColors[[cell]])
+        )
+      }),
+      cellTypes
+    )
+    
+    # Create a heatmap per cell type - printing values 
+    heatmap_list_values <- lapply(cellTypes, function(cell) {
+      Heatmap(heatmapMatrix[, cell, drop = FALSE],
+              name = cell,
+              col = col_fun_list[[cell]],
+              cluster_rows = FALSE,
+              cluster_columns = FALSE,
+              show_row_names = TRUE,
+              show_column_names = TRUE, 
+              column_names_rot = 45, 
+              row_gap = rowGaps,
+              row_split = rep(seq_along(sampleGroups), lengths(sampleGroups)),
+          cell_fun = function(j, i, x, y, width, height, fill) {
+      grid.text(
+        sprintf("%.2f", heatmapMatrix[i, cell]),
+        x, y,
+        gp = gpar(fontsize = 10, col = "black")
+      )
+      })
+    })
+    
+    # Create a heatmap per cell type - Not printing values
+    heatmap_list <- lapply(cellTypes, function(cell) {
+      Heatmap(heatmapMatrix[, cell, drop = FALSE],
+              name = cell,
+              col = col_fun_list[[cell]],
+              cluster_rows = FALSE,
+              cluster_columns = FALSE,
+              show_row_names = TRUE,
+              show_column_names = TRUE, 
+              column_names_rot = 45, 
+              row_gap = rowGaps,
+              row_split = rep(seq_along(sampleGroups), lengths(sampleGroups)))
+    })
+    
+    # Combine and draw the full heatmap
+    combinedHeatmap <- Reduce(`+`, heatmap_list_values)
+    combinedHeatmapNoValues <- Reduce(`+`, heatmap_list)
+    
+    pdf(paste0(plotDirHmPropDf, fprefix,"_", mpr, "_proportionsHeatmap.pdf"), 
+        height=10, 
+        width = 10)
+    draw(combinedHeatmap, 
+         heatmap_legend_side = "top", 
+         column_title = mpr, 
+         column_title_side = "bottom",
+         column_title_gp = gpar(fontsize = 14, fontface = "bold")) 
+    draw(combinedHeatmapNoValues, 
+         heatmap_legend_side = "top", 
+         column_title = mpr, 
+         column_title_side = "bottom",
+         column_title_gp = gpar(fontsize = 14, fontface = "bold")) 
+    dev.off()
+    
+    
+    
+    
+    
+    ####### Create proportion bars instead of cells. ##########
+    # -------------------- Create grouped stacked barplot --------------------
+
+    # Convert heatmapMatrix to long format
+    barPlotDf <- as.data.frame(heatmapMatrix) %>%
+      rownames_to_column("typeName") %>%
+      pivot_longer(-typeName, names_to = "cellType", values_to = "proportion")
+    
+    # Create sampleGroup labels based on sampleGroups list
+    sampleGroupMap <- do.call(rbind, lapply(seq_along(sampleGroups), function(i) {
+      data.frame(
+        typeName = sampleGroups[[i]],
+        sampleGroup = paste0("Group_", i)
+      )
+    }))
+    
+   # Ensure sample order is respected
+  barPlotDf$typeName <- factor(barPlotDf$typeName, levels = rev(sampleOrder))  # rev() makes top-to-bottom match sampleGroups
+  
+  # Plot
+  ggBar <- ggplot(barPlotDf, aes(y = typeName, x = proportion, fill = cellType)) +
+    geom_bar(stat = "identity", position = "stack", width = 0.8) +
+    scale_fill_manual(values = manualColors) +
+    labs(
+      title = paste("Cell Type Proportions -", mpr),
+      y = "Sample",
+      x = "Proportion"
+    ) +
+    theme_bw(base_size = 12) +
+    theme(
+      axis.text.y = element_text(size = 8),
+      panel.grid = element_blank()
+    )
+
+
+    
+    # Save the plot
+    ggsave(filename = paste0(plotDirBarPropDf, 
+                             fprefix, 
+                             "_",
+                             mpr, 
+                             "_barplotFaceted.pdf"),
+           plot = ggBar, height = 5, width = 6)
+
+  }
+  
+}
+```
+
+
+## 6.4 RMSE 
+### 6.3.1 RMSE Heatmaps
+```{r}
+masterPropDfNew <- masterPropDf 
+```
+
+#### 6.3.1.1 All samples with all cell type proportions. 
+```{r}
+# Compute RMSE using adjusted sample names for with sn matrix. Then left join with original sample names for each result. Then rbind all results and use original sample name as rows in pheatmap. 
+
+
+rmseNucDf <- masterPropDfNew %>%
+    filter(sampleType %in% c("bn")) %>%
+    select(sampleNameEdit, 
+           sampleName) %>%
+  
+  unique()
+
+
+rmseNuc <- rmseBySampleMedian(masterPropDfNew, 
+                            pred_type = "bn", 
+                            col="Method_Param") %>%
+  filter(sampleNameEdit %in% rmseNucDf$sampleNameEdit) %>%
+  left_join(rmseNucDf) %>%
+  select(-sampleNameEdit)%>%
+  mutate(sampleName = paste0("bn_", sampleName))
+
+  
+rmseCellDf <- masterPropDfNew %>%
+    filter(sampleType %in% c("bc")) %>%
+    select(sampleNameEdit, 
+           sampleName)%>%
+  unique()
+
+rmseCell <- rmseBySampleMedian(masterPropDfNew, 
+                               pred_type = "bc", 
+                               col = "Method_Param")%>%
+  filter(sampleNameEdit %in% rmseCellDf$sampleNameEdit) %>%
+  left_join(rmseCellDf) %>%
+  select(-sampleNameEdit) %>%
+  mutate(sampleName = paste0("bc_", sampleName))
+
+rmseAllSamples <- rbind(rmseNuc, rmseCell)
+
+rmseMat <- rmseAllSamples %>%
+      pivot_wider(names_from = "Method_Param", 
+                  values_from = RMSE) %>%
+      column_to_rownames("sampleName") %>%
+      as.matrix()
+
+# Step 1: Calculate proportions of all cell types
+all_celltype_props <- masterPropDf %>%
+  filter(sampleType %in% c("sn")) %>%
+  select(sampleNameEdit, manual.log.anot.fine, cellProportion) %>%
+  unique() %>%
+  pivot_wider(
+    names_from = manual.log.anot.fine,
+    values_from = cellProportion,
+    values_fill = 0  # fill missing with 0
+  ) 
+
+# Step 2: Match row order of rmseMat
+all_celltype_props <- all_celltype_props %>%
+  filter(sampleName %in% rownames(rmseMat)) %>%
+  column_to_rownames("sampleName")
+
+# Reorder to match matrix rows
+all_celltype_props <- all_celltype_props[colnames(rmseMat), , drop = FALSE]
+
+# Step 3: Create color scales for each cell type
+celltype_colors <- lapply(all_celltype_props, function(x) {
+  colorRamp2(
+    range(x, na.rm = TRUE),
+    c("white", scales::hue_pal()(1))  # assign different color per column later
+  )
+})
+
+# Assign unique colors to each cell type (using hue palette), except CTVT
+celltype_names <- colnames(all_celltype_props)
+
+hues <- scales::hue_pal()(length(celltype_names))
+
+celltype_colors <- setNames(
+  lapply(seq_along(celltype_names), function(i) {
+    colorRamp2(range(all_celltype_props[[i]], na.rm = TRUE), c("white", hues[i]))
+  }),
+  celltype_names
+)
+
+# Step 4: Create row annotation for all cell types - add CTVT from chunk above back in!
+rmseRefDf <- masterPropDf %>%
+    filter(sampleType %in% c("sn")) %>%
+  filter(manual.log.anot.fine %in% c("CTVT")) %>%
+    select(
+           sampleName, 
+           cellProportion) %>%
+  unique()
+
+annot_df <- rmseRefDf %>%
+  filter(sampleName %in% rownames(rmseMat)) %>%
+  column_to_rownames("sampleName") %>%
+  dplyr::rename("CTVT_snProportion"="cellProportion")
+
+# Reorder to match matrix rows
+annot_df <- annot_df[rownames(rmseMat), , drop = FALSE]
+
+multi_celltype_annotation <- rowAnnotation(
+  df = cbind(all_celltype_props),
+  col = c(celltype_colors),
+  annotation_name_side = "top"
+)
+
+# Step 5: Combine with CTVT annotation if you want both
+combined_row_ha <- multi_celltype_annotation  # replace with next line if you want both
+# combined_row_ha <- row_ha + multi_celltype_annotation
+
+# Define min, median, and max RMSE values
+rmse_range <- range(rmseMat, na.rm = TRUE)
+rmse_mid <- median(rmseMat, na.rm = TRUE)
+
+# Define color function correctly
+rmse_col_fun <- colorRamp2(
+  c(rmse_range[1], rmse_mid, rmse_range[2]),
+  c("white", "pink", "red"))
+
+
+###################################
+# Code column information
+###################################
+# Extract column information
+paramDf <- data.frame(
+  colname = colnames(rmseMat),
+  stringsAsFactors = FALSE
+)
+
+paramDf$method <- str_extract(paramDf$colname, "^(AdRoit|AutoGeneS|BayesPrism|DWLS|FARDEEP|LinDeconSeq|MIXTURE|MuSiC|RNA-Sieve)")
+
+paramDf$reference <- str_remove(str_extract(paramDf$colname, "_(Default|fullCellTypeExpr|fullSignatureMatrix|subSampledSignatureMatrix)"), "_")
+
+
+# Subset only the levels that are present in the data
+# Define full color maps
+method_colors <- c("True" = "forestgreen", 
+                   "False" = "orange")
+thresh_colors <- c("0" = "blue", 
+                   # "thresh0" = "red",
+                   # "thresh5"="purple",
+                   "0.2"="pink"
+                   )
+
+  # Subset only the levels that are present in the data
+bal_colors_present <- bal_colors[names(bal_colors) %in% unique(paramDf$bal)]
+thresh_colors_present <- thresh_colors[names(thresh_colors) %in% unique(paramDf$thresh)]
+
+ha_column = HeatmapAnnotation(
+  method = paramDf$method,
+  reference = paramDf$reference,
+  col = list(
+    method = structure(colorRampPalette(c("darkseagreen1", "darkseagreen4"))(length(unique(paramDf$method))),
+                    names = sort(unique(paramDf$method))),
+    reference = structure(colorRampPalette(c("blue", "whitesmoke", "firebrick2"))(length(unique(paramDf$reference))),
+                     names = sort(unique(paramDf$reference)))
+  ),
+  annotation_name_side = "left",
+  annotation_legend_param = list(title_gp = gpar(fontsize = 8))
+)
+
+
+
+
+
+
+###################################
+# Clust columns and rows = T 
+###################################
+
+# Step 6: Add annotation to Heatmap
+htClustRowCol <- Heatmap(
+  rmseMat,
+  name = "Median RMSE",
+  col = rmse_col_fun,
+  cluster_rows = TRUE,
+  cluster_columns = TRUE,
+  show_column_names = F, 
+  row_names_gp = gpar(fontsize = 8),
+  column_names_gp = gpar(fontsize = 8),
+  bottom_annotation = ha_column,
+  left_annotation = combined_row_ha,
+  heatmap_legend_param = list(title = "RMSE"),
+  cell_fun = function(j, i, x, y, width, height, fill){
+    grid.text(sprintf("%.1f", rmseMat[i, j]), x, y, gp = gpar(fontsize = 6))}
+)
+
+
+###################################
+# Clust rows but not columns 
+###################################
+
+# Step 6: Add annotation to Heatmap
+htClustRow <- Heatmap(
+  rmseMat,
+  name = "Median RMSE",
+  col = rmse_col_fun,
+  cluster_rows = TRUE,
+  cluster_columns = F,
+  row_names_gp = gpar(fontsize = 8),
+  column_names_gp = gpar(fontsize = 8),
+  left_annotation = combined_row_ha,
+  show_column_names = F, 
+  bottom_annotation = ha_column,
+  heatmap_legend_param = list(title = "RMSE"),
+  cell_fun = function(j, i, x, y, width, height, fill){
+    grid.text(sprintf("%.1f", rmseMat[i, j]), x, y, gp = gpar(fontsize = 6))}
+)
+
+###################################
+# Clust neither rows nor columns
+###################################
+
+samples <- intersect(sampleOrder, rownames(rmseMat))
+
+rmseMatManual <- rmseMat[samples,]
+
+# Step 6: Add annotation to Heatmap
+ht <- Heatmap(
+  rmseMatManual,
+  name = "Median RMSE",
+  col = rmse_col_fun,
+  cluster_rows = F,
+  cluster_columns = F,
+  row_names_gp = gpar(fontsize = 8),
+  column_names_gp = gpar(fontsize = 8),
+  left_annotation = combined_row_ha,
+  show_column_names = F, 
+  bottom_annotation = ha_column,
+  heatmap_legend_param = list(title = "RMSE"),
+  cell_fun = function(j, i, x, y, width, height, fill){
+    grid.text(sprintf("%.1f", rmseMat[i, j]), x, y, gp = gpar(fontsize = 6))}
+)
+
+###################################
+# Save
+###################################
+
+# Step 7: Output to PDF
+pdf(paste0(plotDir, "/heatmaps/", fprefix, "_medianRmse_withAllCelltypeProps_paramSeed.pdf"), 
+    height = 10, width = 20)
+
+draw(
+    htClustRowCol,
+    heatmap_legend_side = "right",         # RMSE legend
+    
+    annotation_legend_side = "bottom",     # Annotation legend (e.g., column info)
+    merge_legend = FALSE                   # Keep separate legends
+)
+
+draw(
+    htClustRow,
+    heatmap_legend_side = "right",         # RMSE legsend
+    annotation_legend_side = "bottom",     # Annotation legend (e.g., column info)
+    merge_legend = FALSE                   # Keep separate legends
+)
+
+draw(
+    ht,
+    heatmap_legend_side = "right",         # RMSE legsend
+    annotation_legend_side = "bottom",     # Annotation legend (e.g., column info)
+    merge_legend = FALSE                   # Keep separate legends
+)
+
+
+dev.off()
+```
+
+

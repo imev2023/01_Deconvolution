@@ -13,6 +13,13 @@ output: html_document
 #    install.packages("devtools")
 # }
 # devtools::install_github("Danko-Lab/BayesPrism/BayesPrism")
+# install.packages("paletteer")
+# Developmental version
+# devtools::install_github("awhstin/awtools")
+# install.packages("ggsci")
+# install.packages("ggnewscale")
+
+
 ```
 ### 0.1.1 Library
 ```{r echo=F, message=F, warning=FALSE}
@@ -20,41 +27,29 @@ set.seed(123)
 library(tidyverse)
 library(openxlsx)
 library(SingleCellExperiment)
+library(ggrepel)
 setClassUnion("ExpData", c("matrix", "SummarizedExperiment"))
+# setClassUnion("characterORNULL", c("character", "NULL"))
+# setClassUnion("DataTableORNULL", c("DataTable", "NULL"))
+
+library(glmGamPoi)
+library(DESeq2)
+library(paletteer)
+library(scales)
+library(ggnewscale)
+
 ```
 
 ## 0.2 Paths
 ```{r echo=F, message=FALSE, warning=FALSE}
-wDir <- paste0("~/Desktop/3_Deconvolution_CTVT/")
-dataDir <- paste0(wDir, "/11_Data/")
-resDir <- paste0(wDir, "/13_Results/")
-plotDir <- paste0(wDir, "/14_Plots/")
 fprefix <- "03_Deconvolution_CTVT_geneCorrelations"
+wDir <- paste0("~/gitClones/01_Deconvolution/03_Deconvolution_CTVT/")
+dataDir <- paste0(wDir, "/031_Data/")
+resDir <- paste0(wDir, "/033_Results/", fprefix, "/")
+plotDir <- paste0(wDir, "/034_Plots/", fprefix, "/")
 ```
 
 # 1 Data
-## 1.1 Read in counts matrix
-Need to see rowData to match to GeneIDs or Symbols in Adrian's table below. 
-```{r}
-obj <- readRDS(paste0(dataDir, "SCE_concat_CTVT_includingAllGenes_logCorrecDone_vstCorrecDone_ClustDone2_ManAnot.rds"))
-
-ctvtRowData <- rowData(obj) %>%
-  as.data.frame() %>%
-  mutate(ID_Symbol = paste0(ID, "_", Symbol))
-
-length(unique(rownames(ctvtRowData))) # [1] 15707
-length(unique(ctvtRowData$ID)) # [1] 15684
-length(unique(ctvtRowData$Symbol)) # [1] 15673
-length(unique(ctvtRowData$ID_Symbol)) # [1] 15684
-
-which(duplicated(ctvtRowData$ID)==TRUE) 
-#  [1] 15204 15582 15603 15613 15629 15634 15635 15639 15640 15642 15650 15661 15663 15666 15668 15669 15673 15683 15684
-# [20] 15685 15686 15694 15695
-
-# Filter on duplicated ID's (15707-15684 = 23)
-```
-
-
 ## 1.2 Read in Adrian's purity table
 Specificity = specific to a tumor (T) or host (H)
 We have eT and eH. Of note, a transcript could be tumor specific but have expression only in the host because 
@@ -62,7 +57,35 @@ We have eT and eH. Of note, a transcript could be tumor specific but have expres
 ### 1.2.1 Data
 ```{r}
 adrianDf <- read_csv(paste0(dataDir, "ctvt_rnaseq_expression-2.csv"))
+head(adrianDf)
+
+adrianCorr <- read.xlsx(paste0(dataDir, "CTVT_expression_purity_correlations.xlsx")) %>%
+  dplyr::rename("Symbol"="gene")
+
+
+### For each unique gene symbol, count number of times SNP is host or tumor specfic
+intersectDf <- adrianDf  %>%
+  group_by(GeneID, 
+           Symbol) %>%
+  summarise(
+    Specificity_T_count = sum(eT > 0 & eH == 0),
+    Specificity_H_count = sum(eH > 0 & eT == 0),
+    .groups = "drop"
+  )
+
+### Binary H markers = 1,343 genes for which all SNPs are host specific. 
+binaryHost <- intersectDf %>%
+  filter(Specificity_T_count == 0 & Specificity_H_count > 0)
+
+### Binary T markers = 4,639 genes for which all SNPs are tumor specific. 
+binaryTumor <- intersectDf %>%
+  filter(Specificity_H_count == 0 & Specificity_T_count > 0)
+
+### How many genes are shared between both groups (i.e. some SNPs are host specific and some are tumor specific)
+shared <- intersectDf %>%
+  filter(Specificity_T_count > 0 & Specificity_H_count > 0 )
 ```
+
 ### 1.2.2 Data explanation
 ```{r}
 # example <- adrianDf %>%
@@ -92,405 +115,1859 @@ adrianDf <- read_csv(paste0(dataDir, "ctvt_rnaseq_expression-2.csv"))
 # example[10,]
 # head()
 ```
-### 1.2.3 How many genes are always H/T specific?
-The problem is, directionality. 
 
-Ex. IL37 is always "H" in specificity, but the eT is always > that eH. So it is host specific, but because it is exclusively expressed in tumors. Because hosts express nBH but tumors only have nAT. 
-
-Solution, merging with correlation table. 
+# 2 Tumor-specificity
+## 2.3 eT > 0 and eH == 0 
+### 2.3.1 Dataframes
+#### 2.3.1.1 SNPs
+! Of note, we need to group the table by location and Alt/Ref to count the number of samples with a unique SNP.
 ```{r}
 # Summarize counts of Specificity = "T" and "H" per GeneID and Symbol
-specCountDf <- adrianDf %>%
+tumorSpecDf <- adrianDf %>%
+  filter(eH == 0 & eT > 0) %>%
   group_by(GeneID, Symbol) %>%
+  mutate("Annotation"="tumorOnly")
+
+tumorSNPs <- unique(tumorSpecDf$Location)
+tumorGenes <- unique(tumorSpecDf$Symbol)
+tumorSymbols <- unique(tumorSpecDf$GeneID)
+# table(tumorSpecDf$GeneID)
+
+## There are 45 unique SNP's where there are more than 1 SNV per tumor. 
+tumorSpecDfDuplicates <- tumorSpecDf %>%
+  group_by(Tumour, Location) %>%
+  filter(n() > 1) %>%
+  ungroup()
+
+# Example:
+# head(tumorSpecDfDuplicates)
+# 1 1208Ta 7:5641312   7      5641312 G     A 
+# 2 1208Ta 7:5641312   7      5641312 G     T     
+
+
+tumorSpecSampleCountDf <- tumorSpecDf %>%
+  # distinct(Location, Tumour) %>%     # Keep one row per (Location, Tumour) pair
+  group_by(Location, GeneID, Symbol) %>%             # Group by SNP (Location)
+  summarise(sampleCount = n(), 
+            meanEt = mean(eT), 
+            medianEt = median(eT))
+
+# range(tumorSpecSampleCountDf$sampleCount)
+# [1]  1 80
+
+tumorSpecSampleAltCountDf <- tumorSpecDf %>%
+  # distinct(Location, Tumour) %>%     # Keep one row per (Location, Tumour) pair
+  group_by(Location, GeneID, Alt, Ref, Symbol) %>%             # Group by SNP (Location)
+  summarise(sampleCount = n(), 
+            meanEt = mean(eT), 
+            medianEt = median(eT))
+
+# range(tumorSpecSampleAltCountDf$sampleCount)
+# [1]  1 42
+```
+
+#### 2.3.1.2 Genes
+Read in binary tumor df! (Section 4)
+There are 4,639 unique genes, which can correspond to many SNPs. 
+Merge data from adrianCorr to these tables. There is one purity corr value per gene, over all SNPs (because these are binary). 
+Therefore, the alt/non alt doesn't work merging with purity, or we just repeat values. 
+! Of note, a small set of genes (7) do not have an associated purity correlation. 
+```{r}
+tumorSpecSampleGeneDf <- tumorSpecDf %>%
+  filter(GeneID %in% binaryTumor$GeneID) %>%  
+  group_by( GeneID, Symbol) %>% # Group by SNP (Location)
+  summarise(sampleCount = n(), 
+            meanEt = mean(eT), 
+            medianEt = median(eT)) %>%
+  left_join(adrianCorr, 
+            by = join_by(Symbol))
+
+tumorSpecSampleAltGeneDf <- tumorSpecDf %>%
+  filter(GeneID %in% binaryTumor$GeneID) %>%             #
+  group_by(GeneID, Alt, Ref, Symbol) %>%             # Group by SNP (Location)
+  summarise(sampleCount = n(), 
+            meanEt = mean(eT), 
+            medianEt = median(eT)) %>%
+  left_join(adrianCorr,
+            by = join_by(Symbol))
+
+# length(unique(tumorSpecSampleGeneDf$GeneID)) [1] 4639
+```
+
+
+
+#### 2.3.1.3 Subset SNPs 
+Instead of filtering on SNPs first and checking what ones correspond to unique host or tumor genes --> group df by Symbol and select those where either all SNPs are Host or Tumor specific. 
+```{r}
+# Summarize counts of Specificity = "T" and "H" per GeneID and Symbol
+tumorSpecDfStrict <- adrianDf %>%
+  group_by(Symbol) %>%
+  filter(all(eH == 0 & eT > 0)) %>%
+  mutate("Annotation"="tumorOnlyStrict") %>%
+  group_by( GeneID, Symbol) %>% # Group by SNP (Location)
+  summarise(sampleCount = n(),
+            meanEt = mean(eT),
+            medianEt = median(eT)) %>%
+  left_join(adrianCorr,
+            by = join_by(Symbol))
+```
+
+### 2.3.2 Visualizations
+#### 2.3.2.1 SNPs
+##### 2.3.2.1.1 Unique SNPs + Alt SNPs: histogram
+```{r}
+snpHisto <- ggplot(tumorSpecSampleCountDf, aes(x=sampleCount)) +
+  geom_histogram(binwidth=1, fill="#69b3a2", color="#e9ecef", alpha=0.9) +
+  theme_minimal()
+
+pdf(paste0(plotDir, "/histogram/", fprefix, "_uniqueSNPs_sampleCount.pdf"))
+print(snpHisto)
+dev.off()
+
+snpAltHisto <- ggplot(tumorSpecSampleAltCountDf, aes(x=sampleCount)) +
+  geom_histogram(binwidth=1, fill="#69b3a2", color="#e9ecef", alpha=0.9) +
+  theme_minimal()
+
+
+pdf(paste0(plotDir, "/histogram/", fprefix, "_uniqueAltSNPs_sampleCount.pdf"))
+print(snpAltHisto)
+dev.off()
+```
+##### 2.3.2.1.2 Unique SNPs: mean eT vs # samples
+! Of note, making Inf arbitrarily large (7,000)
+```{r}
+tempPlotDf <- tumorSpecSampleCountDf %>%
+  mutate(meanEtEdit = ifelse(meanEt == Inf, 
+                             3000,
+                             meanEt),
+         medianEtEdit = ifelse(medianEt == Inf, 
+                             3000,
+                             medianEt), 
+         meanLabel = ifelse(meanEt > 1000 & sampleCount > 20,
+                            Symbol, 
+                            NA),
+         medianLabel = ifelse(medianEt > 1000 & sampleCount > 20,
+                            Symbol, 
+                            NA))
+meanPlot <- ggplot(tempPlotDf, aes(x=sampleCount, y=meanEtEdit)) +
+  geom_point() + 
+  geom_label_repel(
+    aes(label = meanLabel),
+    nudge_x = 0.1, 
+    nudge_y = 0.1,
+    label.padding = unit(0.15, "lines"),
+    label.size = 0.1,
+    color = "black",
+    fill = "#69b3a2",
+    min.segment.length = .5,
+    segment.color = "#69b3a2"  # line color from point to label
+  ) +
+  theme_minimal()
+
+medianPlot <- ggplot(tempPlotDf, aes(x=sampleCount, y=medianEtEdit)) +
+  geom_point() + 
+  geom_label_repel(
+    aes(label = medianLabel),
+    nudge_x = 0.1, 
+    nudge_y = 0.1,
+    label.padding = unit(0.15, "lines"),
+    label.size = 0.1,
+    color = "black",
+    fill = "#69b3a2",
+    min.segment.length = .5,
+    segment.color = "#69b3a2"  # line color from point to label
+  ) +
+  theme_minimal()
+
+pdf(paste0(plotDir, "/scatter/", fprefix, "_uniqueSNPs_eT_vs_sampleCount.pdf"), 
+    height=6, 
+    width=8)
+print(meanPlot)
+print(medianPlot)
+dev.off()
+```
+
+##### 2.3.2.1.3 Unique SNPs+Alt: mean eT vs # samples
+! Of note, this does not mean that the tumor = alt !
+```{r}
+tempPlotDf <- tumorSpecSampleAltCountDf %>%
+  mutate(meanEtEdit = ifelse(meanEt == Inf, 
+                             7000,
+                             meanEt),
+         medianEtEdit = ifelse(medianEt == Inf, 
+                             7000,
+                             medianEt), 
+         meanAltLabel = ifelse(meanEt > 1000 & sampleCount > 20,
+                            paste0(Symbol, "_", Ref, "->", Alt), 
+                            NA),
+         medianAltLabel = ifelse(medianEt > 1000 & sampleCount > 20,
+                            paste0(Symbol, "_", Ref, "->", Alt), 
+                            NA))
+meanPlot <- ggplot(tempPlotDf, aes(x=sampleCount, y=meanEtEdit)) +
+  geom_point() + 
+  geom_label(
+    aes(label = meanAltLabel),
+    nudge_x = 0.1, 
+    nudge_y = 0.1,
+    label.padding = unit(0.15, "lines"),
+    label.size = .1,
+    color = "black",
+    fill = "#69b3a2",
+    min.segment.length = .5,
+    segment.color = "#69b3a2"  # line color from point to label
+  ) + 
+  theme_minimal()
+
+
+medianPlot <- ggplot(tempPlotDf, aes(x=sampleCount, y=medianEtEdit)) +
+  geom_point() + 
+  geom_label_repel(
+    aes(label = meanAltLabel),
+    nudge_x = 0.1, 
+    nudge_y = 0.1,
+    label.padding = unit(0.15, "lines"),
+    label.size = 0.1,
+    color = "black",
+    fill = "#69b3a2",
+    min.segment.length = .5,
+    segment.color = "#69b3a2"  # line color from point to label
+  ) +
+  theme_minimal()
+
+pdf(paste0(plotDir, "/scatter/", fprefix, "_uniqueAltSNPs_eT_vs_sampleCount.pdf"), 
+    height=6, 
+    width=8)
+print(meanPlot)
+print(medianPlot)
+dev.off()
+```
+
+#### 2.3.2.2 Genes
+##### 2.3.2.2.1 Unique Genes + Alt SNPs: histogram
+```{r}
+geneHisto <- ggplot(tumorSpecSampleGeneDf, aes(x=sampleCount)) +
+  geom_histogram(binwidth=10, fill="#69b3a2", color="#e9ecef", alpha=0.9) +
+  theme_minimal()
+
+pdf(paste0(plotDir, "/histogram/", fprefix, "_uniqueGenes_sampleCount.pdf"))
+print(geneHisto)
+dev.off()
+
+geneAltHisto <- ggplot(tumorSpecSampleAltGeneDf, aes(x=sampleCount)) +
+  geom_histogram(binwidth=1, fill="#69b3a2", color="#e9ecef", alpha=0.9) +
+  theme_minimal()
+
+
+pdf(paste0(plotDir, "/histogram/", fprefix, "_uniqueAltGenes_sampleCount.pdf"))
+print(geneAltHisto)
+dev.off()
+```
+##### 2.3.2.2.2 Unique Genes: mean eT vs purity
+! Of note, making Inf arbitrarily large (7,000)
+```{r}
+tempPlotDf <- tumorSpecSampleGeneDf %>%
+  mutate(meanEtEdit = ifelse(meanEt == Inf, 3000, meanEt),
+         medianEtEdit = ifelse(medianEt == Inf, 3000, medianEt), 
+         meanLabel = ifelse((meanEt > 1000 & purity_correlation < -0.60) | 
+                            (meanEt > 1000 & purity_correlation > 0.60), Symbol, NA),
+         medianLabel = ifelse((medianEt > 1000 & purity_correlation < -0.60) | 
+                              (medianEt > 1000 & purity_correlation > 0.60), Symbol, NA),
+         ,
+        colorGroup = case_when(
+            purity_correlation > 0.5 ~ "high_pos",
+            purity_correlation < -0.5 ~ "high_neg",
+            TRUE ~ "neutral"
+        ),
+        fillColor = case_when(
+            colorGroup == "high_pos" ~ meanEtEdit,   # will map to red
+            colorGroup == "high_neg" ~ -meanEtEdit,  # will map to blue (note the minus for inversion)
+            TRUE ~ NA_real_
+        )
+    )
+
+tempPlotDf <- tempPlotDf %>%
+  mutate(
+    fillPos = ifelse(purity_correlation > 0.5, meanEtEdit, NA),
+    fillNeg = ifelse(purity_correlation < -0.5, meanEtEdit, NA)
+  )
+
+# Max for scaling
+max_pos <- max(tempPlotDf$fillPos, na.rm = TRUE)
+max_neg <- max(tempPlotDf$fillNeg, na.rm = TRUE)
+
+meanPlot <- ggplot(tempPlotDf, aes(x = purity_correlation, y = meanEtEdit)) +
+  # NEUTRAL points layer
+  geom_point(data = subset(tempPlotDf, purity_correlation >= -0.5 & purity_correlation <= 0.5),
+             aes(size = sampleCount), fill = "grey80", color = "black", shape = 21, stroke = 0.2) +
+
+  # NEGATIVE correlation points layer
+  new_scale_fill() +
+  geom_point(data = subset(tempPlotDf, purity_correlation < -0.5),
+             aes(fill = fillNeg, size = sampleCount), color = "black", shape = 21, stroke = 0.2) +
+  scale_fill_gradient(
+    name = "- Corr.",
+    low = "lightblue", high = "blue4",
+    limits = c(0, max_neg), na.value = "grey90"
+  ) +
+
+  # POSITIVE correlation points layer
+  new_scale_fill() +
+  geom_point(data = subset(tempPlotDf, purity_correlation > 0.5),
+             aes(fill = fillPos, size = sampleCount), color = "black", shape = 21, stroke = 0.2) +
+  scale_fill_gradient(
+    name = "+ Corr.",
+    low = "mistyrose", high = "darkred",
+    limits = c(0, max_pos), na.value = "grey90"
+  ) +
+
+  theme_minimal() +
+  labs(title = "Unique Tumor-Specific Genes (n=4,639)",
+    x = "Purity Correlation", 
+    y = "Mean eT"
+  )
+
+
+
+tempPlotDf <- tempPlotDf %>%
+  mutate(
+    fillPos = ifelse(purity_correlation > 0.5, medianEtEdit, NA),
+    fillNeg = ifelse(purity_correlation < -0.5, medianEtEdit, NA)
+  )
+
+# Max for scaling
+max_pos <- max(tempPlotDf$fillPos, na.rm = TRUE)
+max_neg <- max(tempPlotDf$fillNeg, na.rm = TRUE)
+
+medianPlot <- ggplot(tempPlotDf, aes(x = purity_correlation, y = medianEtEdit)) +
+  # NEUTRAL points layer
+  geom_point(data = subset(tempPlotDf, purity_correlation >= -0.5 & purity_correlation <= 0.5),
+             aes(size = sampleCount), fill = "grey80", color = "black", shape = 21, stroke = 0.2) +
+
+  # NEGATIVE correlation points layer
+  new_scale_fill() +
+  geom_point(data = subset(tempPlotDf, purity_correlation < -0.5),
+             aes(fill = fillNeg, size = sampleCount), color = "black", shape = 21, stroke = 0.2) +
+  scale_fill_gradient(
+    name = "- Corr.",
+    low = "lightblue", high = "blue4",
+    limits = c(0, max_neg), na.value = "grey90"
+  ) +
+
+  # POSITIVE correlation points layer
+  new_scale_fill() +
+  geom_point(data = subset(tempPlotDf, purity_correlation > 0.5),
+             aes(fill = fillPos, size = sampleCount), color = "black", shape = 21, stroke = 0.2) +
+  scale_fill_gradient(
+    name = "+ Corr.",
+    low = "mistyrose", high = "darkred",
+    limits = c(0, max_pos), na.value = "grey90"
+  ) +
+
+  theme_minimal() +
+  labs(title = "Unique Tumor-Specific Genes (n=4,639)",
+    x = "Purity Correlation", 
+    y = "Median eT"
+  )
+
+
+pdf(paste0(plotDir, "/volcano/", fprefix, "_tumor_uniqueGenes_eT_vs_purity.pdf"), 
+    height=6, 
+    width=8)
+print(meanPlot)
+print(medianPlot)
+dev.off()
+
+```
+
+##### 2.3.2.2.3 Unique Genes: mean eT vs # samples
+! Of note, making Inf arbitrarily large (7,000)
+```{r}
+tempPlotDf <- tumorSpecSampleGeneDf %>%
+  mutate(meanEtEdit = ifelse(meanEt == Inf, 
+                             7000,
+                             meanEt),
+         medianEtEdit = ifelse(medianEt == Inf, 
+                             7000,
+                             medianEt), 
+         meanLabel = ifelse(meanEt > 1000 & sampleCount > 20,
+                            Symbol, 
+                            NA),
+         medianLabel = ifelse(medianEt > 1000 & sampleCount > 20,
+                            Symbol, 
+                            NA), 
+         purityCol = ifelse(purity_correlation > 0, 
+                            "Positive", 
+                            "Negative"))
+
+tempPlotDf$purityCol <- factor(tempPlotDf$purityCol, 
+                               c("Positive", "Negative"))
+
+(meanPlot <- ggplot(tempPlotDf, aes(x=sampleCount, y=meanEtEdit, color = purityCol, size=abs(purity_correlation))) +
+  geom_point() + 
+  geom_label_repel(
+    aes(label = meanLabel),
+    nudge_x = 0.1, 
+    nudge_y = 0.1,
+    # label.padding = unit(0.15, "lines"),
+    label.size = 0.05,
+    color = "white",
+    fill = "black",
+    min.segment.length = 0,
+    segment.color = "#69b3a2"  # line color from point to label
+  ) +
+  scale_color_paletteer_d("ggsci::nrc_npg") +
+  theme_minimal() )
+
+medianPlot <- ggplot(tempPlotDf, aes(x=sampleCount, y=medianEtEdit, color = purityCol, size=abs(purity_correlation))) +
+  geom_point() + 
+  geom_label_repel(
+    aes(label = medianLabel),
+    nudge_x = 0.1, 
+    nudge_y = 0.1,
+    # label.padding = unit(00, "lines"),
+    label.size = 0.05,
+     color = "white",
+    fill = "black",
+    min.segment.length = 0,
+    segment.color = "#69b3a2"  # line color from point to label
+  ) +
+  theme_minimal()+
+  scale_color_paletteer_d("ggsci::nrc_npg") 
+
+pdf(paste0(plotDir, "/scatter/", fprefix, "_uniqueGenes_eT_vs_sampleCount.pdf"), 
+    height=6, 
+    width=8)
+print(meanPlot)
+print(medianPlot)
+dev.off()
+```
+
+
+
+
+
+##### 2.3.2.2.4 Subset genes
+### 2.3.3 Visualizations - Strict
+#### 2.3.2.1 Unique SNPs + Alt SNPs: histogram
+```{r}
+snpHisto <- ggplot(tumorSpecDfStrict, aes(x=sampleCount)) +
+  geom_histogram(binwidth=1, fill="#69b3a2", color="#e9ecef", alpha=0.9) +
+  theme_minimal()
+
+pdf(paste0(plotDir, "/histogram/", fprefix, "_strict_uniqueSNPs_sampleCount.pdf"))
+print(snpHisto)
+dev.off()
+
+snpAltHisto <- ggplot(tumorSpecDfStrict, aes(x=sampleCount)) +
+  geom_histogram(binwidth=1, fill="#69b3a2", color="#e9ecef", alpha=0.9) +
+  theme_minimal()
+
+
+pdf(paste0(plotDir, "/histogram/", fprefix, "_strict_uniqueAltSNPs_sampleCount.pdf"))
+print(snpAltHisto)
+dev.off()
+```
+#### 2.3.2.2 Unique SNPs: mean eT vs # samples
+! Of note, making Inf arbitrarily large (7,000)
+```{r}
+tempPlotDf <- tumorSpecDfStrict %>%
+  mutate(meanEtEdit = ifelse(meanEt == Inf, 
+                             7000,
+                             meanEt),
+         medianEtEdit = ifelse(medianEt == Inf, 
+                             7000,
+                             medianEt), 
+         meanLabel = ifelse(meanEt > 1000 & sampleCount > 20,
+                            Symbol, 
+                            NA),
+         medianLabel = ifelse(medianEt > 1000 & sampleCount > 20,
+                            Symbol, 
+                            NA))
+meanPlot <- ggplot(tempPlotDf, aes(x=sampleCount, y=meanEtEdit)) +
+  geom_point() + 
+  geom_label_repel(
+    aes(label = meanLabel),
+    nudge_x = 0.1, 
+    nudge_y = 0.1,
+    label.padding = unit(0.15, "lines"),
+    label.size = 0.1,
+    color = "black",
+    fill = "#69b3a2",
+    min.segment.length = .5,
+    segment.color = "#69b3a2"  # line color from point to label
+  ) +
+  theme_minimal()
+
+medianPlot <- ggplot(tempPlotDf, aes(x=sampleCount, y=medianEtEdit)) +
+  geom_point() + 
+  geom_label_repel(
+    aes(label = medianLabel),
+    nudge_x = 0.1, 
+    nudge_y = 0.1,
+    label.padding = unit(0.15, "lines"),
+    label.size = 0.1,
+    color = "black",
+    fill = "#69b3a2",
+    min.segment.length = .5,
+    segment.color = "#69b3a2"  # line color from point to label
+  ) +
+  theme_minimal()
+
+pdf(paste0(plotDir, "/scatter/", fprefix, "_strict_uniqueSNPs_eT_vs_sampleCount.pdf"), 
+    height=6, 
+    width=8)
+print(meanPlot)
+print(medianPlot)
+dev.off()
+```
+
+#### 2.3.2.3 Unique SNPs+Alt: mean eT vs # samples
+! Of note, this does not mean that the tumor = alt !
+```{r}
+tempPlotDf <- tumorSpecDfStrict %>%
+  mutate(meanEtEdit = ifelse(meanEt == Inf, 
+                             7000,
+                             meanEt),
+         medianEtEdit = ifelse(medianEt == Inf, 
+                             7000,
+                             medianEt), 
+         meanAltLabel = ifelse(meanEt > 1000 & sampleCount > 20,
+                            paste0(Symbol, "_", Ref, "->", Alt), 
+                            NA),
+         medianAltLabel = ifelse(medianEt > 1000 & sampleCount > 20,
+                            paste0(Symbol, "_", Ref, "->", Alt), 
+                            NA))
+meanPlot <- ggplot(tempPlotDf, aes(x=sampleCount, y=meanEtEdit)) +
+  geom_point() + 
+  geom_label(
+    aes(label = meanAltLabel),
+    nudge_x = 0.1, 
+    nudge_y = 0.1,
+    label.padding = unit(0.15, "lines"),
+    label.size = .1,
+    color = "black",
+    fill = "#69b3a2",
+    min.segment.length = .5,
+    segment.color = "#69b3a2"  # line color from point to label
+  ) + 
+  theme_minimal()
+
+
+medianPlot <- ggplot(tempPlotDf, aes(x=sampleCount, y=medianEtEdit)) +
+  geom_point() + 
+  geom_label_repel(
+    aes(label = meanAltLabel),
+    nudge_x = 0.1, 
+    nudge_y = 0.1,
+    label.padding = unit(0.15, "lines"),
+    label.size = 0.1,
+    color = "black",
+    fill = "#69b3a2",
+    min.segment.length = .5,
+    segment.color = "#69b3a2"  # line color from point to label
+  ) +
+  theme_minimal()
+
+pdf(paste0(plotDir, "/scatter/", fprefix, "_strict_uniqueAltSNPs_eT_vs_sampleCount.pdf"), 
+    height=6, 
+    width=8)
+print(meanPlot)
+print(medianPlot)
+dev.off()
+```
+
+#### 2.3.2.1 Unique Genes + Alt SNPs: histogram
+```{r}
+geneHisto <- ggplot(tumorSpecSampleGeneDf, aes(x=sampleCount)) +
+  geom_histogram(binwidth=10, fill="#69b3a2", color="#e9ecef", alpha=0.9) +
+  theme_minimal()
+
+pdf(paste0(plotDir, "/histogram/", fprefix, "_uniqueGenes_sampleCount.pdf"))
+print(geneHisto)
+dev.off()
+
+geneAltHisto <- ggplot(tumorSpecSampleAltGeneDf, aes(x=sampleCount)) +
+  geom_histogram(binwidth=1, fill="#69b3a2", color="#e9ecef", alpha=0.9) +
+  theme_minimal()
+
+
+pdf(paste0(plotDir, "/histogram/", fprefix, "_uniqueAltGenes_sampleCount.pdf"))
+print(geneAltHisto)
+dev.off()
+```
+
+#### 2.3.2.3 Unique Genes: mean eT vs purity
+! Make this a volcano plot!
+! Of note, making Inf arbitrarily large (7,000)
+```{r}
+tempPlotDf <- tumorSpecDfStrict %>%
+  mutate(meanEtEdit = ifelse(meanEt == Inf, 3000, meanEt),
+         medianEtEdit = ifelse(medianEt == Inf, 3000, medianEt), 
+         meanLabel = ifelse((meanEt > 1000 & purity_correlation < -0.60) | 
+                            (meanEt > 1000 & purity_correlation > 0.60), Symbol, NA),
+         medianLabel = ifelse((medianEt > 1000 & purity_correlation < -0.60) | 
+                              (medianEt > 1000 & purity_correlation > 0.60), Symbol, NA),
+         ,
+        colorGroup = case_when(
+            purity_correlation > 0.5 ~ "high_pos",
+            purity_correlation < -0.5 ~ "high_neg",
+            TRUE ~ "neutral"
+        ),
+        fillColor = case_when(
+            colorGroup == "high_pos" ~ meanEtEdit,   # will map to red
+            colorGroup == "high_neg" ~ -meanEtEdit,  # will map to blue (note the minus for inversion)
+            TRUE ~ NA_real_
+        )
+    )
+
+tempPlotDf <- tempPlotDf %>%
+  mutate(
+    fillPos = ifelse(purity_correlation > 0.5, meanEtEdit, NA),
+    fillNeg = ifelse(purity_correlation < -0.5, meanEtEdit, NA)
+  )
+
+# Max for scaling
+max_pos <- max(tempPlotDf$fillPos, na.rm = TRUE)
+max_neg <- max(tempPlotDf$fillNeg, na.rm = TRUE)
+
+meanPlot <- ggplot(tempPlotDf, aes(x = purity_correlation, y = meanEtEdit)) +
+  # NEUTRAL points layer
+  geom_point(data = subset(tempPlotDf, purity_correlation >= -0.5 & purity_correlation <= 0.5),
+             aes(size = sampleCount), fill = "grey80", color = "black", shape = 21, stroke = 0.2) +
+
+  # NEGATIVE correlation points layer
+  new_scale_fill() +
+  geom_point(data = subset(tempPlotDf, purity_correlation < -0.5),
+             aes(fill = fillNeg, size = sampleCount), color = "black", shape = 21, stroke = 0.2) +
+  scale_fill_gradient(
+    name = "- Corr.",
+    low = "lightblue", high = "blue4",
+    limits = c(0, max_neg), na.value = "grey90"
+  ) +
+
+  # POSITIVE correlation points layer
+  new_scale_fill() +
+  geom_point(data = subset(tempPlotDf, purity_correlation > 0.5),
+             aes(fill = fillPos, size = sampleCount), color = "black", shape = 21, stroke = 0.2) +
+  scale_fill_gradient(
+    name = "+ Corr.",
+    low = "mistyrose", high = "darkred",
+    limits = c(0, max_pos), na.value = "grey90"
+  ) +
+
+  theme_minimal() +
+  labs(title = "Unique Tumor-Specific Genes (n=58)",
+       x = "Purity Correlation", 
+       y = "Median eT")
+
+
+
+tempPlotDf <- tempPlotDf %>%
+  mutate(
+    fillPos = ifelse(purity_correlation > 0.5, medianEtEdit, NA),
+    fillNeg = ifelse(purity_correlation < -0.5, medianEtEdit, NA)
+  )
+
+# Max for scaling
+max_pos <- max(tempPlotDf$fillPos, na.rm = TRUE)
+max_neg <- max(tempPlotDf$fillNeg, na.rm = TRUE)
+
+medianPlot <- ggplot(tempPlotDf, aes(x = purity_correlation, y = medianEtEdit)) +
+  # NEUTRAL points layer
+  geom_point(data = subset(tempPlotDf, purity_correlation >= -0.5 & purity_correlation <= 0.5),
+             aes(size = sampleCount), fill = "grey80", color = "black", shape = 21, stroke = 0.2) +
+
+  # NEGATIVE correlation points layer
+  new_scale_fill() +
+  geom_point(data = subset(tempPlotDf, purity_correlation < -0.5),
+             aes(fill = fillNeg, size = sampleCount), color = "black", shape = 21, stroke = 0.2) +
+  scale_fill_gradient(
+    name = "- Corr.",
+    low = "lightblue", high = "blue4",
+    limits = c(0, max_neg), na.value = "grey90"
+  ) +
+
+  # POSITIVE correlation points layer
+  new_scale_fill() +
+  geom_point(data = subset(tempPlotDf, purity_correlation > 0.5),
+             aes(fill = fillPos, size = sampleCount), color = "black", shape = 21, stroke = 0.2) +
+  scale_fill_gradient(
+    name = "+ Corr.",
+    low = "mistyrose", high = "darkred",
+    limits = c(0, max_pos), na.value = "grey90"
+  ) +
+
+  theme_minimal() +
+  labs(title = "Unique Tumor-Specific Genes (n=58)",
+       x = "Purity Correlation", 
+       y = "Median eT")
+
+
+
+pdf(paste0(plotDir, "/volcano/", fprefix, "_tumor_strict_uniqueGenes_eT_vs_purity.pdf"), 
+    height=6, 
+    width=8)
+print(meanPlot)
+print(medianPlot)
+dev.off()
+```
+
+#### 2.3.2.2 Unique Genes: mean eT vs # samples
+! Of note, making Inf arbitrarily large (7,000)
+```{r}
+tempPlotDf <- tumorSpecSampleGeneDf %>%
+  mutate(meanEtEdit = ifelse(meanEt == Inf, 
+                             7000,
+                             meanEt),
+         medianEtEdit = ifelse(medianEt == Inf, 
+                             7000,
+                             medianEt), 
+         meanLabel = ifelse(meanEt > 1000 & sampleCount > 20,
+                            Symbol, 
+                            NA),
+         medianLabel = ifelse(medianEt > 1000 & sampleCount > 20,
+                            Symbol, 
+                            NA), 
+         purityCol = ifelse(purity_correlation > 0, 
+                            "Positive", 
+                            "Negative"))
+
+tempPlotDf$purityCol <- factor(tempPlotDf$purityCol, 
+                               c("Positive", "Negative"))
+
+(meanPlot <- ggplot(tempPlotDf, aes(x=sampleCount, y=meanEtEdit, color = purityCol, size=abs(purity_correlation))) +
+  geom_point() + 
+  geom_label_repel(
+    aes(label = meanLabel),
+    nudge_x = 0.1, 
+    nudge_y = 0.1,
+    # label.padding = unit(0.15, "lines"),
+    label.size = 0.05,
+    color = "white",
+    fill = "black",
+    min.segment.length = 0,
+    segment.color = "#69b3a2"  # line color from point to label
+  ) +
+  scale_color_paletteer_d("ggsci::nrc_npg") +
+  theme_minimal() )
+
+medianPlot <- ggplot(tempPlotDf, aes(x=sampleCount, y=medianEtEdit, color = purityCol, size=abs(purity_correlation))) +
+  geom_point() + 
+  geom_label_repel(
+    aes(label = medianLabel),
+    nudge_x = 0.1, 
+    nudge_y = 0.1,
+    # label.padding = unit(00, "lines"),
+    label.size = 0.05,
+     color = "white",
+    fill = "black",
+    min.segment.length = 0,
+    segment.color = "#69b3a2"  # line color from point to label
+  ) +
+  theme_minimal()+
+  scale_color_paletteer_d("ggsci::nrc_npg") 
+
+pdf(paste0(plotDir, "/scatter/", fprefix, "_uniqueGenes_eT_vs_sampleCount.pdf"), 
+    height=6, 
+    width=8)
+print(meanPlot)
+print(medianPlot)
+dev.off()
+```
+#### 2.3.2.4 Unique SNPs+Alt: mean eT vs # samples
+! Of note, this does not mean that the tumor = alt !
+```{r}
+tempPlotDf <- tumorSpecSampleAltCountDf %>%
+  mutate(meanEtEdit = ifelse(meanEt == Inf, 
+                             7000,
+                             meanEt),
+         medianEtEdit = ifelse(medianEt == Inf, 
+                             7000,
+                             medianEt), 
+         meanAltLabel = ifelse(meanEt > 1000 & sampleCount > 20,
+                            paste0(Symbol, "_", Ref, "->", Alt), 
+                            NA),
+         medianAltLabel = ifelse(medianEt > 1000 & sampleCount > 20,
+                            paste0(Symbol, "_", Ref, "->", Alt), 
+                            NA))
+meanPlot <- ggplot(tempPlotDf, aes(x=sampleCount, y=meanEtEdit)) +
+  geom_point() + 
+  geom_label(
+    aes(label = meanAltLabel),
+    nudge_x = 0.1, 
+    nudge_y = 0.1,
+    label.padding = unit(0.15, "lines"),
+    label.size = .1,
+    color = "black",
+    fill = "#69b3a2",
+    min.segment.length = .5,
+    segment.color = "#69b3a2"  # line color from point to label
+  ) + 
+  theme_minimal()
+
+
+medianPlot <- ggplot(tempPlotDf, aes(x=sampleCount, y=medianEtEdit)) +
+  geom_point() + 
+  geom_label_repel(
+    aes(label = meanAltLabel),
+    nudge_x = 0.1, 
+    nudge_y = 0.1,
+    label.padding = unit(0.15, "lines"),
+    label.size = 0.1,
+    color = "black",
+    fill = "#69b3a2",
+    min.segment.length = .5,
+    segment.color = "#69b3a2"  # line color from point to label
+  ) +
+  theme_minimal()
+
+pdf(paste0(plotDir, "/scatter/", fprefix, "_uniqueAltSNPs_eT_vs_sampleCount.pdf"), 
+    height=6, 
+    width=8)
+print(meanPlot)
+print(medianPlot)
+dev.off()
+```
+
+
+
+
+
+# 3 Host
+## 3.1 eH > 0 and eT == 0
+### 2.3.1 Dataframes
+#### 2.3.1.1 SNPs
+! Of note, we need to group the table by location and Alt/Ref to count the number of samples with a unique SNP.
+```{r}
+hostSpecDf <- adrianDf %>%
+  filter(eH > 0 & eT == 0) %>%
+  group_by(GeneID, Symbol) %>%
+  mutate("Annotation"="hostOnly")
+
+hostSNPs <- unique(hostSpecDf$Location)
+hostGenes <- unique(hostSpecDf$Symbol)
+hostSymbols <- unique(hostSpecDf$GeneID)
+
+## There are 54 unique SNP's where there are more than 1 SNV per host. 
+hostSpecDfDuplicates <- hostSpecDf %>%
+  group_by(Tumour, Location) %>%
+  filter(n() > 1) %>%
+  ungroup()
+
+hostSpecSampleCountDf <- hostSpecDf %>%
+  
+  group_by(Location, GeneID, Symbol) %>%             # Group by SNP (Location)
+  summarise(sampleCount = n(), 
+            meanEh = mean(eH), 
+            medianEh = median(eH))
+
+# range(hostSpecSampleCountDf$sampleCount)
+# [1]  1 69
+
+hostSpecSampleAltCountDf <- hostSpecDf %>%
+  
+  group_by(Location, GeneID, Alt, Ref, Symbol) %>%             # Group by SNP (Location)
+  summarise(sampleCount = n(), 
+            meanEh = mean(eH), 
+            medianEh = median(eH))
+
+# range(hostSpecSampleAltCountDf$sampleCount)
+# [1]  1 42
+```
+
+#### 2.3.1.2 Genes
+Read in binary host df! (Section 4)
+There are 4,639 unique genes, which can correspond to many SNPs. 
+Merge data from adrianCorr to these tables. There is one purity corr value per gene, over all SNPs (because these are binary). 
+Therefore, the alt/non alt doesn't work merging with purity, or we just repeat values. 
+! Of note, a small set of genes (7) do not have an associated purity correlation. 
+```{r}
+hostSpecSampleGeneDf <- hostSpecDf %>%
+  filter(GeneID %in% binaryHost$GeneID) %>%  
+  group_by( GeneID, Symbol) %>% # Group by SNP (Location)
+  summarise(sampleCount = n(), 
+            meanEh = mean(eH), 
+            medianEh = median(eH)) %>%
+  left_join(adrianCorr, 
+            by = join_by(Symbol))
+
+hostSpecSampleAltGeneDf <- hostSpecDf %>%
+  filter(GeneID %in% binaryHost$GeneID) %>%             #
+  group_by(GeneID, Alt, Ref, Symbol) %>%             # Group by SNP (Location)
+  summarise(sampleCount = n(), 
+            meanEh = mean(eH), 
+            medianEh = median(eH)) %>%
+  left_join(adrianCorr,
+            by = join_by(Symbol))
+
+# length(unique(hostSpecSampleGeneDf$GeneID)) [1] 4639
+```
+
+#### 2.3.1.3 Subset SNPs 
+Instead of filtering on SNPs first and checking what ones correspond to unique host or tumor genes --> group df by Symbol and select those where either all SNPs are Host or Tumor specific. 
+```{r}
+hostSpecDfStrict <- adrianDf %>%
+  group_by(Symbol) %>%
+  filter(all(eH > 0 & eT == 0)) %>%
+  mutate("Annotation"="humanOnlyStrict") %>%
+  group_by( GeneID, Symbol) %>% # Group by SNP (Location)
+  summarise(sampleCount = n(),
+            meanEh = mean(eH),
+            medianEh = median(eH)) %>%
+  left_join(adrianCorr,
+            by = join_by(Symbol))
+
+### Do any genes overlap? No!
+intersect(tumorSpecDfStrict$Symbol, hostSpecDfStrict$Symbol)
+```
+
+### 2.3.2 Visualizations
+#### 2.3.2.1 Unique SNPs + Alt SNPs: histogram
+```{r}
+snpHisto <- ggplot(hostSpecSampleCountDf, aes(x=sampleCount)) +
+  geom_histogram(binwidth=1, fill="#69b3a2", color="#e9ecef", alpha=0.9) +
+  theme_minimal()
+
+pdf(paste0(plotDir, "/histogram/", fprefix, "_host_uniqueSNPs_sampleCount.pdf"))
+print(snpHisto)
+dev.off()
+
+snpAltHisto <- ggplot(hostSpecSampleAltCountDf, aes(x=sampleCount)) +
+  geom_histogram(binwidth=1, fill="#69b3a2", color="#e9ecef", alpha=0.9) +
+  theme_minimal()
+
+
+pdf(paste0(plotDir, "/histogram/", fprefix, "_host_uniqueAltSNPs_sampleCount.pdf"))
+print(snpAltHisto)
+dev.off()
+```
+#### 2.3.2.2 Unique SNPs: mean eH vs # samples
+! Of note, making Inf arbitrarily large (7,000)
+```{r}
+tempPlotDf <- hostSpecSampleCountDf %>%
+  mutate(meanEhEdit = ifelse(meanEh == Inf, 
+                             7000,
+                             meanEh),
+         medianEhEdit = ifelse(medianEh == Inf, 
+                             7000,
+                             medianEh), 
+         meanLabel = ifelse(meanEh > 1000 & sampleCount > 20,
+                            Symbol, 
+                            NA),
+         medianLabel = ifelse(medianEh > 1000 & sampleCount > 20,
+                            Symbol, 
+                            NA))
+meanPlot <- ggplot(tempPlotDf, aes(x=sampleCount, y=meanEhEdit)) +
+  geom_point() + 
+  geom_label_repel(
+    aes(label = meanLabel),
+    nudge_x = 0.1, 
+    nudge_y = 0.1,
+    label.padding = unit(0.15, "lines"),
+    label.size = 0.1,
+    color = "black",
+    fill = "#69b3a2",
+    min.segment.length = .5,
+    segment.color = "#69b3a2"  # line color from point to label
+  ) +
+  theme_minimal()
+
+medianPlot <- ggplot(tempPlotDf, aes(x=sampleCount, y=medianEhEdit)) +
+  geom_point() + 
+  geom_label_repel(
+    aes(label = medianLabel),
+    nudge_x = 0.1, 
+    nudge_y = 0.1,
+    label.padding = unit(0.15, "lines"),
+    label.size = 0.1,
+    color = "black",
+    fill = "#69b3a2",
+    min.segment.length = .5,
+    segment.color = "#69b3a2"  # line color from point to label
+  ) +
+  theme_minimal()
+
+pdf(paste0(plotDir, "/scatter/", fprefix, "_host_uniqueSNPs_eH_vs_sampleCount.pdf"), 
+    height=6, 
+    width=8)
+print(meanPlot)
+print(medianPlot)
+dev.off()
+```
+
+#### 2.3.2.3 Unique SNPs+Alt: mean eH vs # samples
+! Of note, this does not mean that the host = alt !
+```{r}
+tempPlotDf <- hostSpecSampleAltCountDf %>%
+  mutate(meanEhEdit = ifelse(meanEh == Inf, 
+                             7000,
+                             meanEh),
+         medianEhEdit = ifelse(medianEh == Inf, 
+                             7000,
+                             medianEh), 
+         meanAltLabel = ifelse(meanEh > 1000 & sampleCount > 20,
+                            paste0(Symbol, "_", Ref, "->", Alt), 
+                            NA),
+         medianAltLabel = ifelse(medianEh > 1000 & sampleCount > 20,
+                            paste0(Symbol, "_", Ref, "->", Alt), 
+                            NA))
+meanPlot <- ggplot(tempPlotDf, aes(x=sampleCount, y=meanEhEdit)) +
+  geom_point() + 
+  geom_label(
+    aes(label = meanAltLabel),
+    nudge_x = 0.1, 
+    nudge_y = 0.1,
+    label.padding = unit(0.15, "lines"),
+    label.size = .1,
+    color = "black",
+    fill = "#69b3a2",
+    min.segment.length = .5,
+    segment.color = "#69b3a2"  # line color from point to label
+  ) + 
+  theme_minimal()
+
+
+medianPlot <- ggplot(tempPlotDf, aes(x=sampleCount, y=medianEhEdit)) +
+  geom_point() + 
+  geom_label_repel(
+    aes(label = meanAltLabel),
+    nudge_x = 0.1, 
+    nudge_y = 0.1,
+    label.padding = unit(0.15, "lines"),
+    label.size = 0.1,
+    color = "black",
+    fill = "#69b3a2",
+    min.segment.length = .5,
+    segment.color = "#69b3a2"  # line color from point to label
+  ) +
+  theme_minimal()
+
+pdf(paste0(plotDir, "/scatter/", fprefix, "_host_uniqueAltSNPs_eH_vs_sampleCount.pdf"), 
+    height=6, 
+    width=8)
+print(meanPlot)
+print(medianPlot)
+dev.off()
+```
+
+#### 2.3.2.1 Unique Genes + Alt SNPs: histogram
+```{r}
+geneHisto <- ggplot(hostSpecSampleGeneDf, aes(x=sampleCount)) +
+  geom_histogram(binwidth=10, fill="#69b3a2", color="#e9ecef", alpha=0.9) +
+  theme_minimal()
+
+pdf(paste0(plotDir, "/histogram/", fprefix, "_host_uniqueGenes_sampleCount.pdf"))
+print(geneHisto)
+dev.off()
+
+geneAltHisto <- ggplot(hostSpecSampleAltGeneDf, aes(x=sampleCount)) +
+  geom_histogram(binwidth=1, fill="#69b3a2", color="#e9ecef", alpha=0.9) +
+  theme_minimal()
+
+
+pdf(paste0(plotDir, "/histogram/", fprefix, "_host_uniqueAltGenes_sampleCount.pdf"))
+print(geneAltHisto)
+dev.off()
+```
+#### 2.3.2.3 Unique Genes: mean eH vs purity
+! Make this a volcano plot!
+! Of note, making Inf arbitrarily large (7,000)
+```{r}
+tempPlotDf <- hostSpecSampleGeneDf %>%
+  mutate(meanEhEdit = ifelse(meanEh == Inf, 7000, meanEh),
+         medianEhEdit = ifelse(medianEh == Inf, 7000, medianEh), 
+         meanLabel = ifelse((meanEh > 1000 & purity_correlation < -0.60) | 
+                            (meanEh > 1000 & purity_correlation > 0.60), Symbol, NA),
+         medianLabel = ifelse((medianEh > 1000 & purity_correlation < -0.60) | 
+                              (medianEh > 1000 & purity_correlation > 0.60), Symbol, NA),
+         ,
+        colorGroup = case_when(
+            purity_correlation > 0.5 ~ "high_pos",
+            purity_correlation < -0.5 ~ "high_neg",
+            TRUE ~ "neutral"
+        ),
+        fillColor = case_when(
+            colorGroup == "high_pos" ~ meanEhEdit,   # will map to red
+            colorGroup == "high_neg" ~ -meanEhEdit,  # will map to blue (note the minus for inversion)
+            TRUE ~ NA_real_
+        )
+    )
+
+tempPlotDf <- tempPlotDf %>%
+  mutate(
+    fillPos = ifelse(purity_correlation > 0.5, meanEhEdit, NA),
+    fillNeg = ifelse(purity_correlation < -0.5, meanEhEdit, NA)
+  )
+
+# Max for scaling
+max_pos <- max(tempPlotDf$fillPos, na.rm = TRUE)
+max_neg <- max(tempPlotDf$fillNeg, na.rm = TRUE)
+
+meanPlot <- ggplot(tempPlotDf, aes(x = purity_correlation, y = meanEhEdit)) +
+  # NEUTRAL points layer
+  geom_point(data = subset(tempPlotDf, purity_correlation >= -0.5 & purity_correlation <= 0.5),
+             aes(size = sampleCount), fill = "grey80", color = "black", shape = 21, stroke = 0.2) +
+
+  # NEGATIVE correlation points layer
+  new_scale_fill() +
+  geom_point(data = subset(tempPlotDf, purity_correlation < -0.5),
+             aes(fill = fillNeg, size = sampleCount), color = "black", shape = 21, stroke = 0.2) +
+  scale_fill_gradient(
+    name = "- Corr.",
+    low = "lightblue", high = "blue4",
+    limits = c(0, max_neg), na.value = "grey90"
+  ) +
+
+  # POSITIVE correlation points layer
+  new_scale_fill() +
+  geom_point(data = subset(tempPlotDf, purity_correlation > 0.5),
+             aes(fill = fillPos, size = sampleCount), color = "black", shape = 21, stroke = 0.2) +
+  scale_fill_gradient(
+    name = "+ Corr.",
+    low = "mistyrose", high = "darkred",
+    limits = c(0, max_pos), na.value = "grey90"
+  ) +
+
+  theme_minimal() +
+  labs(
+    title = "Unique Host-Specific Genes (n=1,343)",
+    x = "Purity Correlation", 
+    y = "Mean eH"
+  )
+
+
+
+tempPlotDf <- tempPlotDf %>%
+  mutate(
+    fillPos = ifelse(purity_correlation > 0.5, medianEhEdit, NA),
+    fillNeg = ifelse(purity_correlation < -0.5, medianEhEdit, NA)
+  )
+
+# Max for scaling
+max_pos <- max(tempPlotDf$fillPos, na.rm = TRUE)
+max_neg <- max(tempPlotDf$fillNeg, na.rm = TRUE)
+
+medianPlot <- ggplot(tempPlotDf, aes(x = purity_correlation, y = medianEhEdit)) +
+  # NEUTRAL points layer
+  geom_point(data = subset(tempPlotDf, purity_correlation >= -0.5 & purity_correlation <= 0.5),
+             aes(size = sampleCount), fill = "grey80", color = "black", shape = 21, stroke = 0.2) +
+
+  # NEGATIVE correlation points layer
+  new_scale_fill() +
+  geom_point(data = subset(tempPlotDf, purity_correlation < -0.5),
+             aes(fill = fillNeg, size = sampleCount), color = "black", shape = 21, stroke = 0.2) +
+  scale_fill_gradient(
+    name = "- Corr.",
+    low = "lightblue", high = "blue4",
+    limits = c(0, max_neg), na.value = "grey90"
+  ) +
+
+  # POSITIVE correlation points layer
+  new_scale_fill() +
+  geom_point(data = subset(tempPlotDf, purity_correlation > 0.5),
+             aes(fill = fillPos, size = sampleCount), color = "black", shape = 21, stroke = 0.2) +
+  scale_fill_gradient(
+    name = "+ Corr.",
+    low = "mistyrose", high = "darkred",
+    limits = c(0, max_pos), na.value = "grey90"
+  ) +
+
+  theme_minimal() +
+  labs(
+    title = "Unique Host-Specific Genes (n=1,343)",
+    x = "Purity Correlation", 
+    y = "Median eH"
+  )
+
+
+pdf(paste0(plotDir, "/volcano/", fprefix, "_host_uniqueGenes_eH_vs_purity.pdf"), 
+    height=6, 
+    width=8)
+print(meanPlot)
+print(medianPlot)
+dev.off()
+```
+
+#### 2.3.2.2 Unique Genes: mean eH vs # samples
+! Of note, making Inf arbitrarily large (7,000)
+```{r}
+tempPlotDf <- hostSpecSampleGeneDf %>%
+  mutate(meanEhEdit = ifelse(meanEh == Inf, 
+                             7000,
+                             meanEh),
+         medianEhEdit = ifelse(medianEh == Inf, 
+                             7000,
+                             medianEh), 
+         meanLabel = ifelse(meanEh > 1000 & sampleCount > 20,
+                            Symbol, 
+                            NA),
+         medianLabel = ifelse(medianEh > 1000 & sampleCount > 20,
+                            Symbol, 
+                            NA), 
+         purityCol = ifelse(purity_correlation > 0, 
+                            "Positive", 
+                            "Negative"))
+
+tempPlotDf$purityCol <- factor(tempPlotDf$purityCol, 
+                               c("Positive", "Negative"))
+
+(meanPlot <- ggplot(tempPlotDf, aes(x=sampleCount, y=meanEhEdit, color = purityCol, size=abs(purity_correlation))) +
+  geom_point() + 
+  geom_label_repel(
+    aes(label = meanLabel),
+    nudge_x = 0.1, 
+    nudge_y = 0.1,
+    # label.padding = unit(0.15, "lines"),
+    label.size = 0.05,
+    color = "white",
+    fill = "black",
+    min.segment.length = 0,
+    segment.color = "#69b3a2"  # line color from point to label
+  ) +
+  scale_color_paletteer_d("ggsci::nrc_npg") +
+  theme_minimal() )
+
+medianPlot <- ggplot(tempPlotDf, aes(x=sampleCount, y=medianEhEdit, color = purityCol, size=abs(purity_correlation))) +
+  geom_point() + 
+  geom_label_repel(
+    aes(label = medianLabel),
+    nudge_x = 0.1, 
+    nudge_y = 0.1,
+    # label.padding = unit(00, "lines"),
+    label.size = 0.05,
+     color = "white",
+    fill = "black",
+    min.segment.length = 0,
+    segment.color = "#69b3a2"  # line color from point to label
+  ) +
+  theme_minimal()+
+  scale_color_paletteer_d("ggsci::nrc_npg") 
+
+pdf(paste0(plotDir, "/scatter/", fprefix, "_uniqueGenes_eH_vs_sampleCount.pdf"), 
+    height=6, 
+    width=8)
+print(meanPlot)
+print(medianPlot)
+dev.off()
+```
+#### 2.3.2.4 Unique SNPs+Alt: mean eH vs # samples
+! Of note, this does not mean that the host = alt !
+```{r}
+tempPlotDf <- hostSpecSampleAltCountDf %>%
+  mutate(meanEhEdit = ifelse(meanEh == Inf, 
+                             7000,
+                             meanEh),
+         medianEhEdit = ifelse(medianEh == Inf, 
+                             7000,
+                             medianEh), 
+         meanAltLabel = ifelse(meanEh > 1000 & sampleCount > 20,
+                            paste0(Symbol, "_", Ref, "->", Alt), 
+                            NA),
+         medianAltLabel = ifelse(medianEh > 1000 & sampleCount > 20,
+                            paste0(Symbol, "_", Ref, "->", Alt), 
+                            NA))
+meanPlot <- ggplot(tempPlotDf, aes(x=sampleCount, y=meanEhEdit)) +
+  geom_point() + 
+  geom_label(
+    aes(label = meanAltLabel),
+    nudge_x = 0.1, 
+    nudge_y = 0.1,
+    label.padding = unit(0.15, "lines"),
+    label.size = .1,
+    color = "black",
+    fill = "#69b3a2",
+    min.segment.length = .5,
+    segment.color = "#69b3a2"  # line color from point to label
+  ) + 
+  theme_minimal()
+
+
+medianPlot <- ggplot(tempPlotDf, aes(x=sampleCount, y=medianEhEdit)) +
+  geom_point() + 
+  geom_label_repel(
+    aes(label = meanAltLabel),
+    nudge_x = 0.1, 
+    nudge_y = 0.1,
+    label.padding = unit(0.15, "lines"),
+    label.size = 0.1,
+    color = "black",
+    fill = "#69b3a2",
+    min.segment.length = .5,
+    segment.color = "#69b3a2"  # line color from point to label
+  ) +
+  theme_minimal()
+
+pdf(paste0(plotDir, "/scatter/", fprefix, "_uniqueAltSNPs_eH_vs_sampleCount.pdf"), 
+    height=6, 
+    width=8)
+print(meanPlot)
+print(medianPlot)
+dev.off()
+```
+### 2.3.3 Visualizations - Strict
+#### 2.3.3.3 Unique Genes: mean eT vs purity
+```{r}
+tempPlotDf <- hostSpecDfStrict %>%
+  mutate(meanEhEdit = ifelse(meanEh == Inf, 3000, meanEh),
+         medianEhEdit = ifelse(medianEh == Inf, 3000, medianEh), 
+         meanLabel = ifelse((meanEh > 1000 & purity_correlation < -0.60) | 
+                            (meanEh > 1000 & purity_correlation > 0.60), Symbol, NA),
+         medianLabel = ifelse((medianEh > 1000 & purity_correlation < -0.60) | 
+                              (medianEh > 1000 & purity_correlation > 0.60), Symbol, NA),
+         ,
+        colorGroup = case_when(
+            purity_correlation > 0.5 ~ "high_pos",
+            purity_correlation < -0.5 ~ "high_neg",
+            TRUE ~ "neutral"
+        ),
+        fillColor = case_when(
+            colorGroup == "high_pos" ~ meanEhEdit,   # will map to red
+            colorGroup == "high_neg" ~ -meanEhEdit,  # will map to blue (note the minus for inversion)
+            TRUE ~ NA_real_
+        )
+    )
+
+tempPlotDf <- tempPlotDf %>%
+  mutate(
+    fillPos = ifelse(purity_correlation > 0.5, meanEhEdit, NA),
+    fillNeg = ifelse(purity_correlation < -0.5, meanEhEdit, NA)
+  )
+
+# Max for scaling
+max_pos <- max(tempPlotDf$fillPos, na.rm = TRUE)
+max_neg <- max(tempPlotDf$fillNeg, na.rm = TRUE)
+
+meanPlot <- ggplot(tempPlotDf, aes(x = purity_correlation, y = meanEhEdit)) +
+  # NEUTRAL points layer
+  geom_point(data = subset(tempPlotDf, purity_correlation >= -0.5 & purity_correlation <= 0.5),
+             aes(size = sampleCount), fill = "grey80", color = "black", shape = 21, stroke = 0.2) +
+
+  # NEGATIVE correlation points layer
+  new_scale_fill() +
+  geom_point(data = subset(tempPlotDf, purity_correlation < -0.5),
+             aes(fill = fillNeg, size = sampleCount), color = "black", shape = 21, stroke = 0.2) +
+  scale_fill_gradient(
+    name = "- Corr.",
+    low = "lightblue", high = "blue4",
+    limits = c(0, max_neg), na.value = "grey90"
+  ) +
+
+  # POSITIVE correlation points layer
+  new_scale_fill() +
+  geom_point(data = subset(tempPlotDf, purity_correlation > 0.5),
+             aes(fill = fillPos, size = sampleCount), color = "black", shape = 21, stroke = 0.2) +
+  scale_fill_gradient(
+    name = "+ Corr.",
+    low = "mistyrose", high = "darkred",
+    limits = c(0, max_pos), na.value = "grey90"
+  ) +
+
+  theme_minimal() +
+  labs(title = "Unique Host-Specific Genes (n=52)",
+       x = "Purity Correlation", 
+       y = "Median eH")
+
+
+
+tempPlotDf <- tempPlotDf %>%
+  mutate(
+    fillPos = ifelse(purity_correlation > 0.5, medianEhEdit, NA),
+    fillNeg = ifelse(purity_correlation < -0.5, medianEhEdit, NA)
+  )
+
+# Max for scaling
+max_pos <- max(tempPlotDf$fillPos, na.rm = TRUE)
+max_neg <- max(tempPlotDf$fillNeg, na.rm = TRUE)
+
+medianPlot <- ggplot(tempPlotDf, aes(x = purity_correlation, y = medianEhEdit)) +
+  # NEUTRAL points layer
+  geom_point(data = subset(tempPlotDf, purity_correlation >= -0.5 & purity_correlation <= 0.5),
+             aes(size = sampleCount), fill = "grey80", color = "black", shape = 21, stroke = 0.2) +
+
+  # NEGATIVE correlation points layer
+  new_scale_fill() +
+  geom_point(data = subset(tempPlotDf, purity_correlation < -0.5),
+             aes(fill = fillNeg, size = sampleCount), color = "black", shape = 21, stroke = 0.2) +
+  scale_fill_gradient(
+    name = "- Corr.",
+    low = "lightblue", high = "blue4",
+    limits = c(0, max_neg), na.value = "grey90"
+  ) +
+
+  # POSITIVE correlation points layer
+  new_scale_fill() +
+  geom_point(data = subset(tempPlotDf, purity_correlation > 0.5),
+             aes(fill = fillPos, size = sampleCount), color = "black", shape = 21, stroke = 0.2) +
+  scale_fill_gradient(
+    name = "+ Corr.",
+    low = "mistyrose", high = "darkred",
+    limits = c(0, max_pos), na.value = "grey90"
+  ) +
+
+  theme_minimal() +
+  labs(title = "Unique Host-Specific Genes (n=52)",
+       x = "Purity Correlation", 
+       y = "Median eH")
+
+
+
+pdf(paste0(plotDir, "/volcano/", fprefix, "_host_strict_uniqueGenes_eH_vs_purity.pdf"), 
+    height=6, 
+    width=8)
+print(meanPlot)
+print(medianPlot)
+dev.off()
+```
+
+
+
+
+# 4 Intersect
+9,062 gene symbols have both host- and tumor-informative SNPs. 
+We need to look at how many times they are host vs tumor informative. 
+```{r}
+### For each unique gene symbol, count number of times SNP is host or tumor specfic
+intersectDf <- adrianDf  %>%
+  group_by(GeneID, 
+           Symbol) %>%
   summarise(
-    Specificity_T_count = sum(Specificity == "T"),
-    Specificity_H_count = sum(Specificity == "H"),
+    Specificity_T_count = sum(eT > 0 & eH == 0),
+    Specificity_H_count = sum(eH > 0 & eT == 0),
     .groups = "drop"
   )
 
-hostOnly <- specCountDf %>%
-  filter(Specificity_T_count == 0 & Specificity_H_count > 0) %>%
-  mutate("Annotation"="hostOnly")
+### Binary H markers = 1,343 genes for which all SNPs are host specific. 
+binaryHost <- intersectDf %>%
+  filter(Specificity_T_count == 0 & Specificity_H_count > 0)
 
-# host90 <- specCountDf %>%
-#   filter(Specificity_H_count*0.10 > Specificity_T_count)
+### Binary T markers = 4,639 genes for which all SNPs are tumor specific. 
+binaryTumor <- intersectDf %>%
+  filter(Specificity_H_count == 0 & Specificity_T_count > 0)
+
+### How many genes are shared between both groups (i.e. some SNPs are host specific and some are tumor specific)
+shared <- intersectDf %>%
+  filter(Specificity_T_count > 0 & Specificity_H_count > 0 )
+```
+
+
+
+
+# 5 Merge with external data
+### 1.3.1 HPA: Monaco
+Trying to subset Monaco
+Testing with min nTPM 20 = 7,765 genes. 
+```{r}
+monaco <- read_tsv("~/gitClones/01_Deconvolution/03_Deconvolution_CTVT/031_Data/HPA/rna_immune_cell_monaco.tsv") %>%
+  dplyr::rename("Gene name"="geneName") %>%
+  filter(geneName %in% binaryHost$Symbol & nTPM > 20)
+```
+# 6 Find All Markers
+## 6.1 Convert SCE to Seurat
+Only keeping non-bad clusters because I want "true" marker genes. 
+```{r}
+obj <- readRDS(paste0(dataDir, "SCE_concat_CTVT_includingAllGenes_logCorrecDone_vstCorrecDone_ClustDone2_ManAnot.rds"))
+
+assay(obj, "counts") <- as.matrix(assay(obj, "counts"))
+assay(obj, "logcounts") <- as.matrix(assay(obj, "logcounts"))
+seuratObj <- as.Seurat(obj, counts = "counts", data = "logcounts")
+seuratObj
+Idents(seuratObj) <- "manual.log.anot.fine"
+seuratObjNoBad <- subset(seuratObj, idents = "bad", invert=TRUE)
+table(Idents(seuratObjNoBad))
+DimPlot(seuratObj, reduction = "TSNE_log_corrected")
+DimPlot(seuratObjNoBad, reduction = "TSNE_log_corrected")
+
+rm(obj, seuratObj)
+gc()
+```
+
+## 6.2 Find all markers
+### 6.2.1 Wilcox
+```{r}
+# famWilcox <- FindAllMarkers(seuratObjNoBad, 
+#                       group.by = "manual.log.anot.fine", 
+#                       min.pct = 0.05)
 # 
-# host95 <- specCountDf %>%
-#   filter(Specificity_H_count*0.05 > Specificity_T_count)
-
-# checkHostOnly <- adrianDf %>%
-#   filter(Symbol %in% hostOnly$Symbol & GeneID %in% hostOnly$GeneID)
-
-tumorOnly <- specCountDf %>%
-  filter(Specificity_T_count > 0 & Specificity_H_count == 0)%>%
-  mutate("Annotation"="tumorOnly")
-
-# tumor90 <- specCountDf %>%
-#   filter(Specificity_T_count*0.10 > Specificity_H_count)
+# write.xlsx(famWilcox, 
+#            paste0(resDir, "findAllMarkers/", fprefix, "_seuratObjNoBad_famWilcox.xlsx"))
 # 
-# tumor95 <- specCountDf %>%
-#   filter(Specificity_T_count*0.05 > Specificity_H_count)
+# gc()
+```
+
+### 6.2.2 MAST
+```{r}
+# famMast <- FindAllMarkers(seuratObjNoBad, 
+#                           test.use = "MAST",
+#                           group.by = "manual.log.anot.fine", 
+#                           min.pct = 0.05)
+# write.xlsx(famMast, 
+#            paste0(resDir, "findAllMarkers/", fprefix, "_seuratObjNoBad_famMast.xlsx"))
+```
+
+## 6.3 Tumor specific genes
+### 6.3.1 Filter genes 
+Testing positive genes from FAM with high purity correlations. 
+```{r}
+famWilcox <- read.xlsx(paste0(resDir, "findAllMarkers/", fprefix, "_seuratObjNoBad_famWilcox.xlsx"))
+famWilcoxDegs <- famWilcox %>%
+  filter(p_val_adj < 0.01 & avg_log2FC > 2.5 & cluster == "CTVT") 
+
+intersecting <- intersect(famWilcoxDegs$gene, tumorSpecSampleGeneDf$Symbol) ### 33 genes intersecting
+# intersectingStrict <- intersect(famWilcoxDegs$gene, tumorSpecDfStrict$Symbol) ### None overlap. 
+```
+
+### 6.3.2 Merge with purity correlations and eT
+```{r}
+mergedFamWilcoxDegsCTVT <- famWilcox %>%
+  filter(p_val_adj < 0.01 & avg_log2FC > 2.5 & cluster=="CTVT") %>%
+  filter(gene %in% tumorSpecSampleGeneDf$Symbol) %>%
+  dplyr::dplyr::rename("Symbol"="gene") %>%
+  left_join(tumorSpecSampleGeneDf) %>%
+  mutate("Annotation"=paste0("tumorSpec_", cluster, "Deg")) 
+
+
+# write.xlsx(mergedFamWilcoxDegsCTVT, 
+#            paste0(resDir, fprefix, "_mergedFamWilcoxDegs_adrianTumorGenes.xlsx"))
+
+ctvtSet <- mergedFamWilcoxDegsCTVT$Symbol
+```
+### 6.3.3 Feature plots
+Merged and split by sample
+```{r}
+# for(g in intersecting){
 # 
-# checkTumorOnly <- adrianDf %>%
-#   filter(Symbol %in% tumorOnly$Symbol & GeneID %in% tumorOnly$GeneID)
-
-
-adrianManual <- adrianDf %>%
-  filter(Symbol %in% c("PSMD13", # CTVT-specific, component of 26S proteasome for protein homeostasis.
-                       "NDUFB6", 
-                       "DNAJB1", # CTVT-specific, activity of HSP to prevent misfolded prot. agg. 
-                       "GCSAML", 
-                       "TUBB6", # CTVT-specific, not in figure, microtubule component
-                       "MS4A2", # CTVT-specific, surface of mast cells and basophils (allergic response)
-                       "CMA1", # CTVT-specific, expressed by mast cells related to immune response
-                       "VIM", # CTVT-specific, cell shape and cytoplasm integrity
-                       "FKBP4", # CTVT-specific, immunoregulation by B and T cells
-                       "STMN1", 
-                       ### Host specific ##
-                       "IL24",
-                       "IL36B",
-                       "ANXA1", 
-                       "EPO", # hormone related to erythrocyte proliferation
-                       "IL24", 
-                       "DLA-DRA", # MCH II
-                       "DLA-DQA1", # MCH II
-                       "C1QA", 
-                       "C1R",
-                       "MMP26",
-                       "CEACAM18", # cell adhesion and tumor progression
-                       "TGFBI", # induced by TGFB, inhibiting cell adhesion (immunosupressive?)
-                       "LYZ", # bacteriolytic, associated with monocyte-macrophage system
-                       "BPI")) %>% # antimicrobial protein associated with neutrophil granules
-  group_by(GeneID, Symbol) %>%
-  summarise(
-    Specificity_T_count = sum(Specificity == "T"),
-    Specificity_H_count = sum(Specificity == "H"),
-    .groups = "drop"
-  ) %>%
-  mutate("Annotation"="manualAdrian")
-
-# From Maurine's notebook on bulk RNA seq of CTVT samples. 
-maurineManual <- adrianDf %>%
-  filter(Symbol %in% c(### Host specific ### 
-                      # B-cells
-                      "MS4A1",
-                      "PAX5",
-                      "BANK1",
-                      "BCL11A",
-                      
-                      # T-cells
-                      "CD3E",
-                      "CD3G", 
-                      "CD4", 
-                      "CD8A", 
-                      "ICOS", 
-                      "CTLA4", 
-                      
-                      # MHC-I --> CD8 T-cells (all nucleated) = innate
-                      "TAP1", 
-                      "B2M", 
-                      "DLA-64", 
-                      
-                      # MCH-II --> CD4 T cells = adaptive
-                      "DLA-DRA",
-                      "DLA-DQA1", 
-                      "DLA-DMA", 
-                      
-                      # Plasma
-                      "JCHAIN", 
-                      "IRF4", 
-                      "POU2AF1", 
-                      
-                      # Macro/mono
-                      "LYZ",
-                      "CD80",
-                      "CD86",
-                      "IL18",
-                      "MRC1",
-                      "GAB2",
-                      
-                      # Fibro
-                      "FAP",
-                      "CALD1",
-                      "COL6A3",
-                      "LAMA4",
-                      
-                      # Endo
-                      "ADGRL4",
-                      "VWF",
-                      "PDGFD",
-                      
-                      ### CTVT specific ###
-                      "LSAMP",
-                      "DPP10",
-                      "PDE1C",
-                      "PDGFC",
-                      "DLC1",
-                      "EPO",
-                      "MS4A2",
-                      "KIT"
-                       
-                       )) %>% # antimicrobial protein associated with neutrophil granules
-  group_by(GeneID, Symbol) %>%
-  summarise(
-    Specificity_T_count = sum(Specificity == "T"),
-    Specificity_H_count = sum(Specificity == "H"),
-    .groups = "drop"
-  ) %>%
-  mutate("Annotation"="manualMaurineBulk")
-
-
-finalDf <- rbind(tumorOnly, 
-                 hostOnly, 
-                 adrianManual, 
-                 maurineManual)
-
-# length(unique(finalDf$GeneID # 2438 unique genes.
+#   feat <- FeaturePlot(seuratObjNoBad,
+#                       reduction = "TSNE_log_corrected",
+#                       features=g) +
+# 
+#     ggtitle(paste0("tumorSpecDf + Wilcox DEG - ", g))
+#   
+#   featSamp <- FeaturePlot(seuratObjNoBad, 
+#                           reduction = "TSNE_log_corrected",
+#                           features=g, 
+#                           split.by = "Sample") 
+#   
+#   pdf(paste0("~/gitClones/01_Deconvolution/03_Deconvolution_CTVT/034_Plots/", fprefix, "/featureSeurat/tumorSpecificIntersect/03_Deconvolution_CTVT_tumorSpecDf_famWilcoxDegs_", g,"_expression.pdf"),
+#       height=4,
+#       width=4)
+# 
+#   print(feat)
+# 
+#   dev.off()
+#   
+#   
+#   
+#   pdf(paste0("~/gitClones/01_Deconvolution/03_Deconvolution_CTVT/034_Plots/", fprefix,  "/featureSeurat/tumorSpecificIntersect/03_Deconvolution_CTVT_tumorSpecDf_famWilcoxDegs_", g,"_expressionBySample.pdf"), 
+#       height=4, 
+#       width=14)
+#   
+#   print(featSamp) 
+#   
+#   dev.off()
+#   
+# }
 ```
 
-### 1.2.3 Merge with correlations
-From IL37 above, the purity correlation is positive. So even if it was a H specific variant, its expression more useful as a marker gene for CTVT expression (and non-CTVT cells)?
+
+## 6.4 Host specific genes
+### 6.4.1 Feature plots
 ```{r}
-adrianCorr <- read.xlsx(paste0(dataDir, "CTVT_expression_purity_correlations.xlsx"))%>%
-  rename("gene"="Symbol")
-
-finalDfCorr <- finalDf %>%
-  left_join(adrianCorr)
-
-write.xlsx(finalDfCorr, paste0(resDir, "/markerGeneSelection/", fprefix, "_finalDfCorr.xlsx"))
+# ###### 2.1.4 Loop through NON CTVT FAM DEG's --> check against genetic deconv list. Test positive genes first. 
+# for(ctype in unique(famWilcox$cluster)){
+#   if(ctype=="CTVT"){
+#     next
+#   }
+#   
+#   tempFamWilcoxDegs <- famWilcox %>%
+#     filter(p_val_adj < 0.01 & avg_log2FC > 2.5 & cluster == ctype) 
+#   
+#   tempIntersecting <- intersect(tempFamWilcoxDegs$gene, hostSpecSampleGeneDf$Symbol)
+#   
+#   print(paste0("Cell type: ", ctype, " - Intersecting: ", length(tempIntersecting)))
+#   
+#   tempPlotDir <- paste0("hostSpecificIntersect", ctype)
+#   
+#   for(tg in tempIntersecting){
+#     
+#     feat <- FeaturePlot(seuratObjNoBad,
+#                         reduction = "TSNE_log_corrected",
+#                         features=tg) +
+#       
+#       ggtitle(paste0("hostSpecDf + ", ctype, " Wilcox DEG - ", tg))
+#     
+#     featSamp <- FeaturePlot(seuratObjNoBad, 
+#                             reduction = "TSNE_log_corrected",
+#                             features=tg, 
+#                             split.by = "Sample") 
+#     
+#     pdf(paste0("~/gitClones/01_Deconvolution/03_Deconvolution_CTVT/034_Plots/", fprefix, "/featureSeurat/", tempPlotDir, "/03_Deconvolution_CTVT_tumorSpecDf_famWilcoxDegs_", tg,"_expression.pdf"),
+#         height=4,
+#         width=4)
+#     
+#     print(feat)
+#     
+#     dev.off()
+#     
+#     
+#     
+#     pdf(paste0("~/gitClones/01_Deconvolution/03_Deconvolution_CTVT/034_Plots/", fprefix, "/featureSeurat/", tempPlotDir, "/03_Deconvolution_CTVT_tumorSpecDf_famWilcoxDegs_", tg,"_expressionBySample.pdf"), 
+#         height=4, 
+#         width=14)
+#     
+#     print(featSamp) 
+#     
+#     dev.off()
+#     
+#   }
+#   
+# }
 ```
 
-## 1.3 Map genes in single-nuc data to finalDf. 
-- First check how many have a corresponding rowData entry because we will be checking against Maurine's annotations, we need to have gene ID's that match the ctvtRowData. 
-
-- Then, merge using rowData. 
-
-### 1.3.1 Genes mapping to rowData
-Going to split by rownames, Symbol column, and ID column in ctvtRowData so that I know what to merge on. 
+### 6.4.2 Merge with purity correlations
 ```{r}
-repeatedENSCAF <- read.xlsx(paste0(resDir, "/geneAnnotation/03_Deconvolution_CTVT_geneCorrelations_snObjRepeatedENSCAF_withRowsums.xlsx"))
+mergedFamWilcoxDegsAdrian <- data.frame()
 
 
-finalDfCorrAnno <- finalDfCorr %>%
-        # Matching gene symbols --> each have a unique rowname, but can be duplicated
-  mutate("matchedSymbol"=ifelse(Symbol %in% unique(ctvtRowData$Symbol),
-                                "matchedSymbol",
-                                "No"),
-         # Matching ENSCAF id's --> each have a unique rowname, but can be duplicated
-         "matchedENSCAF" = ifelse(GeneID %in% unique(ctvtRowData$ID),
-                                "matchedENSCAF",
-                                "No"),
-         # Of the ENSCAF id's in Adrian's table, which are repeats in the sn?
-         "repeatedENSCAF" = ifelse(GeneID %in% unique(repeatedENSCAF$ID),
-                                "repeatedENSCAF",
-                                "No"),
-         
-         # Matching gene name or ENSCAF id to a rowname id's --> all unique!
-         "matchedRowname" = ifelse(GeneID %in% unique(rownames(ctvtRowData))|Symbol %in% unique(rownames(ctvtRowData)),
-                                "matchedRowname",
-                                "No"),
-         # Genes not found at all in sn. 
-         "unmatched" = ifelse(matchedSymbol == "No" & matchedENSCAF =="No" & matchedRowname == "No",
-                              "unmatched",
-                              "matched")
-         )
-
-table(finalDfCorrAnno$unmatched)
-# 557 genes in Adrian's table do not match to the sn annotations. 
-
-table(finalDfCorrAnno$repeatedENSCAF)
-          #   No repeatedENSCAF 
-          # 2445              4 
-
-finalDfCorrAnno_notInSn <- finalDfCorrAnno %>%
-  filter(unmatched == "unmatched")
-
-write.xlsx(finalDfCorrAnno, paste0(resDir, 
-                                   "/markerGeneSelection/", 
-                                   fprefix, 
-                                   "_finalDfCorrAnno.xlsx"))
-```
-
-## 1.5 Map Maurine's marker gene assignment to table
-Using multi-sample annotation from integrated data. May need to be adjusted. 
-
-### 1.5.1 Filter out bad cells for now
-
-### 1.5.2 Annotation
-```{r}
- # findMarkers <- scran::findMarkers(obj,
- #                                  groups = scAnnoFactor)
-
-# Performs pairwise comparisons between each pair of groups (i.e. celltypes). Summarizes effect sizes. Should be more intuitive than findMarkers, because individual cells inflate p-values. 
-scAnno <- colData(obj)$manual.log.anot.fine
-
-# Groups must be factored. 
-scAnnoFactor <- factor(scAnno, levels = unique(scAnno))
-scoreMarkers <- scran::scoreMarkers(obj, 
-                                    groups = scAnnoFactor,
-                                    assay.type = "logcounts",
-                                    full.stats = T)
-```
-
-### 1.5.1 Interpretation
-mean.*, the mean effect size across all pairwise comparisons involving X. A large value (>0 for log-fold changes, >0.5 for the AUCs) indicates that the gene is upregulated in X compared to the average of the other groups. A small value (<0 for the log-fold changes, <0.5 for the AUCs) indicates that the gene is downregulated in X instead.
-median.*, the median effect size across all pairwise comparisons involving X. A large value indicates that the gene is upregulated in X compared to most (>50%) other groups. A small value indicates that the gene is downregulated in X instead.
-min.*, the minimum effect size across all pairwise comparisons involving X. A large value indicates that the gene is upregulated in X compared to all other groups. A small value indicates that the gene is downregulated in X compared to at least one other group.
-max.*, the maximum effect size across all pairwise comparisons involving X. A large value indicates that the gene is upregulated in X compared to at least one other group. A small value indicates that the gene is downregulated in X compared to all other groups.
-rank.*, the minimum rank (i.e., “min-rank”) across all pairwise comparisons involving X - see ?computeMinRank for details. A small min-rank indicates that the gene is one of the top upregulated genes in at least one comparison to another group.
-
-Keep in mind that the interpretations above also depend on the sign of lfc. The concept of a “large” summary statistic (>0 for Cohen's d, >0.5 for the AUCs) can only be interpreted as upregulation when lfc >= 0. Similarly, the concept of a “small” value (<0 for Cohen's d, <0.5 for the AUCs) cannot be interpreted as downregulation when lfc <= 0. For example, if lfc=1, a positive min.logFC.cohen can still be interpreted as upregulation in 
-𝑋
-X compared to all other groups, but a negative max.logFC.cohen could not be interpreted as downregulation in 
-𝑋
-X compared to all other groups.
-
-When lfc is not zero, the AUC is generalized to the probability of obtaining a random observation in one group that is greater than a random observation plus lfc in the other group. For example, if we had lfc=2 and we obtained an AUC of 0.8, this means that we would observe a difference of lfc or greater between the random observations. Again, we can only unambiguously interpret the direction of the change when it is the same as the sign of the lfc. In this case, an AUC above 0.5 with a positive lfc represents upregulation, but an AUC below 0.5 could mean either downregulation or a log-fold change less than lfc.
-
-A non-zero setting of lfc has no effect on the log-fold change in the proportion of cells with detected expression.
-
-- We are interested most in genes that distinguish cell types from all other cell types, i.e.:
-  - Large mean = gene is upregulated in a cell type compared to the average of other cell types
-  - Low mean = gene is downregulated ""
-  - High min = gene is upregulated in a cell type compared to all other groups
-  - Low max = gene is downregulated in a cell type compared to all other groups
-- On rankings (within a cell type)
-  - More important = ranking closer to 1. 
-```{r}
-masterDf <- data.frame(
-  rownames = c(),
-  cellType = c(),
-  mean.logFC.cohen = c(), 
-  mean.logFC.detected = c(), 
-  mean.AUC = c(), 
-  median.logFC.cohen = c(), 
-  median.logFC.detected = c(), 
-  median.AUC = c(), 
-  min.logFC.cohen = c(), 
-  min.logFC.detected = c(), 
-  min.AUC = c(), 
-  max.logFC.cohen = c(), 
-  max.logFC.detected = c(), 
-  max.AUC = c(),
-  rank.logFC.cohen = c(), 
-                        rank.logFC.detected = c(), 
-                        rank.AUC = c()
-)
-
-for (i in 1:length(scoreMarkers)){
-  temp <- scoreMarkers[[i]]
-  name <- names(scoreMarkers)[i]
-  print(name)
+for(ctype in unique(famWilcox$cluster)){
+  if(ctype=="CTVT"){
+    next
+  }
   
-  tempDf <- data.frame(rownames = rownames(temp),
-                        cellType = rep(name, nrow(temp)),
-                        mean.logFC.cohen = temp$mean.logFC.cohen, 
-                        mean.logFC.detected = temp$mean.logFC.detected, 
-                        mean.AUC = temp$mean.AUC, 
-                        median.logFC.cohen = temp$median.logFC.cohen, 
-                        median.logFC.detected = temp$median.logFC.detected, 
-                        median.AUC = temp$median.AUC, 
-                        min.logFC.cohen = temp$min.logFC.cohen, 
-                        min.logFC.detected = temp$min.logFC.detected, 
-                        min.AUC = temp$min.AUC, 
-                        max.logFC.cohen = temp$max.logFC.cohen, 
-                        max.logFC.detected = temp$max.logFC.detected, 
-                        max.AUC = temp$max.AUC, 
-                       rank.logFC.cohen = temp$rank.logFC.cohen, 
-                        rank.logFC.detected = temp$rank.logFC.detected, 
-                        rank.AUC = temp$rank.AUC
-                      )
-  masterDf <- rbind(masterDf, tempDf)
+  temp <- famWilcox %>%
+    filter(p_val_adj < 0.01 & avg_log2FC > 2.5& cluster==ctype) %>%
+    filter(gene %in% hostSpecSampleGeneDf$Symbol) %>%
+    dplyr::dplyr::rename("Symbol"="gene") %>%
+    left_join(hostSpecSampleGeneDf) %>%
+    mutate("Annotation"=paste0("hostSpec_", ctype, "Deg"))
+  
+  mergedFamWilcoxDegsAdrian <- rbind(mergedFamWilcoxDegsAdrian, temp)
+  
 }
 ```
 
-## 1.6 Merge score markers with Adrian's list for annotation.
-### 1.6.1 First, checking which 
+
+## 6.5 Candidate gene lists
+### 6.5.1 Gene sets
 ```{r}
+mergedFamWilcoxDegsCTVT <- famWilcox %>%
+  filter(p_val_adj < 0.01 & avg_log2FC > 2.5 & cluster=="CTVT") %>%
+  filter(gene %in% tumorSpecSampleGeneDf$Symbol) %>%
+  dplyr::rename("Symbol"="gene") %>%
+  left_join(tumorSpecSampleGeneDf) %>%
+  mutate("Annotation"=paste0("tumorSpec_", cluster, "Deg")) 
+
+# 17 genes are negative correlated with tumor purity and a Bcell DEG
+print(nrow(mergedFamWilcoxDegsAdrian %>% filter(cluster == "Bcells" & purity_correlation < -0.5)))
+candBcell <- mergedFamWilcoxDegsAdrian %>% 
+  filter(cluster == "Bcells" & purity_correlation < -0.5) %>% 
+  dplyr::select(Symbol, medianEh, purity_correlation, avg_log2FC)
+
+bcellSet <- candBcell$Symbol
+
+# 36 genes are negatively correlated with tumor purity and a Myeloid DEG
+print(nrow(mergedFamWilcoxDegsAdrian %>% filter(cluster == "Myeloid" & purity_correlation < -0.5)))
+candMyeloid <- mergedFamWilcoxDegsAdrian %>% 
+  filter(cluster == "Myeloid" & purity_correlation < -0.5) %>% 
+  dplyr::select(Symbol, medianEh, purity_correlation, avg_log2FC)
+
+myeloidSet <- candMyeloid$Symbol
+
+# 32 genes are negatively correlated with tumor purity and a Myeloid DEG
+print(nrow(mergedFamWilcoxDegsAdrian %>% filter(cluster == "CAF.Endo" & purity_correlation < -0.5)))
+candCAFEndo <- mergedFamWilcoxDegsAdrian %>% 
+  filter(cluster == "CAF.Endo" & purity_correlation < -0.5) %>% 
+  dplyr::select(Symbol, medianEh, purity_correlation, avg_log2FC)
+
+cafendoSet <- candCAFEndo$Symbol
+
+
+# 21 genes are negatively correlated with tumor purity and a Plasma DEG
+print(nrow(mergedFamWilcoxDegsAdrian %>% filter(cluster == "Plasma" & purity_correlation < -0.5)))
+candPlasma <- mergedFamWilcoxDegsAdrian %>% 
+  filter(cluster == "Plasma" & purity_correlation < -0.5) %>% 
+  dplyr::select(Symbol, medianEh, purity_correlation, avg_log2FC)
+
+plasmaSet <- candPlasma$Symbol
+
+# 9 genes are negatively correlated with tumor purity and a Tcells DEG
+print(nrow(mergedFamWilcoxDegsAdrian %>% filter(cluster == "Tcells" & purity_correlation < -0.5)))
+candTcells <- mergedFamWilcoxDegsAdrian %>% 
+  filter(cluster == "Tcells" & purity_correlation < -0.5) %>% 
+  dplyr::select(Symbol, medianEh, purity_correlation, avg_log2FC)
+
+tcellSet <- candTcells$Symbol
+```
+
+### 6.5.2 Upset
+```{r}
+geneSets <- list("ctvt"=ctvtSet,
+             "bcell"=bcellSet,
+             "myeloid"=myeloidSet,
+             "caf.endo"=cafendoSet,
+             "plasma"=plasmaSet,
+             "tcell"=tcellSet)
+
+
+genes <- sort(unique(unlist(geneSets)))
+
+sets <- t(+sapply(geneSets, "%in%", x = genes)) %>%
+  t() %>%
+  as.data.frame()
+
+rownames(sets) <- genes
+
+sets <- sets %>%
+  rownames_to_column("Gene")
+
+upsetPlot <- upset(sets,
+      sets = c("ctvt", "bcell", "myeloid", "caf.endo", "plasma", "tcell"),
+      # keep.order = TRUE,
+      nintersects = NA, # show all intersections
+      order.by = "freq") # optional, could be degree or freq
+
+upsetPlot <- upset(
+  sets,
+  sets = c("ctvt", "caf.endo", "myeloid", "plasma", "tcell", "bcell"),
+  keep.order = TRUE,
+  nintersects = NA,
+  sets.bar.color = c(
+    ctvt = "#E41A1C",
+    caf.endo = "gold",
+    myeloid = "#4DAF4A",
+    plasma = "skyblue",
+    tcell = "cornflowerblue",
+    bcell = "pink"
+  )
+)
+
+
+uniqueGenes <- sets %>%
+  column_to_rownames("Gene") %>%
+  mutate(rowsum = rowSums(.)) %>%
+  filter(rowsum==1)
+
+
+upsetData <- sets %>%
+  unite(col = "intersection", -c("Gene"), sep = "") %>%
+  group_by(intersection) %>%
+  summarise(list = list(Gene)) %>%
+  mutate(list = setNames(list, intersection)) %>%
+  pull(list)
+
+write.xlsx(sets, paste0(resDir, fprefix, "_geneCorrelations_famDegs.xlsx"))
+
+pdf(paste0(plotDir, "/upset/", fprefix, "_hostTumorGenes_famDegs_intersection.pdf"), 
+    height=6, 
+    width=8)
+print(upsetPlot)
+dev.off()
+```
+
+### 6.5.3 Unique gene sets
+```{r}
+uniqueGenesFinal <- uniqueGenes %>%
+  dplyr::select(-rowsum)
+
+# Initialize a list to store unique genes per cell type
+uniqueGeneLists <- list()
+
+# Loop through each column (cell type)
+for (cell_type in colnames(uniqueGenesFinal)) {
+  # Identify genes that are only expressed (1) in this cell type
+  unique_genes <- rownames(uniqueGenesFinal)[
+    uniqueGenesFinal[, cell_type] == 1 & rowSums(uniqueGenesFinal) == 1
+  ]
+  
+  # Store in the list
+  uniqueGeneLists[[cell_type]] <- unique_genes
+}
+```
+
+
+
+# 7 Median eT vs eH
+## 7.1 Data
+New approach for marker gene selection: 
+- Group by gene, take median eT and eH --> probably more complete with purity corr. by gene as well. 
+- Of note, max eT = Inf --> replacing with 60000. 
+```{r}
+# snpDf <- 
+geneDf <- adrianDf %>%
+  group_by( GeneID, Symbol) %>% # Group by SNP (Location)
+  mutate(etEdit = ifelse(eT == Inf, 
+                             50000,
+                             eT)) %>%
+  summarise(sampleCount = n(), 
+            medianEh = median(eH), 
+            medianEt = median(eT),
+            medianEtEdit = median(etEdit)) %>%
+  left_join(adrianCorr, 
+            by = join_by(Symbol))
+```
+
+## 7.2 Plot
+### 7.2.1 Median eT vs eH 
+```{r}
+plotDf <- geneDf %>%
+  mutate(medianEhLog = log1p(medianEh), 
+         medianEtLog = log1p(medianEt),
+         medianEtEditLog = log10(medianEtEdit),
+         label = ifelse(medianEh > 1000 & medianEt > 1000,
+                            Symbol, 
+                            NA))
+
+medianPlot <- ggplot(plotDf, aes(x = medianEhLog, y = medianEtLog)) +
+  geom_point() +
+  theme_minimal() +
+  labs(title = "eT vs eH",
+    x = "log1p(median(eH))", 
+    y = "logq1p(median(eT))"
+  ) +
+  geom_label_repel(
+    aes(label = label),
+    nudge_x = 0.1, 
+    nudge_y = 0.1,
+    label.padding = unit(0.15, "lines"),
+    label.size = 0.1,
+    color = "black",
+    fill = "#69b3a2",
+    min.segment.length = .5,
+    segment.color = "#69b3a2"  # line color from point to label
+  )
 
 ```
 
-# --- Testing
-# 2 Check correlations of marker genes (testing with manualMaurineBulk genes, because all are in Adrian's table AND in the sn)
-## 2.1 Check Adrian's table
+#### 7.2.1.1 Logscale
 ```{r}
-maurineGenes <- c(### Host specific ### 
-                      # B-cells
-                      "MS4A1",
-                      "PAX5",
-                      "BANK1",
-                      "BCL11A",
-                      
-                      # T-cells
-                      "CD3E",
-                      "CD3G", 
-                      "CD4", 
-                      "CD8A", 
-                      "ICOS", 
-                      "CTLA4", 
-                      
-                      # MHC-I --> CD8 T-cells (all nucleated) = innate
-                      "TAP1", 
-                      "B2M", 
-                      "DLA-64", 
-                      
-                      # MCH-II --> CD4 T cells = adaptive
-                      "DLA-DRA",
-                      "DLA-DQA1", 
-                      "DLA-DMA", 
-                      
-                      # Plasma
-                      "JCHAIN", 
-                      "IRF4", 
-                      "POU2AF1", 
-                      
-                      # Macro/mono
-                      "LYZ",
-                      "CD80",
-                      "CD86",
-                      "IL18",
-                      "MRC1",
-                      "GAB2",
-                      
-                      # Fibro
-                      "FAP",
-                      "CALD1",
-                      "COL6A3",
-                      "LAMA4",
-                      
-                      # Endo
-                      "ADGRL4",
-                      "VWF",
-                      "PDGFD",
-                      
-                      ### CTVT specific ###
-                      "LSAMP",
-                      "DPP10",
-                      "PDE1C",
-                      "PDGFC",
-                      "DLC1",
-                      "EPO",
-                      "MS4A2",
-                      "KIT"
-                       
-                       )
-adrianDfMaurineGenes <- adrianDf %>%
-  filter(GeneID %in% maurineGenes)
+medianPlot <- ggplot(plotDf, aes(x = medianEh, y = medianEt)) +
+  geom_point() +
+  scale_x_log10(guide = "axis_logticks", limits=c(10^-3, 10^4)) +
+  scale_y_log10(guide = "axis_logticks", limits=c(10^-3, 10^4)) + 
+  theme_minimal() +
+  labs(title = "eT vs eH",
+    x = "median(eH)", 
+    y = "median(eT)"
+  )
 
+medianLabel = ifelse(medianEh > 1000 & sampleCount > 20,
+                            Symbol, 
+                            NA))
+meanPlot <- ggplot(tempPlotDf, aes(x=sampleCount, y=meanEhEdit)) +
+  geom_point() + 
+  geom_label_repel(
+    aes(label = meanLabel),
+    nudge_x = 0.1, 
+    nudge_y = 0.1,
+    label.padding = unit(0.15, "lines"),
+    label.size = 0.1,
+    color = "black",
+    fill = "#69b3a2",
+    min.segment.length = .5,
+    segment.color = "#69b3a2"  # line color from point to label
+  ) +
+  theme_minimal()
 
 ```
+#### 7.2.1.2 Absolute
 
-## 2.2 How well do Maurine's genes correlate with the proportion of cell types in a sample?
-### 2.2.1 Overall
-Correlate pb expression (total sample level and per cell type) of the marker genes and the a) number of cells of that cell type, and b) the proportion of cells in the same cell type. (eventually, we are doing deconv to get the proportion, so (b) is more important imo). 
-###
-
-### 2.2.2 Pseudosamples simulated by Scaden
-
-
-## 2.3 How well do Maurine's genes correlate between matched sn and bulk cell samples?
-Deviations can be due to either (a) sampling differences (we can test this by correlating with matched bulk nuc data) and (b) ... noise? not quite what I mean. 
-
-
-
-
+### 7.2.2 Distribution of delta eT and eH vs purity correlation

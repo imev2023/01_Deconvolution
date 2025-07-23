@@ -1,0 +1,502 @@
+---
+title: "03_Deconvolution_CTVT_customScadenExportCounts"
+output: html_document
+---
+
+# 0 Environment
+## 0.1 Packages
+### 0.1.1 Installs
+```{r echo=F, message=F, warning=FALSE}
+# if (!requireNamespace("devtools", quietly = TRUE)) {
+#    install.packages("devtools")
+# }
+# devtools::install_github("Danko-Lab/BayesPrism/BayesPrism")
+```
+### 0.1.1 Library
+```{r echo=F, message=F, warning=FALSE}
+set.seed(123)
+library(tidyverse)
+library(openxlsx)
+library(SingleCellExperiment)
+setClassUnion("ExpData", c("matrix", "SummarizedExperiment"))
+```
+
+## 0.2 Paths
+```{r echo=F, message=FALSE, warning=FALSE}
+wDir <- paste0("~/gitClones/01_Deconvolution/03_Deconvolution_CTVT/")
+fprefix <- "03_Deconvolution_CTVT_customScaden"
+dataDir <- paste0(wDir, "/031_Data/")
+resDir <- paste0(wDir, "/033_Results/", fprefix, "/")
+plotDir <- paste0(wDir, "/034_Plots/", fprefix, "/")
+```
+
+# 1 Data
+## 1.1 Read in counts matrix
+Need to see rowData to match to GeneIDs or Symbols in Adrian's table below. 
+```{r}
+obj <- readRDS(paste0(dataDir, "SCE_concat_CTVT_includingAllGenes_logCorrecDone_vstCorrecDone_ClustDone2_ManAnot.rds"))
+
+objNoBad <- obj[,obj$manual.log.anot.fine!="bad"]
+
+gc()
+```
+
+## 1.2 Get genes of interest (goi)
+These are genes we are testing using information from Adrian's CTVT purity table. 
+```{r}
+goi <- c(### Host specific ### 
+                      # B-cells
+                      "MS4A1",
+                      "PAX5",
+                      "BANK1",
+                      "BCL11A",
+                      
+                      # T-cells
+                      "CD3E",
+                      "CD3G", 
+                      "CD4", 
+                      "CD8A", 
+                      "ICOS", 
+                      "CTLA4", 
+                      
+                      # MHC-I --> CD8 T-cells (all nucleated) = innate
+                      "TAP1", 
+                      "B2M", 
+                      "DLA-64", 
+                      
+                      # MCH-II --> CD4 T cells = adaptive
+                      "DLA-DRA",
+                      "DLA-DQA1", 
+                      "DLA-DMA", 
+                      
+                      # Plasma
+                      "JCHAIN", 
+                      "IRF4", 
+                      "POU2AF1", 
+                      
+                      # Macro/mono
+                      "LYZ",
+                      "CD80",
+                      "CD86",
+                      "IL18",
+                      "MRC1",
+                      "GAB2",
+                      
+                      # Fibro
+                      "FAP",
+                      "CALD1",
+                      "COL6A3",
+                      "LAMA4",
+                      
+                      # Endo
+                      "ADGRL4",
+                      "VWF",
+                      "PDGFD",
+                      
+                      ### CTVT specific ###
+                      "LSAMP",
+                      "DPP10",
+                      "PDE1C",
+                      "PDGFC",
+                      "DLC1",
+                      "EPO",
+                      "MS4A2",
+                      "KIT"
+                       
+                       )
+
+
+
+
+```
+
+
+## 1.3 Map genes of interest to ENSCAF ID's
+Create "rownames" column to merge with counts matrix from single-nuc sequencing. 
+```{r}
+rowDataObj <- rowData(obj) %>%
+  as.data.frame()
+
+setdiff(goi, rowDataObj$Symbol) # 0, so all goi have a corresponding ENSCAF ID!
+
+rowDataObjMapped <- rowDataObj %>%
+  filter(Symbol %in% goi) %>%
+  rownames_to_column("rownames") 
+
+length(unique(goi))==length(unique(rowDataObjMapped$Symbol))
+length(unique(goi))==length(unique(rowDataObjMapped$ID))
+length(unique(goi))==length(rownames(rowDataObjMapped))
+
+enscaf <- rowDataObjMapped$ID
+```
+
+# 2 Export snRNAseq counts
+Scaden requires a .h5ad file. 
+Reading in SCE object, but subsetting genes to those defined by Maurine. 
+
+Ideas
+  - a) No additional information. 
+  - b) Give each gene a cell type annotation?
+  - c) Add purity. 
+  - d) b+c
+  - Investigate "bad" cells input. 
+  - Feature importance
+
+## 2.1 Extract counts
+Get counts from SCE. The rownames of the counts are a mix of symbols and IDs. Left join ID's from rowData above (filtered for goi). Then add rownames back before dropping additional columns from rowData. 
+
+OF NOTE, This is working because every goi has a unique escaf ID, but may cause problems for other genes. 
+
+### 2.1.1 Full object
+counts.txt needs to be cells x genes. 
+celltype.txt is a list of length(cells), with the column name, "Celltype". 
+```{r}
+# snCountsFinal_colData <- colData(obj)
+# 
+# write.xlsx(snCountsFinal_colData, paste0(resDir, fprefix, "_snCountsFinal_colData.xlsx"))
+
+
+snCountsFinal <- assay(obj, "counts") %>%
+  as.data.frame() %>%
+  rownames_to_column("rownames") %>%
+  left_join(rowDataObjMapped) %>% 
+  drop_na("ID") %>% 
+  column_to_rownames("ID") %>%
+  select(-c("rownames",
+            "Symbol",
+            "Type",
+            "Chromosome",
+            "hvgs" )) %>%
+  t()
+  
+
+snCountsColdata <- colData(obj)
+
+snAnnoFinal <- data.frame("Celltype" = colData(obj)$manual.log.anot.fine)
+snSamplesFinal <- data.frame("SampleID" = obj$Sample)
+
+rm(obj)
+gc()
+
+
+# Create the cell count matrix: rows = cell types, columns = samples
+snCellCounts <- snCountsColdata %>%
+  as.data.frame() %>%
+  group_by(manual.log.anot.fine,
+           Sample) %>%
+  summarise(cellCount = n()) %>%
+  pivot_wider(names_from = Sample,
+              values_from = cellCount,
+              values_fill = 0) %>%
+  column_to_rownames("manual.log.anot.fine")
+
+snCellProp <- apply(snCellCounts, 2, function(x) x/sum(x))
+
+colSums(snCellProp) # Should all be 1. 
+
+write.table(
+  snCountsFinal, 
+  file = paste0(resDir, 
+                "/0_scadenInput/snCounts/snCounts_counts.txt"), 
+  sep = "\t", 
+  quote = FALSE, 
+  row.names = c(seq(from=0, to=nrow(snCountsFinal)-1, by=1)),
+  col.names = NA  # Ensures first column (cell id's names) gets no name
+)
+
+write.table(
+  snAnnoFinal, 
+  file = paste0(resDir,
+                "/0_scadenInput/snCounts/snCounts_celltypes.txt"), 
+  sep = "\t", 
+  quote = FALSE,
+  col.names = T,  # Ensures first column (gene names) gets no name, 
+  row.names = F
+)
+
+write.table(
+  snSamplesFinal, 
+  file = paste0(resDir,
+                "/0_scadenInput/snCounts/snCounts_samples.txt"), 
+  sep = "\t", 
+  quote = FALSE,
+  col.names = T,  # Ensures first column (gene names) gets no name, 
+  row.names = F
+)
+```
+
+### 2.1.2 Without "bad" cluster
+```{r}
+snCountsFinalNoBad <- assay(objNoBad, "counts") %>%
+  as.data.frame() %>%
+  rownames_to_column("rownames") %>%
+  left_join(rowDataObjMapped) %>% 
+  drop_na("ID") %>% 
+  column_to_rownames("ID") %>%
+  select(-c("rownames",
+            "Symbol",
+            "Type",
+            "Chromosome",
+            "hvgs" )) %>%
+  t()
+
+snAnnoFinalNoBad <- data.frame("Celltype" = colData(objNoBad)$manual.log.anot.fine)
+snSamplesFinalNoBad <- data.frame("SampleID" = objNoBad$Sample)
+
+snCountsColdataNoBad <- colData(objNoBad)
+rm(objNoBad)
+gc()
+
+# Create the cell count matrix: rows = cell types, columns = samples
+snCellCountsNoBad <- snCountsColdataNoBad %>%
+  as.data.frame() %>%
+  group_by(manual.log.anot.fine,
+           Sample) %>%
+  summarise(cellCount = n()) %>%
+  pivot_wider(names_from = Sample,
+              values_from = cellCount,
+              values_fill = 0) %>%
+  column_to_rownames("manual.log.anot.fine")
+
+snCellPropNoBad <- apply(snCellCountsNoBad, 2, function(x) x/sum(x))
+
+colSums(snCellPropNoBad) # Should all be 1.
+
+
+write.table(
+  snCountsFinalNoBad, 
+  file = paste0(resDir, 
+                "/0_scadenInput/snCountsNoBad/snCountsNoBad_counts.txt"), 
+  sep = "\t", 
+  quote = FALSE, 
+  row.names = c(seq(from=0, to=nrow(snCountsFinalNoBad)-1, by=1)),
+  col.names = NA  # Ensures first column (cell id's names) gets no name
+)
+
+write.table(
+  snAnnoFinalNoBad, 
+  file = paste0(resDir,
+                "/0_scadenInput/snCountsNoBad/snCountsNoBad_celltypes.txt"), 
+  sep = "\t", 
+  quote = FALSE,
+  col.names = T,  # Ensures first column (gene names) gets no name, 
+  row.names = F
+)
+
+write.table(
+  snSamplesFinalNoBad, 
+  file = paste0(resDir,
+                "/0_scadenInput/snCountsNoBad/snCountsNoBad_samples.txt"), 
+  sep = "\t", 
+  quote = FALSE,
+  col.names = T,  # Ensures first column (gene names) gets no name, 
+  row.names = F
+)
+```
+# 3 Export bulk counts
+Samples in column, genes in column names (but no header name.)
+
+## 3.1 Read in counts files
+Export as tsv.
+```{r}
+bulkCountsFinal <- readRDS(paste0(dataDir, "01_Deconvolution_matchedBulkMatrixCTVT_bulkCountsFinal.rds"))
+
+bulkCountsFinal_metadata <- read.xlsx(paste0(dataDir,
+                                             "01_Deconvolution_matchedBulkMatrixCTVT_bulkCountsFinal_metadata.xlsx"))
+```
+
+## 3.2 Subset on genes of interest (goi)
+### 3.2.1 Without purity
+```{r}
+bulkCountsGoi <- bulkCountsFinal[enscaf, ]
+
+write.table(
+  bulkCountsGoi, 
+  file = paste0(resDir, "/0_scadenInput/", fprefix, "_bulkCountsGoi.txt"), 
+  sep = "\t", 
+  quote = FALSE, 
+  col.names = NA  # Ensures first column (gene names) gets no name
+)
+```
+
+### 3.2.2 With purity (snPurity only)
+- Do we filter out non-purity rows?
+- Of note, manually adding "3203T1A2b", techically should have same purity as "3203T1A2c"
+#### 3.2.2.1 All cell types purity 
+```{r}
+snCellPropPurity <- snCellProp["CTVT",] %>%
+  # t() %>%
+  as.data.frame() %>%
+  rownames_to_column("Sample") %>%
+  rename("."="CTVT") 
+
+
+bulkCountsGoiPurity <- bulkCountsFinal[enscaf,] %>%
+  t() %>%
+  as.data.frame() %>%
+  rownames_to_column("ID") %>%
+  mutate("Sample"=str_replace(ID, "_[np2]$", "")) %>%
+  # mutate("Sample"=str_replace(Sample, "[abc]$", "")) %>%
+  left_join(snCellPropPurity) %>%
+  select(-c(Sample)) %>%
+  rename("CTVT"="purity") %>%
+  drop_na() %>%
+  column_to_rownames("ID") %>%
+  as.matrix() %>%
+  t()
+
+write.table(
+  bulkCountsGoiPurity, 
+  file = paste0(resDir, "/0_scadenInput/", fprefix, "_bulkCountsGoiPurity.txt"), 
+  sep = "\t", 
+  quote = FALSE, 
+  col.names = NA  # Ensures first column (gene names) gets no name
+)
+
+```
+
+#### 3.2.2.2 No bad cell types purity
+```{r}
+snCellPropNoBadPurity <- snCellPropNoBad["CTVT", ] %>%
+  # t() %>%
+  as.data.frame() %>%
+  rownames_to_column("Sample") %>%
+  rename("."="CTVT")
+
+bulkCountsGoiPurityNoBad <- bulkCountsFinal[enscaf,] %>%
+  t() %>%
+  as.data.frame() %>%
+  rownames_to_column("ID") %>%
+  mutate("Sample"=str_replace(ID, "_[np2]$", "")) %>%
+  # mutate("Sample"=str_replace(Sample, "[abc]$", "")) %>%
+  left_join(snCellPropNoBadPurity) %>%
+  select(-c(Sample)) %>%
+  rename("CTVT"="purity") %>%
+  drop_na() %>%
+  column_to_rownames("ID") %>%
+  as.matrix() %>%
+  t()
+
+write.table(
+  bulkCountsGoiPurityNoBad, 
+  file = paste0(resDir, "/0_scadenInput/", fprefix, "_bulkCountsGoiPurityNoBad.txt"), 
+  sep = "\t", 
+  quote = FALSE, 
+  col.names = NA  # Ensures first column (gene names) gets no name
+)
+```
+### 3.2.3 With purity (snPurity + Adrian's purity)
+#### 3.2.3.1 Read in Adrian's supp table 2 or Andy's table
+```{r}
+tempWdir <- "~/Desktop/4_mappingPurities/"
+tempDataDir <- paste0(tempWdir, "/41_Data/")
+tempResDir <- paste0(tempWdir, "/43_Results/")
+
+adrianSupp2 <- read.xlsx(paste0(tempDataDir, "/aau9923_dataset_s2.xlsx"), startRow = 12) %>%
+  select(c(Sample, Purity)) 
+
+setdiff(colnames(bulkCountsFinal), adrianSupp2$Sample) # None are in Adrian's table
+
+andy <- read.csv(paste0(tempDataDir, "2025-05-26_4425_samples_mitochondrial_tree(4425 samples tree).csv")) 
+
+setdiff(colnames(bulkCountsFinal), andy$Label)
+
+andyPurity <- andy %>%
+  filter(Label %in% colnames(bulkCountsFinal)) %>%
+  select(Label, Purity) %>%
+  rename("Label"="Sample", 
+         "Purity"="CTVT")
+
+write.xlsx(andyPurity, paste0(resDir, fprefix, "_bulkCountsFinal_andyPurities.xlsx"))
+```
+
+#### 3.2.2.2 All cell types purity 
+```{r}
+snCellPropPurity <- snCellProp["CTVT",]  %>%
+  # t() %>%
+  as.data.frame() %>%
+  rownames_to_column("Sample") %>%
+  rename("."="CTVT")
+
+snCellPropPurity[nrow(snCellPropPurity)+1,] <- c("3203T1A2b", 
+                          snCellPropPurity$CTVT[which(snCellPropPurity$Sample=="3203T1A2c")])
+
+snCellPropPurityAndy <- rbind(snCellPropPurity, 
+                              andyPurity)
+  
+
+bulkCountsGoiPurityAndy <- bulkCountsFinal[enscaf,] %>%
+  t() %>%
+  as.data.frame() %>%
+  rownames_to_column("ID") %>%
+  mutate("Sample"=str_replace(ID, "_[np2]$", "")) %>%
+  # mutate("Sample"=str_replace(Sample, "[abc]$", "")) %>%
+  left_join(snCellPropPurityAndy) %>%
+  select(-c(Sample)) %>%
+  rename("CTVT"="purity") %>%
+  drop_na() %>%
+  column_to_rownames("ID") %>%
+  as.matrix() %>%
+  t()
+
+write.table(
+  bulkCountsGoiPurityAndy, 
+  file = paste0(resDir, "/0_scadenInput/", fprefix, "_bulkCountsGoiPurityAndy.txt"), 
+  sep = "\t", 
+  quote = FALSE, 
+  col.names = NA  # Ensures first column (gene names) gets no name
+)
+```
+
+#### 3.2.2.3 No bad cell types purity
+```{r}
+snCellPropNoBadPurity <- snCellPropNoBad["CTVT", ] %>%
+  # t() %>%
+  as.data.frame() %>%
+  rownames_to_column("Sample") %>%
+  rename("."="CTVT")
+
+snCellPropNoBadPurity[nrow(snCellPropNoBadPurity)+1,] <- c("3203T1A2b", 
+                               snCellPropNoBadPurity$CTVT[which(snCellPropNoBadPurity$Sample=="3203T1A2c")])
+
+snCellPropNoBadPurityAndy <- rbind(snCellPropNoBadPurity, 
+                                   andyPurity)
+
+bulkCountsGoiPurityNoBadAndy <- bulkCountsFinal[enscaf,] %>%
+  t() %>%
+  as.data.frame() %>%
+  rownames_to_column("ID") %>%
+  mutate("Sample"=str_replace(ID, "_[np2]$", "")) %>%
+  # mutate("Sample"=str_replace(Sample, "[abc]$", "")) %>%
+  left_join(snCellPropNoBadPurityAndy) %>%
+  select(-c(Sample)) %>%
+  rename("CTVT"="purity") %>%
+  drop_na() %>%
+  column_to_rownames("ID") %>%
+  as.matrix() %>%
+  t()
+
+write.table(
+  bulkCountsGoiPurityNoBadAndy, 
+  file = paste0(resDir, "/0_scadenInput/", fprefix, "_bulkCountsGoiPurityNoBadAndy.txt"), 
+  sep = "\t", 
+  quote = FALSE, 
+  col.names = NA  # Ensures first column (gene names) gets no name
+)
+```
+
+### 3.3 Samples without purity
+```{r}
+setdiff(colnames(bulkCountsFinal), colnames(bulkCountsGoiPurityAndy))
+#  [1] "3203T1A2b_2" "3203T1A2b_n" --> should these match with "3203T1A2c" --> yes! --> genetic purity. 
+# Now manually adding purity for "3203T1A2b"
+```
+# 4 Check gene distribution 
+```{r}
+devtools::install_github("keshavmot2/scanalysis")
+library(scanalysis)
+```
+
+
+
+
