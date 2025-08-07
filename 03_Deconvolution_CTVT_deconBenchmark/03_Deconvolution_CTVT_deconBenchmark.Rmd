@@ -37,11 +37,99 @@ wDir <- paste0("~/gitClones/01_Deconvolution/03_Deconvolution_CTVT/")
 dataDir <- paste0(wDir, "/031_Data/")
 resDir <- paste0(wDir, "/033_Results/", fprefix, "/")
 plotDir <- paste0(wDir, "/034_Plots/", fprefix, "/")
+scriptDir <- paste0(wDir, "/032_Scripts/", fprefix, "/")
+
+source(paste0(scriptDir, "03_Deconvolution_CTVT_deconBenchmark_metrics.R"))
 ```
+## 0.3 Functions
+### 0.3.1 Subsample from reference 
+Use sample+cell type threshold.
+```{r}
+subsampleCells <- function(df, 
+                            cell_type_col, 
+                            total_cells = 10000, 
+                            threshold = 50, 
+                            seed = 123) {
+  set.seed(seed)
+  
+  # Count total cells per type
+  cell_counts <- table(df[[cell_type_col]])
+  cell_types <- names(cell_counts)
+  
+  # Initialize sampling plan
+  min_counts <- if (!is.null(threshold)) {
+    pmin(cell_counts, pmax(threshold, 0))
+  } else {
+    rep(0, length(cell_counts))
+  }
+  
+  names(min_counts) <- cell_types
+  
+  # Ensure we don't oversample beyond what's available
+  min_counts <- pmin(min_counts, cell_counts)
+  
+  # Calculate remaining cells to sample after ensuring threshold
+  guaranteed_cells <- sum(min_counts)
+  
+  remaining_cells <- total_cells - guaranteed_cells
+  
+  if (remaining_cells < 0) {
+    stop("Thresholds exceed total desired cell count.")
+  }
+  
+  # Adjust the remaining proportions based on cell types that exceed their thresholds
+  eligible_types <- cell_types[cell_counts > min_counts]
+  eligible_counts <- cell_counts[eligible_types] - min_counts[eligible_types]
+  prop_remaining <- eligible_counts / sum(eligible_counts)
+  additional_cells <- round(prop_remaining * remaining_cells)
+  
+  # Adjust additional_cells to cover all min_counts
+  add_cells_full <- setNames(rep(0, length(min_counts)), names(min_counts))
+  add_cells_full[names(additional_cells)] <- additional_cells
+  
+  # Final sample sizes
+  final_sample_sizes <- min_counts + add_cells_full
+
+  # Adjust rounding to hit total_cells exactly
+  diff <- total_cells - sum(final_sample_sizes)
+  
+  if (diff != 0) {
+    idx <- order(-prop_remaining)
+    additional_cells[eligible_types[idx[1:abs(diff)]]] <- additional_cells[eligible_types[idx[1:abs(diff)]]] + sign(diff)
+  }
+  
+  # # Final number to sample per type
+  # final_sample_sizes <- min_counts
+  # final_sample_sizes[eligible_types] <- final_sample_sizes[eligible_types] + additional_cells
+  
+  # Sample the rows
+  sampled_rows <- unlist(lapply(cell_types, function(ct) {
+    n <- final_sample_sizes[ct]
+    sample(which(df[[cell_type_col]] == ct), size = n, replace = FALSE)
+  }))
+  
+  df[sampled_rows, , drop = FALSE]
+}
+
+```
+
 
 # 1.0 Inputs
 BayesPrism will take intersect of genes in reference and bulk samples.
 Use unnormalized and untransformed count data.
+
+## 1.1 Genes of interest
+```{r}
+adrianq1q4100 <- read.xlsx("~/gitClones/01_Deconvolution/03_Deconvolution_CTVT/033_Results/03_Deconvolution_CTVT_geneCorrelations/03_Deconvolution_CTVT_geneCorrelations_mergedFamWilcoxDegs_q1q4_100Genes.xlsx") 
+
+goi <- unique(adrianq1q4100$Symbol)
+idoi <- unique(adrianq1q4100$GeneID)
+
+geneDict <- adrianq1q4100 %>%
+  select(Symbol, GeneID) %>%
+  # Take distinct as marker genes may overlap clusters. 
+  distinct()
+```
 
 ## 1.1 Reference
 Reference - cellxgene dense matrix.
@@ -81,10 +169,37 @@ snCountsFinal_colData <- colData(objNoBad)
 
 rm(objNoBad)
 gc()
+```
 
-bulk <- readRDS(paste0(dataDir, "01_Deconvolution_matchedBulkMatrixCTVT_bulkCountsFinal.rds"))
+### 1.1.2 Subsample and filter genes
+```{r}
+snCountsFinal_colData$sampCtype <- paste0(snCountsFinal_colData$Sample,
+                                          "_",
+                                          snCountsFinal_colData$manual.log.anot.fine)
 
-setdiff(rownames(snCountsFinal), rownames(bulk))
+snCountsFinalSubSampled_colData <- subsampleCells(df = snCountsFinal_colData,
+                                                    cell_type_col = "sampCtype",
+                                                    total_cells = 30000, 
+                                                    threshold = 50, 
+                                                    seed = 123)
+
+snCountsFinalSubSampled <- snCountsFinal %>%
+  t() %>% # CHECK THIS WORKS!
+  as.data.frame() %>%
+  rownames_to_column("cellId") %>%
+  # Select the rows in the counts matrix that correspond to cells from subsampled colData
+  filter(cellId %in% rownames(snCountsFinalSubSampled_colData)) %>%
+  column_to_rownames("cellId") %>%
+  as.matrix() %>%
+  t() %>%
+  as.data.frame() %>%
+  # select gene id's (stored as columns in df) that are hvgs.
+  rownames_to_column("GeneID") %>%
+  filter(GeneID %in% idoi) %>%
+  left_join(geneDict) %>%
+  column_to_rownames("Symbol") %>%
+  select(-GeneID) %>%
+  as.matrix()
 ```
 
 ### 1.1.2 Cell type annotations
@@ -92,12 +207,12 @@ Cell type labels - character vector same length as # cells in reference.
 Cell state labels - optional, finer granularity character vector. (i.e. myeloid 1 vs myeloid 2). 
 Labels should have at least 20 to 50 cells. 
 ```{r}
-snAnno <- snCountsFinal_colData$manual.log.anot.fine
-print(ncol(snCountsFinal)==length(snAnno))
+snAnno <- snCountsFinalSubSampled_colData$manual.log.anot.fine
+
 print(sort(table(snAnno)))
 
 # Create the cell count matrix: rows = cell types, columns = samples
-snCellCounts <- snCountsFinal_colData %>%
+snCellCounts <- snCountsFinalSubSampled_colData %>%
   as.data.frame() %>%
   group_by(manual.log.anot.fine, 
            Sample) %>%
@@ -107,12 +222,62 @@ snCellCounts <- snCountsFinal_colData %>%
               values_fill = 0) %>%
   column_to_rownames("manual.log.anot.fine")
 ```
+### 1.1.3 Ground truth 
+```{r}
+snCellCountsSubSampled <-snCountsFinalSubSampled_colData %>%
+  as.data.frame() %>%
+  group_by(manual.log.anot.fine,
+           Sample) %>%
+  summarise(cellCount = n()) %>%
+  pivot_wider(names_from = Sample,
+              values_from = cellCount,
+              values_fill = 0) %>%
+  column_to_rownames("manual.log.anot.fine")
+
+snCellCountsSubSampled[,"3302T1p"] <- snCellCountsSubSampled[,"3302T1b"]
+
+# Convert to percentages (column-wise normalization)
+snCellPercentagesSubSampled <- sweep(snCellCountsSubSampled,
+                           2,
+                           colSums(snCellCountsSubSampled),
+                           FUN = "/") %>%
+  round(3) %>%
+  t() %>%
+  as.data.frame() %>%
+  rownames_to_column("sample") %>%
+  pivot_longer(
+    cols = -sample,
+    names_to = "manual.log.anot.fine",
+    values_to = "cellProportion"
+  ) %>%
+  # If sample name ends in b_n, type is bn (bulk nuc). Otherwise, it is bc (bulk cell)
+  mutate(
+    sampleType = "sn",
+    sampleName = sample,
+    sampleNameEdit = str_remove(sampleName, "_p$|_2$")
+  ) %>%
+  select(sampleName, sampleType, manual.log.anot.fine, cellProportion, sampleNameEdit) %>%
+  mutate("deconvBenchResType" = "groundTruth", # P for proportion
+         "Method" = "NA",
+         "Parameters" = "NA",
+         "Reference" = "subSampled",
+         "Seed"=123)
+```
+
 
 # 1.3 Bulk
 ### 1.2.1 Matrix
 ```{r}
-bulkCountsFinal <- readRDS(paste0(dataDir, "01_Deconvolution_matchedBulkMatrixCTVT_bulkCountsFinal.rds"))
-rm(bulk)
+bulkCountsFinal <- readRDS(paste0(dataDir, "01_Deconvolution_matchedBulkMatrixCTVT_bulkCountsFinal.rds")) %>%
+  as.data.frame() %>%
+  # select gene id's (stored as columns in df) that are hvgs.
+  rownames_to_column("GeneID") %>%
+  filter(GeneID %in% idoi) %>%
+  left_join(geneDict) %>%
+  column_to_rownames("Symbol") %>%
+  select(-GeneID) %>%
+  as.matrix()
+
 ```
 
 ### 1.2.2 Metadata
@@ -121,16 +286,6 @@ bulkCountsFinal_metadata <- read.xlsx(paste0(dataDir, "01_Deconvolution_matchedB
 ```
 
 # 3 Loop reference based deconvolution methods
-
-## 3.1 Relative proportions
-
-### 3.1.1 HVGs
-
-### 3.1.2 All genes
-
-## 3.2 Balanced proportions
-
-### 2.2.2 All genes
 
 ## 3.1 Reference-based
 I have included the method behind each method in the comment, as well as whether the method worked for this person who tested them all (https://github.com/tinnlab/DeconBenchmark/issues/4)
@@ -170,7 +325,7 @@ Sys.getenv("DOCKER_DEFAULT_PLATFORM") # Should return [1] "linux/amd64" on Sange
 ```{r, warning=F, error=T, message=F}
 MuSiC <- runDeconvolution("MuSiC", 
                          bulk = bulkCountsFinal,  # 23 Samples
-                         singleCellExpr = snCountsFinal, 
+                         singleCellExpr = snCountsFinalSubSampled, 
                          singleCellLabels = snAnno,
                          dockerArgs = c("--cpus=8.0",
                                         "-m=14G", 
@@ -213,11 +368,11 @@ musicRes <- MuSiC$MuSiC$P %>%
   mutate("deconvBenchResType" = "P", # P for proportion
          "Method" = "MuSiC", 
          "Parameters" = "Default", 
-         "Reference" = "subSampledHVGs",
+         "Reference" = "subSampled",
          "Seed"=123)
 
 # Rbind proportion outputs
-musicResGround <- rbind(musicRes, snCellPercentages_subSample_relProp)
+musicResGround <- rbind(musicRes, snCellPercentagesSubSampled)
 
 masterPropDf <- rbind(masterPropDf, musicResGround)
 
@@ -225,7 +380,7 @@ masterPropDf <- rbind(masterPropDf, musicResGround)
 musicResMetrics <- deconError(musicResGround, 
                               parameters = "Default",
                               method = "MuSiC", 
-                              reference="subSampledHVGs",
+                              reference="subSampled",
                               seed=123)
 # masterMetricDf <- rbind(masterMetricDf, musicResMetrics)
 # 
@@ -236,85 +391,81 @@ gc()
 ```
 ##### 3.1.1.1.2 RNA-Sieve - Runs
 ```{r}
-# RNASieve <- runDeconvolution("RNA-Sieve", 
-#                          bulk = bulkCountsFinal,  # 20 Samples
-#                          singleCellExpr = snCountsFinal, 
-#                          singleCellLabels = snAnno,
-#                          dockerArgs = c("--cpus=8.0",
-#                                         "-m=16G", 
-#                                         "--memory-reservation=8G"))
-# 
-# rnasieveRes <-RNASieve$`RNA-Sieve`$P %>%
-#   as.data.frame() %>%
-#   rownames_to_column("sample") %>%
-#   pivot_longer(
-#     cols = -sample,
-#     names_to = "manual.log.anot.fine",
-#     values_to = "cellProportion"
-#   ) %>%
-#     # If sample name ends in _n, type is bn (bulk nuc). Otherwise, it is bc (bulk cell)
-#     mutate(
-#       sampleType = case_when(
-#         str_ends(sample, "_n") ~ "bn",
-#         TRUE ~ "bc"
-#       ),
-#       # If sample type is bn, remove b_n to save sample id only.
-#       sampleName = case_when(
-#         sampleType == "bn" ~ str_remove(sample, "_n$"),
-#         TRUE ~ sample
-#       ),
-#       sampleName = case_when(
-#         sampleName == "3302T1b_p" ~ "3302T1p",
-#         TRUE ~ sampleName
-#       ),
-#       # If sample type is bc, remove only _p, or _2 to match sample name edit of bn samples. Because we have b_p and b in some cases, we will need to loop through unique $sample and then extract the corresponding sample name edit for the matched bulk. 
-#       sampleNameEdit = case_when(
-#         sampleType == "bc" ~ str_remove(sampleName, "_p$|_2$"),
-#         TRUE ~ sampleName
-#       ),
-#        # BUT, if sample name is 3302T1b, the sampleNameEdit should be 3302T1bp, so that there is no duplicate sampleNameEdit for the error calculations. TODO: When doing the bulk cell vs bulk nuc, we will need to check that the two bulk cell errors for are grouped together. We could also duplicate the bn results for this sample. 
-# 
-#     ) %>%
-# 
-#   select(sampleName, sampleType, manual.log.anot.fine, cellProportion, sampleNameEdit) %>%
-#   # Method details
-#   mutate("deconvBenchResType" = "P", # P for proportion
-#          "Method" = "RNA-Sieve", 
-#          "Parameters" = "Default", 
-#          "Reference" = "subSampledHVGs",
-#          "Seed"=123)
-# 
-# # Rbind proportion outputs to compute error metrics.
-# rnasieveResGround <- rbind(rnasieveRes, snCellPercentages_subSample_relProp)
-# 
-# # snCellPercentages have already been rbound to masterPropDf in the "MuSiC" chunk above, so will filter these out after error calculations.
-# masterPropDf <- rbind(masterPropDf, rnasieveRes)
-# 
-# 
-# # Compute and rbind metric outputs
-# rnasieveResMetrics <- deconError(rnasieveResGround, 
-#                               parameters = "Default",
-#                               method = "RNA-Sieve", 
-#                               reference="subSampledHVGs",
-#                               seed=123)
-# # Rbind metric measurements 
-# masterMetricDf <- rbind(masterMetricDf, rnasieveResMetrics)
-# 
-# 
-# # Cleanup
-# rm(rnasieveResGround, rnasieveRes, rnasieveResMetrics, RNASieve)
-# gc()
-```
-##### 3.1.1.1.3 Scaden - Need to fix
-```{r}
+RNASieve <- runDeconvolution("RNA-Sieve",
+                         bulk = bulkCountsFinal,  # 20 Samples
+                         singleCellExpr = snCountsFinalSubSampled,
+                         singleCellLabels = snAnno,
+                         dockerArgs = c("--cpus=8.0",
+                                        "-m=16G",
+                                        "--memory-reservation=8G"))
 
+rnasieveRes <-RNASieve$`RNA-Sieve`$P %>%
+  as.data.frame() %>%
+  rownames_to_column("sample") %>%
+  pivot_longer(
+    cols = -sample,
+    names_to = "manual.log.anot.fine",
+    values_to = "cellProportion"
+  ) %>%
+    # If sample name ends in _n, type is bn (bulk nuc). Otherwise, it is bc (bulk cell)
+    mutate(
+      sampleType = case_when(
+        str_ends(sample, "_n") ~ "bn",
+        TRUE ~ "bc"
+      ),
+      # If sample type is bn, remove b_n to save sample id only.
+      sampleName = case_when(
+        sampleType == "bn" ~ str_remove(sample, "_n$"),
+        TRUE ~ sample
+      ),
+      sampleName = case_when(
+        sampleName == "3302T1b_p" ~ "3302T1p",
+        TRUE ~ sampleName
+      ),
+      # If sample type is bc, remove only _p, or _2 to match sample name edit of bn samples. Because we have b_p and b in some cases, we will need to loop through unique $sample and then extract the corresponding sample name edit for the matched bulk. 
+      sampleNameEdit = case_when(
+        sampleType == "bc" ~ str_remove(sampleName, "_p$|_2$"),
+        TRUE ~ sampleName
+      ),
+       # BUT, if sample name is 3302T1b, the sampleNameEdit should be 3302T1bp, so that there is no duplicate sampleNameEdit for the error calculations. TODO: When doing the bulk cell vs bulk nuc, we will need to check that the two bulk cell errors for are grouped together. We could also duplicate the bn results for this sample. 
+
+    ) %>%
+  select(sampleName, sampleType, manual.log.anot.fine, cellProportion, sampleNameEdit) %>%
+  # Method details
+  mutate("deconvBenchResType" = "P", # P for proportion
+         "Method" = "RNA-Sieve", 
+         "Parameters" = "Default", 
+         "Reference" = "subSampled",
+         "Seed"=123)
+
+# Rbind proportion outputs to compute error metrics.
+rnasieveResGround <- rbind(rnasieveRes, snCellPercentagesSubSampled)
+
+# snCellPercentages have already been rbound to masterPropDf in the "MuSiC" chunk above, so will filter these out after error calculations.
+masterPropDf <- rbind(masterPropDf, rnasieveRes)
+
+
+# Compute and rbind metric outputs
+rnasieveResMetrics <- deconError(rnasieveResGround,
+                              parameters = "Default",
+                              method = "RNA-Sieve",
+                              reference="subSampled",
+                              seed=123)
+# Rbind metric measurements
+masterMetricDf <- rbind(masterMetricDf, rnasieveResMetrics)
+
+
+# Cleanup
+rm(rnasieveResGround, rnasieveRes, rnasieveResMetrics, RNASieve)
+gc()
 ```
+
 
 ##### 3.1.1.1.4 Adroit - Runs
 ```{r}
 AdRoit <- runDeconvolution("AdRoit", 
-                         bulk = bulkCountsFinal,  # 20 Samples
-                         singleCellExpr = snCountsFinal, 
+                         bulk = bulkCountsFinal,  
+                         singleCellExpr = snCountsFinalSubSampled, 
                          singleCellLabels = snAnno,
                          dockerArgs = c("--cpus=8.0",
                                         "-m=16G", 
@@ -356,52 +507,37 @@ adroitResP <- AdRoit$AdRoit$P %>%
   mutate("deconvBenchResType" = "P", # P for proportion
          "Method" = "AdRoit", 
          "Parameters" = "Default", 
-         "Reference" = "subSampledHVGs",
+         "Reference" = "subSampled",
          "Seed"=123)
 
+
 # Rbind proportion outputs to compute error metrics.
-adroitResGround <- rbind(adroitResP, snCellPercentages_subSample_relProp)
+adroitResGround <- rbind(adroitResP, snCellPercentagesSubSampled)
 
 # snCellPercentages have already been rbound to masterPropDf in the "MuSiC" chunk above, so will filter these out after error calculations.
 masterPropDf <- rbind(masterPropDf, adroitResP)
 
 
-# # Compute and rbind metric outputs
-# adroitResMetrics <- deconError(adroitResGround, 
-#                               parameters = "Default",
-#                               method = "AdRoit", 
-#                               reference="subSampledHVGs",
-#                               seed=123)
-# # Rbind metric measurements 
-# masterMetricDf <- rbind(masterMetricDf, adroitResMetrics$overviewMetrics)
+# Compute and rbind metric outputs
+adroitResMetrics <- deconError(adroitResGround,
+                              parameters = "Default",
+                              method = "AdRoit",
+                              reference="subSampled",
+                              seed=123)
+# Rbind metric measurements
+masterMetricDf <- rbind(masterMetricDf, adroitResMetrics$overviewMetrics)
 
 
 # Cleanup
 rm(adroitResGround, adroitResP, adroitResMetrics, AdRoit)
 gc()
-
-# adroitResS <- AdRoit$AdRoit$S %>%
-#   mutate("deconvBenchResType" = "S",
-#          "Method" = "AdRoit")
 ```
 ##### 3.1.1.1.5 digitalDLSorter 
 Package no longer available on CRAN, requires editing docker. 
-```{r}
-# digitalDLSorter <- runDeconvolution("digitalDLSorter", 
-#                          bulk = bulkCountsFinal,  # 20 Samples
-#                          singleCellExpr = snCountsFinal, 
-#                          singleCellLabels = snAnno,
-#                          dockerArgs = c("--cpus=8.0",
-#                                         "-m=16G", 
-#                                         "--memory-reservation=8G"))
-# 
-# ddlsRes <- digitalDLSorter  %>%
-#   mutate()
-```
+
 
 #### 3.1.1.2 Set 2
 Of note, requires defining a signature matrix.
-Interesting to see how many of the signature genes will overlap with the HVGs list using the full sn matrix. 
 TODO: Check what method is "under the hood" for this function. 
 ```{r}
 methodsToRunSet2 <- c("DWLS", # WWCLS
@@ -421,13 +557,13 @@ methodsToRunSet2 <- c("DWLS", # WWCLS
 ```{r}
 # # $DWLS
 # # [1] "bulk"             "singleCellExpr"   "singleCellLabels"
-# DWLS <- runDeconvolution("DWLS", 
-#                          bulk = bulkCountsFinal,  # 20 Samples
-#                          singleCellExpr = snCountsFinal, 
-#                          singleCellLabels = snAnno,
-#                          dockerArgs = c("--cpus=8.0",
-#                                         "-m=16G", 
-#                                         "--memory-reservation=8G"))
+DWLS <- runDeconvolution("DWLS",
+                         bulk = bulkCountsFinal,  # 20 Samples
+                         singleCellExpr = snCountsFinalSubSampled,
+                         singleCellLabels = snAnno,
+                         dockerArgs = c("--cpus=8.0",
+                                        "-m=16G",
+                                        "--memory-reservation=8G"))
 # dwlsResP <- DWLS$DWLS$P %>%
 #   as.data.frame() %>%
 #   
@@ -466,11 +602,11 @@ methodsToRunSet2 <- c("DWLS", # WWCLS
 #   mutate("deconvBenchResType" = "P", # P for proportion
 #          "Method" = "DWLS", 
 #          "Parameters" = "Default", 
-#          "Reference" = "subSampledHVGs",
+#          "Reference" = "subSampled",
 #          "Seed"=123)
 # 
 # # Rbind proportion outputs to compute error metrics.
-# dwlsResGround <- rbind(dwlsResP, snCellPercentages_subSample_relProp)
+# dwlsResGround <- rbind(dwlsResP, snCellPercentagesSubSampled)
 # 
 # # snCellPercentages have already been rbound to masterPropDf in the "MuSiC" chunk above, so will filter these out after error calculations.
 # masterPropDf <- rbind(masterPropDf, dwlsResP)
@@ -480,7 +616,7 @@ methodsToRunSet2 <- c("DWLS", # WWCLS
 # # dwlsResMetrics <- deconError(dwlsResGround, 
 # #                               parameters = "Default",
 # #                               method = "DWLS", 
-# #                               reference="subSampledHVGs",
+# #                               reference="subSampled",
 # #                               seed=123)
 # # Rbind metric measurements 
 # # masterMetricDf <- rbind(masterMetricDf, dwlsResMetrics)
@@ -503,10 +639,13 @@ Still subset on HVGs
 # $MIXTURE
 # [1] "bulk"      "signature"
 
+sig <- generateReference(snCountsFinalSubSampled,
+                         snAnno,
+                         type="signature")
 
 MIXTURE_fullRef <- runDeconvolution("MIXTURE", 
                          bulk = bulkCountsFinal,  # 20 Samples
-                         signature = reference_HVGs$signature, # 195 genes creating reference from hvgs and all cells rather than subsample. This could be indicative that we need to loop over multiple seeds for the true best method.  
+                         signature = sig$signature, # 195 genes creating reference from hvgs and all cells rather than subsample. This could be indicative that we need to loop over multiple seeds for the true best method.  
                          dockerArgs = c("--cpus=8.0",
                                         "-m=16G", 
                                         "--memory-reservation=8G"))
@@ -547,11 +686,11 @@ mixtureResP_fullRef <- MIXTURE_fullRef$MIXTURE$P %>%
   mutate("deconvBenchResType" = "P", # P for proportion
          "Method" = "MIXTURE", 
          "Parameters" = "fullSignatureMatrix", 
-         "Reference" = "subSampledHVGs",
+         "Reference" = "subSampled",
          "Seed"=123)
 
 # # Rbind proportion outputs to compute error metrics.
-# mixtureResGround <- rbind(mixtureResP_fullRef, snCellPercentages_subSample_relProp)
+# mixtureResGround <- rbind(mixtureResP_fullRef, snCellPercentagesSubSampled)
 
 # snCellPercentages have already been rbound to masterPropDf in the "MuSiC" chunk above, so will filter these out after error calculations.
 masterPropDf <- rbind(masterPropDf, mixtureResP_fullRef)
@@ -561,7 +700,7 @@ masterPropDf <- rbind(masterPropDf, mixtureResP_fullRef)
 # mixtureResMetrics <- deconError(mixtureResGround, 
 #                               parameters = "fullSignatureMatrix",
 #                               method = "MIXTURE", 
-#                               reference="subSampledHVGs",
+#                               reference="subSampled",
 #                               seed=123)
 # # Rbind metric measurements 
 # masterMetricDf <- rbind(masterMetricDf, mixtureResMetrics)
@@ -626,11 +765,11 @@ gc()
 #   mutate("deconvBenchResType" = "P", # P for proportion
 #          "Method" = "FARDEEP", 
 #          "Parameters" = "fullSignatureMatrix", 
-#          "Reference" = "subSampledHVGs",
+#          "Reference" = "subSampled",
 #          "Seed"=123)
 # 
 # # Rbind proportion outputs to compute error metrics.
-# # fardeepResGround <- rbind(fardeepResP_fullRef , snCellPercentages_subSample_relProp)
+# # fardeepResGround <- rbind(fardeepResP_fullRef , snCellPercentagesSubSampled)
 # 
 # # snCellPercentages have already been rbound to masterPropDf in the "MuSiC" chunk above, so will filter these out after error calculations.
 # masterPropDf <- rbind(masterPropDf, fardeepResP_fullRef)
@@ -640,7 +779,7 @@ gc()
 # # fardeepResMetrics <- deconError(fardeepResGround, 
 # #                               parameters = "fullSignatureMatrix",
 # #                               method = "FARDEEP", 
-# #                               reference="subSampledHVGs",
+# #                               reference="subSampled",
 # #                               seed=123)
 # # # Rbind metric measurements 
 # # masterMetricDf <- rbind(masterMetricDf, fardeepResMetrics)
@@ -706,11 +845,11 @@ gc()
 #   mutate("deconvBenchResType" = "P", # P for proportion
 #          "Method" = "LinDeconSeq", 
 #          "Parameters" = "fullSignatureMatrix", 
-#          "Reference" = "subSampledHVGs",
+#          "Reference" = "subSampled",
 #          "Seed"=123)
 # 
 # # Rbind proportion outputs to compute error metrics.
-# lindeconseqResGround <- rbind(lindeconseqResP_fullRef, snCellPercentages_subSample_relProp)
+# lindeconseqResGround <- rbind(lindeconseqResP_fullRef, snCellPercentagesSubSampled)
 # 
 # # snCellPercentages have already been rbound to masterPropDf in the "MuSiC" chunk above, so will filter these out after error calculations.
 # masterPropDf <- rbind(masterPropDf, lindeconseqResP_fullRef)
@@ -720,7 +859,7 @@ gc()
 # # lindeconseqResMetrics <- deconError(lindeconseqResGround, 
 # #                               parameters = "fullSignatureMatrix",
 # #                               method = "LinDeconSeq", 
-# #                               reference="subSampledHVGs",
+# #                               reference="subSampled",
 # #                               seed=123)
 # # # Rbind metric measurements 
 # # masterMetricDf <- rbind(masterMetricDf, lindeconseqResMetrics)
@@ -736,7 +875,7 @@ Docker repo doesn't seem to exist??
 ```{r}
 # CIBERSORT <- runDeconvolution("CIBERSORT", 
 #                          bulk = bulkCountsFinal,  # 20 Samples
-#                          singleCellExpr = snCountsFinal, 
+#                          singleCellExpr = snCountsFinalSubSampled, 
 #                          singleCellLabels = snAnno,
 #                          dockerArgs = c("--cpus=8.0",
 #                                         "-m=16G", 
@@ -751,7 +890,7 @@ Will run seperately.
 
 bayesPrism <- runDeconvolution("BayesPrism",
                          bulk = bulkCountsFinal,  # 20 Samples
-                         singleCellExpr = snCountsFinal,
+                         singleCellExpr = snCountsFinalSubSampled,
                          singleCellLabels = snAnno,
                          dockerArgs = c("--cpus=8.0",
                                         "-m=14G",
@@ -795,11 +934,11 @@ bayesprismResP <- bayesPrism$BayesPrism$P %>%
   mutate("deconvBenchResType" = "P", # P for proportion
          "Method" = "BayesPrism", 
          "Parameters" = "Default", 
-         "Reference" = "subSampledHVGs",
+         "Reference" = "subSampled",
          "Seed"=123)
 
 # Rbind proportion outputs to compute error metrics.
-bayesprismResGround <- rbind(bayesprismResP, snCellPercentages_subSample_relProp)
+bayesprismResGround <- rbind(bayesprismResP, snCellPercentagesSubSampled)
 
 # snCellPercentages have already been rbound to masterPropDf in the "MuSiC" chunk above, so will filter these out after error calculations.
 masterPropDf <- rbind(masterPropDf, bayesprismResP)
@@ -809,7 +948,7 @@ masterPropDf <- rbind(masterPropDf, bayesprismResP)
 # bayesprismResMetrics <- deconError(bayesprismResGround, 
 #                               parameters = "Default",
 #                               method = "BayesPrism", 
-#                               reference="subSampledHVGs",
+#                               reference="subSampled",
 #                               seed=123)
 # # Rbind metric measurements 
 # masterMetricDf <- rbind(masterMetricDf, bayesprismResMetrics)
@@ -829,7 +968,7 @@ Add MATLAB License. I can't find the license file here...
 # # [4] "singleCellSubjects"
 # DecOT <- runDeconvolution("DecOT", 
 #                          bulk = bulkCountsFinal,  # 20 Samples
-#                          singleCellExpr = snCountsFinal, 
+#                          singleCellExpr = snCountsFinalSubSampled, 
 #                          singleCellLabels = snAnno,
 #                          singleCellSubjects = snSample_subSample_relProp,
 #                          matlabLicenseFile = "~/Library/Application Support/MathWorks/MATLAB/R2024b/thisMatlab.pem",
@@ -884,11 +1023,11 @@ autogenesResP <- AutoGeneS_full$AutoGeneS$P %>%
   mutate("deconvBenchResType" = "P", # P for proportion
          "Method" = "AutoGeneS", 
          "Parameters" = "fullCellTypeExpr", 
-         "Reference" = "subSampledHVGs",
+         "Reference" = "subSampled",
          "Seed"=123)
 
 # Rbind proportion outputs to compute error metrics.
-autogenesResGround <- rbind(autogenesResP, snCellPercentages_subSample_relProp)
+autogenesResGround <- rbind(autogenesResP, snCellPercentagesSubSampled)
 
 # snCellPercentages have already been rbound to masterPropDf in the "MuSiC" chunk above, so will filter these out after error calculations.
 masterPropDf <- rbind(masterPropDf, autogenesResP)
@@ -898,7 +1037,7 @@ masterPropDf <- rbind(masterPropDf, autogenesResP)
 # autogenesResMetrics <- deconError(autogenesResGround, 
 #                               parameters = "fullCellTypeExpr",
 #                               method = "AutoGeneS", 
-#                               reference="subSampledHVGs",
+#                               reference="subSampled",
 #                               seed=123)
 # # Rbind metric measurements 
 # masterMetricDf <- rbind(masterMetricDf, autogenesResMetrics)
@@ -1841,7 +1980,7 @@ snCell <- rowSums(snCellCounts)
 
 snCellProp <- snCell / sum(snCell) 
 
-snCellSubSampleRelProp <- rowSums(snCellCounts_subSample_relProp)
+snCellSubSampleRelProp <- rowSums(snCellCountsSubSampled)
 
 snCellPropSubSampleRelProp <- snCellSubSampleRelProp / sum(snCellSubSampleRelProp) 
 ```
@@ -1873,7 +2012,7 @@ for (ref in unique(masterPropDf$Reference)){
   
   
   refDf <- NULL
-  if (ref == "subSampledHVGs"){
+  if (ref == "subSampled"){
     refDf <- rbind(snCellProp, snCellPropSubSampleRelProp) %>%
       as.data.frame() %>%
       select(cellTypeOrder)
@@ -2459,7 +2598,7 @@ masterRawPEDf <- read.xlsx(paste0(resDir,  fprefix, "_masterRawPEDf.xlsx"))
 ### 6.1.1 Reference proportions
 For each reference (ex. snCounts), we want to compute the average prop of cell types across all samples. 
 ```{r}
-snCell <- rowSums(snCellCounts_subSample_relProp)
+snCell <- rowSums(snCellCountsSubSampled)
 
 snCellProp <- snCell / sum(snCell) 
 ```

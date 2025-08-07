@@ -1,0 +1,1146 @@
+---
+title: "03_Deconvolution_CTVT_cibersort"
+output: html_document
+---
+
+# 0 Environment
+## 0.1 Packages
+### 0.1.1 Installs
+```{r echo=F, message=F, warning=FALSE}
+# devtools::install_github("Moonerss/CIBERSORT")
+```
+### 0.1.1 Library
+```{r echo=F, message=F, warning=FALSE}
+set.seed(123)
+# library(CIBERSORT)
+library(tidyverse)
+library(SingleCellExperiment)
+library(openxlsx)
+library(dplyr)
+library(Seurat)
+```
+
+## 0.2 Paths
+```{r echo=F, message=FALSE, warning=FALSE}
+fprefix <- "03_Deconvolution_CTVT_cibersort"
+wDir <- paste0("~/gitClones/01_Deconvolution/03_Deconvolution_CTVT/")
+dataDir <- paste0(wDir, "/031_Data/")
+resDir <- paste0(wDir, "/033_Results/", fprefix, "/")
+plotDir <- paste0(wDir, "/034_Plots/", fprefix, "/")
+
+dir.create(resDir)
+dir.create(plotDir)
+```
+
+### 0.3.3 Metrics
+```{r}
+# source(paste0(wDir, "/12_Scripts/01_Deconvolution_deconBenchmark_metricFunctions.R"))
+```
+
+# 1.0 Inputs
+## 1.1 Candidate marker genes 
+```{r}
+masterMarkerGenes <- read.xlsx("~/gitClones/01_Deconvolution/03_Deconvolution_CTVT/033_Results/03_Deconvolution_CTVT_geneCorrelations/03_Deconvolution_CTVT_geneCorrelations_masterMarkerGenes.xlsx")
+
+geneDict <- masterMarkerGenes %>%
+  select(Symbol, GeneID) %>%
+  # Take distinct as marker genes may overlap clusters.
+  distinct()
+
+uniqueGeneDict <- masterMarkerGenes %>%
+  filter(Unique=="Unique") %>%
+  select(Symbol, GeneID) %>%
+  # Take distinct as marker genes may overlap clusters.
+  distinct()
+
+```
+
+
+## 1.1 Reference
+Reference - cellxgene dense matrix.
+### 1.1.1 Matrix
+```{r}
+obj <- readRDS(paste0(dataDir, "SCE_concat_CTVT_includingAllGenes_logCorrecDone_vstCorrecDone_ClustDone2_ManAnot.rds"))
+
+objNoBad <- obj[,obj$manual.log.anot.fine!="bad"]
+
+rm(obj)
+gc()
+
+
+# snLogCountsFinal <- as.matrix(assay(objNoBad, "logcounts"))
+
+snCountsFinal <- as.matrix(assay(objNoBad, "counts"))
+
+snCountsFinalDf <-  snCountsFinal[unique(geneDict$Symbol),] %>%
+  as.data.frame() 
+
+snCountsFinalDfUnique <- snCountsFinal[unique(uniqueGeneDict$Symbol),] %>%
+  as.data.frame() 
+
+# snLogCountsFinalDf <- snLogCountsFinal[unique(geneDict$Symbol),] %>%
+#   as.data.frame() 
+
+rm(snCountsFinal, snCountsFinalUnique)
+gc()
+```
+
+
+### 1.1.2 Cell type annotations
+Cell type labels - character vector same length as # cells in reference.
+Cell state labels - optional, finer granularity character vector. (i.e. myeloid 1 vs myeloid 2). 
+Labels should have at least 20 to 50 cells. 
+```{r}
+snLogCountsFinal_colData <- colData(objNoBad)
+
+snAnno <- snLogCountsFinal_colData$manual.log.anot.fine %>%
+  as.data.frame()
+
+print(sort(table(snAnno)))
+
+write_tsv(snAnno, 
+          paste0(resDir, fprefix, "_snAnno.tsv"))
+
+
+rowDataHvgs <- rowData(objNoBad) %>%
+  as.data.frame() %>%
+  filter(hvgs==TRUE)
+```
+
+## 1.3 Bulk
+### 1.2.1 Matrix
+```{r}
+# bulkCountsFinal <- readRDS(paste0(dataDir,
+#                                   "01_Deconvolution_matchedBulkMatrixCTVT_bulkCountsFinal.rds")) %>%
+#   as.data.frame() %>%
+#   rownames_to_column("GeneID") %>%
+#   filter(GeneID %in% geneDict$GeneID) %>%
+#   left_join(geneDict) %>%
+#   column_to_rownames("Symbol") %>%
+#   select(-GeneID)
+
+bulkCpm <- DGEobj.utils::convertCounts(readRDS(paste0(dataDir,
+                                  "01_Deconvolution_matchedBulkMatrixCTVT_bulkCountsFinal.rds")), 
+                                       unit = "CPM")%>%
+  as.data.frame() %>%
+  rownames_to_column("GeneID") %>%
+  filter(GeneID %in% geneDict$GeneID) %>%
+  left_join(geneDict) %>%
+  column_to_rownames("Symbol") %>%
+  select(-GeneID)
+
+bulkCpmUnique <- DGEobj.utils::convertCounts(readRDS(paste0(dataDir,
+                                  "01_Deconvolution_matchedBulkMatrixCTVT_bulkCountsFinal.rds")), 
+                                       unit = "CPM")%>%
+  as.data.frame() %>%
+  rownames_to_column("GeneID") %>%
+  filter(GeneID %in% uniqueGeneDict$GeneID) %>%
+  left_join(geneDict) %>%
+  column_to_rownames("Symbol") %>%
+  select(-GeneID)
+```
+### 1.3.2 Metadata
+```{r}
+bulkCountsFinal_metadata <- read.xlsx(paste0(dataDir, "01_Deconvolution_matchedBulkMatrixCTVT_bulkCountsFinal_metadata.xlsx"))
+```
+
+## 1.4 Write counts to tsv files for CIBERSORT website. 
+https://cibersortx.stanford.edu/tutorial.php
+```{r}
+snCountsExport <- snCountsFinalDf %>%
+           t() %>%
+            as.data.frame() %>%
+            # Not actually GeneSymbol, but for matching format. 
+            rownames_to_column("geneSymbol") %>%
+            t() %>%
+            as.data.frame()
+
+snCountsExport[1,] <- snAnno$.
+
+
+snCountsExport <- snCountsExport %>%
+  rownames_to_column("geneSymbol") 
+
+rownames(snCountsExport) <- NULL
+colnames(snCountsExport) <- NULL
+
+write.table(snCountsExport,
+          paste0(resDir, fprefix, "_snCountsFinal_snAnno.txt"),
+          quote=F,
+          col.names = F,
+          row.names = F,
+          sep = "\t")
+
+
+snCountsUniqueExport <- snCountsFinalDfUnique %>%
+           t() %>%
+            as.data.frame() %>%
+            # Not actually GeneSymbol, but for matching format. 
+            rownames_to_column("geneSymbol") %>%
+            t() %>%
+            as.data.frame()
+
+snCountsUniqueExport[1,] <- snAnno$.
+
+
+snCountsUniqueExport <- snCountsUniqueExport %>%
+  rownames_to_column("geneSymbol") 
+
+rownames(snCountsUniqueExport) <- NULL
+colnames(snCountsUniqueExport) <- NULL
+
+write.table(snCountsUniqueExport,
+          paste0(resDir, fprefix, "_snCountsFinalUnique_snAnno.txt"),
+          quote=F,
+          col.names = F,
+          row.names = F,
+          sep = "\t")
+
+test <- read.table(paste0(resDir, "/old/", fprefix, "_snCountsFinal_snAnno.txt"), 
+                          sep = "\t")
+
+test2 <- read.table(paste0(resDir, fprefix, "_snCountsFinalUnique_snAnno.txt"), 
+                          sep = "\t")
+
+
+bulkCountsFinalExport <- bulkCpm %>%
+  as.data.frame() %>%
+  rownames_to_column("geneSymbol") %>%
+  filter(geneSymbol %in% rownames(snLogCountsFinalDf)) %>%
+  t()%>%
+  as.data.frame() %>%
+  rownames_to_column("Sample") %>%
+  t() %>%
+  as.data.frame()
+  
+rownames(bulkCountsFinalExport) <- NULL
+colnames(bulkCountsFinalExport) <- NULL
+
+write.table(bulkCountsFinalExport ,
+            paste0(resDir, fprefix, "_bulkCpmFinal.txt"), 
+              quote=F,
+              row.names = F,
+              col.names = F,
+              sep = "\t")
+
+
+bulkCountsFinalUniqueExport <- bulkCpmUnique %>%
+  as.data.frame() %>%
+  rownames_to_column("geneSymbol") %>%
+  filter(geneSymbol %in% snCountsUniqueExport[,1]) %>%
+  t()%>%
+  as.data.frame() %>%
+  rownames_to_column("Sample") %>%
+  t() %>%
+  as.data.frame()
+  
+rownames(bulkCountsFinalUniqueExport) <- NULL
+colnames(bulkCountsFinalUniqueExport) <- NULL
+
+write.table(bulkCountsFinalUniqueExport ,
+            paste0(resDir, fprefix, "_bulkCpmFinalUnique.txt"), 
+              quote=F,
+              row.names = F,
+              col.names = F,
+              sep = "\t")
+
+
+```
+
+
+# 2.0 Inputs with purity
+## 2.1 Candidate marker genes 
+```{r}
+masterMarkerGenes <- read.xlsx("~/gitClones/01_Deconvolution/03_Deconvolution_CTVT/033_Results/03_Deconvolution_CTVT_geneCorrelations/03_Deconvolution_CTVT_geneCorrelations_masterMarkerGenes.xlsx")
+
+geneDict <- masterMarkerGenes %>%
+  select(Symbol, GeneID) %>%
+  # Take distinct as marker genes may overlap clusters.
+  distinct()
+
+uniqueGeneDict <- masterMarkerGenes %>%
+  filter(Unique=="Unique") %>%
+  select(Symbol, GeneID) %>%
+  # Take distinct as marker genes may overlap clusters.
+  distinct()
+
+exampleData <- read.table("~/Downloads/Single_Cell_RNA-Seq_Melanoma_SuppFig_3b-d/scRNA-Seq_reference_melanoma_Tirosh_SuppFig_3b-d.txt", 
+                          sep = "\t")[1:5,]
+```
+
+
+## 2.1 Reference
+Reference - cellxgene dense matrix.
+### 2.1.1 Matrix
+```{r}
+# objNoBad <- obj[,obj$manual.log.anot.fine!="bad"]
+
+colData <- colData(objNoBad)
+
+snCountsFinal <- as.matrix(assay(objNoBad, "counts"))
+
+snCountsFinalDf <-  snCountsFinal[unique(geneDict$Symbol),] %>%
+  as.data.frame() 
+```
+
+
+### 2.1.2 Cell type annotations
+Cell type labels - character vector same length as # cells in reference.
+Cell state labels - optional, finer granularity character vector. (i.e. myeloid 1 vs myeloid 2). 
+Labels should have at least 20 to 50 cells. 
+```{r}
+snLogCountsFinal_colData <- colData(objNoBad)
+
+snAnno <- snLogCountsFinal_colData$manual.log.anot.fine %>%
+  as.data.frame()
+
+print(sort(table(snAnno)))
+
+write_tsv(snAnno, 
+          paste0(resDir, fprefix, "_snAnno.tsv"))
+
+
+rowDataHvgs <- rowData(objNoBad) %>%
+  as.data.frame() %>%
+  filter(hvgs==TRUE)
+```
+
+## 2.3 Bulk
+### 2.2.1 Matrix
+```{r}
+bulkCountsFinal <- readRDS(paste0(dataDir,
+                                  "01_Deconvolution_matchedBulkMatrixCTVT_bulkCountsFinal.rds")) %>%
+  as.data.frame() %>%
+  rownames_to_column("GeneID") %>%
+  filter(GeneID %in% geneDict$GeneID) %>%
+  left_join(geneDict) %>%
+  column_to_rownames("Symbol") %>%
+  select(-GeneID)
+
+bulkCpm <- DGEobj.utils::convertCounts(readRDS(paste0(dataDir,
+                                  "01_Deconvolution_matchedBulkMatrixCTVT_bulkCountsFinal.rds")), 
+                                       unit = "CPM")%>%
+  as.data.frame() %>%
+  rownames_to_column("GeneID") %>%
+  filter(GeneID %in% geneDict$GeneID) %>%
+  left_join(geneDict) %>%
+  column_to_rownames("Symbol") %>%
+  select(-GeneID)
+
+
+bulkCpmUnique <- DGEobj.utils::convertCounts(readRDS(paste0(dataDir,
+                                  "01_Deconvolution_matchedBulkMatrixCTVT_bulkCountsFinal.rds")), 
+                                       unit = "CPM")%>%
+  as.data.frame() %>%
+  rownames_to_column("GeneID") %>%
+  filter(GeneID %in% uniqueGeneDict$GeneID) %>%
+  left_join(geneDict) %>%
+  column_to_rownames("Symbol") %>%
+  select(-GeneID)
+```
+### 2.3.2 Metadata
+```{r}
+bulkCountsFinal_metadata <- read.xlsx(paste0(dataDir, "01_Deconvolution_matchedBulkMatrixCTVT_bulkCountsFinal_metadata.xlsx"))
+```
+
+## 2.4 Write counts to tsv files for CIBERSORT website. 
+https://cibersortx.stanford.edu/tutorial.php
+```{r}
+snLogCountsExport <- snLogCountsFinalDf %>%
+            t() %>%
+            as.data.frame() %>%
+            # Not actually GeneSymbol, but for matching format. 
+            rownames_to_column("geneSymbol") %>%
+            t() %>%
+            as.data.frame()
+
+snLogCountsExport[1,] <- snAnno$.
+
+
+snLogCountsExport <- snLogCountsExport %>%
+  rownames_to_column("geneSymbol") 
+
+write.table(snLogCountsExport, 
+          paste0(resDir, fprefix, "_snLogCountsFinal_snAnno.txt"), 
+          # quote=F,
+          col.names = F,
+          row.names = F, 
+          sep = "\t")
+
+test <- read.table(paste0(resDir, fprefix, "_snLogCountsFinal_snAnno.txt"), 
+                          sep = "\t")[1:5,]
+
+snCountsExport <- snCountsFinalDf %>%
+           t() %>%
+            as.data.frame() %>%
+            # Not actually GeneSymbol, but for matching format. 
+            rownames_to_column("geneSymbol") %>%
+            t() %>%
+            as.data.frame()
+
+snCountsExport[1,] <- snAnno$.
+
+snCountsExport <- snCountsExport %>%
+  rownames_to_column("geneSymbol") 
+
+rownames(snCountsExport) <- NULL
+colnames(snCountsExport) <- NULL
+
+write.table(snCountsExport,
+          paste0(resDir, fprefix, "_snCountsFinal_snAnno.txt"),
+          quote=F,
+          col.names = F,
+          row.names = F,
+          sep = "\t")
+
+
+bulkCountsFinalExport <- bulkCpm %>%
+  as.data.frame() %>%
+  rownames_to_column("geneSymbol") %>%
+  filter(geneSymbol %in% rownames(snLogCountsFinalDf)) %>%
+  t()%>%
+  as.data.frame() %>%
+  rownames_to_column("Sample") %>%
+  t() %>%
+  as.data.frame()
+  
+rownames(bulkCountsFinalExport) <- NULL
+colnames(bulkCountsFinalExport) <- NULL
+
+write.table(bulkCountsFinalExport ,
+            paste0(resDir, fprefix, "_bulkCpmFinal.txt"), 
+              quote=F,
+              row.names = F,
+              col.names = F,
+              sep = "\t")
+
+test <- read.table(paste0(resDir, fprefix, "_bulkCpmFinal.txt"), 
+                          sep = "\t")[1:5,]
+```
+
+# 2 Results
+## 2.1 Process marker gene set
+Read in scaled GEP file. 
+Trying to reduce the number of CAF.Endo + Myeloid markers. 
+```{r}
+scaledGep <- read.xlsx(paste0(resDir,
+                              "CIBERSORTx_Job15_output/CIBERSORTxGEP_Job15_GEPs_Unfiltered_MeanCentered.xlsx"))
+
+topCAFEndo <- masterMarkerGenes %>%
+  filter(cluster == "CAF.Endo") %>%
+  filter(Unique=="Unique") %>%
+  arrange(deltaEtEh) 
+
+# scaledGep %>%
+#   filter(GeneSymbol %in% topCAFEndo[1:10,]$Symbol)
+
+scaledGepCAFEndo <- scaledGep %>%
+  arrange(-CAF)
+
+scaledGepCAFEndoTop10 <- scaledGepCAFEndo[1:11, "GeneSymbol"]
+
+topMyeloid <- masterMarkerGenes %>%
+  filter(cluster == "Myeloid") %>%
+  filter(Unique=="Unique") %>%
+  arrange(deltaEtEh) 
+
+# scaledGep %>%
+  # filter(GeneSymbol %in% topMyeloid[1:10,]$Symbol)
+
+scaledGepMyeloid <- scaledGep %>%
+  arrange(-Myeloid)
+
+scaledGepMyeloidTop10 <- scaledGepMyeloid[1:21, "GeneSymbol"]
+
+scaledGepTcells <- scaledGep %>%
+  arrange(-Tcells)
+
+scaledGepTcellsTop10 <- scaledGepTcells[1:21, "GeneSymbol"]
+
+scaledGepBcells <- scaledGep %>%
+  arrange(-Bcells)
+
+scaledGepBcellsTop10 <- scaledGepBcells[1:21, "GeneSymbol"]
+
+scaledGepCTVT <- scaledGep %>%
+  arrange(-CTVT)
+
+scaledGepCTVTTop10 <- scaledGepCTVT[1:21, "GeneSymbol"]
+
+updatedGepGenes <- c(scaledGepCAFEndoTop10 , 
+                           scaledGepMyeloidTop10 , 
+                           scaledGepTcellsTop10, 
+                           scaledGepBcellsTop10, 
+                           scaledGepCTVTTop10)
+
+```
+
+## 2.2 Write updated signature matrix to tsv files for CIBERSORT website. 
+https://cibersortx.stanford.edu/tutorial.php
+```{r}
+# snLogCountsExport <- snLogCountsFinalDf %>%
+#             t() %>%
+#             as.data.frame() %>%
+#             # Not actually GeneSymbol, but for matching format. 
+#             rownames_to_column("geneSymbol") %>%
+#             filter(geneSymbol %in% updatedGepGenes) %>%
+#             t() %>%
+#             as.data.frame()
+# 
+# snLogCountsExport[1,] <- snAnno$.
+# 
+# 
+# snLogCountsExport <- snLogCountsExport %>%
+#   rownames_to_column("geneSymbol") 
+# 
+# write.table(snLogCountsExport, 
+#           paste0(resDir, fprefix, "_snLogCountsFinal_snAnno.txt"), 
+#           # quote=F,
+#           col.names = F,
+#           row.names = F, 
+#           sep = "\t")
+# 
+# test <- read.table(paste0(resDir, fprefix, "_snLogCountsFinal_snAnno.txt"), 
+#                           sep = "\t")[1:5,]
+
+snCountsExport <- snCountsFinalDf %>%
+           t() %>%
+            as.data.frame() %>%
+            select(updatedGepGenes) %>%
+            # Not actually GeneSymbol, but for matching format. 
+            rownames_to_column("geneSymbol") %>%
+            
+            t() %>%
+            as.data.frame()
+
+snCountsExport[1,] <- snAnno$.
+
+
+snCountsExport <- snCountsExport %>%
+  rownames_to_column("geneSymbol") 
+
+rownames(snCountsExport) <- NULL
+colnames(snCountsExport) <- NULL
+
+write.table(snCountsExport,
+          paste0(resDir, fprefix, "_snCountsFinal_snAnno_gep20.txt"),
+          quote=F,
+          col.names = F,
+          row.names = F,
+          sep = "\t")
+
+test <- read.table(paste0(resDir, 
+                          fprefix, 
+                          "_snCountsFinal_snAnno_gep20.txt"), 
+                          sep = "\t")
+
+
+test <- read.table(paste0(resDir, fprefix, "_bulkCpmFinal_gep.txt"), 
+                          sep = "\t")
+```
+
+# 3 Downsample
+## 3.1 Convert to Seurat
+- Downsample to 500 cells of each cell type
+- Use ID's to filter snCountsFinal and snLogCountsFinal
+- Export HVGs subset AND candidate marker genes from Adrian's table+FAM results above. 
+https://github.com/dyammons/Canine_Leukocyte_scRNA
+
+```{r}
+#randomly downsample the subset data to obtain equal number of cells in each celltype
+set.seed(123)
+
+
+assay(objNoBad, "counts") <- as.matrix(assay(objNoBad, "counts"))
+assay(objNoBad, "logcounts") <- as.matrix(assay(objNoBad, "logcounts"))
+seuratObjNoBad <- as.Seurat(objNoBad, counts = "counts", data = "logcounts")
+
+Idents(seuratObjNoBad) <- "manual.log.anot.fine"
+
+seuratObjNoBadDs <- subset(seuratObjNoBad, downsample = 500)
+
+snAnnoDs <- seuratObjNoBadDs$manual.log.anot.fine
+
+# > table(seuratObjNoBadDs$manual.log.anot.fine)
+# 
+#   Bcells CAF.Endo     CTVT  Myeloid   Plasma   Tcells 
+#      500      500      500      500      310      500 
+
+snCountsFinal <- as.matrix(assay(objNoBad, "counts"))
+```
+
+## 3.2 HVGs
+### 3.2.1 Counts
+```{r}
+head(colnames(snCountsFinal))
+
+snCountsFinalDs <- snCountsFinal %>%
+  as.data.frame() %>%
+  select(colnames(seuratObjNoBadDs)) %>%
+  rownames_to_column("genes") %>%
+  filter(genes %in% unique(rowDataHvgs$Symbol)) %>%
+  column_to_rownames("genes") %>%
+  as.matrix()
+
+snCountsFinalDfDsHvgsExport <-  snCountsFinalDs %>%
+  as.data.frame() %>%
+           t() %>%
+            as.data.frame() %>%
+            rownames_to_column("geneSymbol") %>%
+            t() %>%
+            as.data.frame()
+
+snCountsFinalDfDsHvgsExport[1,] <- snAnnoDs
+
+
+snCountsFinalDfDsHvgsExport <- snCountsFinalDfDsHvgsExport %>%
+  rownames_to_column("geneSymbol") 
+
+rownames(snCountsFinalDfDsHvgsExport) <- NULL
+colnames(snCountsFinalDfDsHvgsExport) <- NULL
+
+write.table(snCountsFinalDfDsHvgsExport,
+          paste0(resDir, fprefix, "_snCountsFinalDfDsHvgsExport.txt"),
+          quote=F,
+          col.names = F,
+          row.names = F,
+          sep = "\t")
+
+
+bulkCountsFinalHvgsExport <- bulkCpm %>%
+  as.data.frame() %>%
+  rownames_to_column("geneSymbol") %>%
+  filter(geneSymbol %in% unique(rowDataHvgs$Symbol)) %>%
+  t()%>%
+  as.data.frame() %>%
+  rownames_to_column("Sample") %>%
+  t() %>%
+  as.data.frame()
+  
+rownames(bulkCountsFinalHvgsExport) <- NULL
+colnames(bulkCountsFinalHvgsExport) <- NULL
+
+write.table(bulkCountsFinalHvgsExport ,
+            paste0(resDir, fprefix, "_bulkCpmFinalHvgs.txt"), 
+              quote=F,
+              row.names = F,
+              col.names = F,
+              sep = "\t")
+
+
+```
+
+## 3.3 Candidate marker genes 
+### 3.3.1 Counts
+```{r}
+snCountsFinalDs <- snCountsFinal %>%
+  as.data.frame() %>%
+  select(colnames(seuratObjNoBadDs)) %>%
+  rownames_to_column("genes") %>%
+  filter(genes %in% unique(geneDict$Symbol)) %>%
+  column_to_rownames("genes") %>%
+  as.matrix()
+
+snCountsFinalDfDsq1q4Export <-  snCountsFinalDs %>%
+  as.data.frame() %>%
+           t() %>%
+            as.data.frame() %>%
+            rownames_to_column("geneSymbol") %>%
+            t() %>%
+            as.data.frame()
+
+snCountsFinalDfDsq1q4Export[1,] <- snAnnoDs
+
+snCountsFinalDfDsq1q4Export <- snCountsFinalDfDsq1q4Export %>%
+  rownames_to_column("geneSymbol") 
+
+rownames(snCountsFinalDfDsq1q4Export) <- NULL
+colnames(snCountsFinalDfDsq1q4Export) <- NULL
+
+write.table(snCountsFinalDfDsq1q4Export,
+          paste0(resDir,
+                 fprefix, 
+                 "_snCountsFinalDfDsq1q4Export.txt"),
+          quote=F,
+          col.names = F,
+          row.names = F,
+          sep = "\t")
+
+bulkCountsFinalq1q4Export <- bulkCpm %>%
+  as.data.frame() %>%
+  rownames_to_column("geneSymbol") %>%
+  filter(geneSymbol %in% unique(geneDict$Symbol)) %>%
+  t()%>%
+  as.data.frame() %>%
+  rownames_to_column("Sample") %>%
+  t() %>%
+  as.data.frame()
+  
+rownames(bulkCountsFinalq1q4Export) <- NULL
+colnames(bulkCountsFinalq1q4Export) <- NULL
+
+write.table(bulkCountsFinalq1q4Export ,
+            paste0(resDir, fprefix, "_bulkCpmFinalq1q4.txt"), 
+              quote=F,
+              row.names = F,
+              col.names = F,
+              sep = "\t")
+
+
+```
+
+# 5 Visualizations
+## 5.1 Set up 
+### 5.1.1 snRNAseq
+```{r}
+# Step 2: Define a color mapping
+celltype_colors <- c(
+  "CTVT" = "seagreen",
+  "CAF.Endo" = "#FDDFA4FF",
+  "Myeloid" = "lightpink",
+  "Plasma" = "#B4B9E0FF",
+  "Tcells" = "#C2697FFF",
+  "Bcells" = "darkblue"
+)
+
+
+
+matchedSamples <- unique(objNoBad$Sample)
+
+snCountsFinal_colData <- colData(objNoBad)
+
+# Create the cell count matrix: rows = cell types, columns = samples
+snCellCounts <- snCountsFinal_colData %>%
+  as.data.frame() %>%
+  dplyr::group_by(manual.log.anot.fine, 
+           Sample) %>%
+  summarise(cellCount = n()) %>%
+  pivot_wider(names_from = Sample, 
+              values_from = cellCount, 
+              values_fill = 0) %>%
+  column_to_rownames("manual.log.anot.fine") %>%
+  as.matrix()
+
+snCellProp <- prop.table(snCellCounts,2) %>%
+  as.data.frame()
+
+truePurities <- snCellProp  
+
+truePurities$`3145T11a_n` <- truePurities[,"3145T11a"]
+
+truePurities$`3145T1c_n` <- truePurities[,"3145T1c"]
+truePurities$`3145T1c_p` <- truePurities[,"3145T1c"]
+
+truePurities$`3203T1A2c_2` <- truePurities[,"3203T1A2c"]
+truePurities$`3203T1A2c_n` <- truePurities[,"3203T1A2c"]
+
+truePurities$`3302T1b_n` <- truePurities[,"3302T1b"]
+truePurities$`3302T1b_p` <- truePurities[,"3302T1b"]
+
+truePurities$`3621T_n` <- truePurities[,"3621T"]
+
+truePuritiesPlot <- truePurities %>%
+  t() %>%
+  as.data.frame() %>%
+  rownames_to_column("Sample") %>%
+  pivot_longer(cols = -c("Sample"), names_to = "Cluster", values_to = "Proportion")
+
+```
+### 5.1.2 Bulk
+```{r}
+
+```
+
+
+## 5.1 Min Expr 0, Min Genes 1
+### 5.1.1 Non-unique
+#### 5.1.1.1 Predictions
+```{r}
+cibersort <- read_csv(paste0(resDir, "/snCountsFinalq1q4/sigMatrix_minExpr0_minGenes1/CIBERSORTx_Job51_Results.csv")) %>%
+  column_to_rownames("Mixture") %>%
+  select(-c("P-value", "Correlation", "RMSE")) %>%
+  as.data.frame() %>%
+  rownames_to_column("Sample") %>%
+  pivot_longer(cols = -c("Sample"), names_to = "Cluster", values_to = "Proportion")
+
+cibersort$Cluster <- factor(music$Cluster, levels = rev(c("CTVT", 
+                                                  "Myeloid", 
+                                                  "Bcells",
+                                                  "CAF.Endo",
+                                                  "Tcells",
+                                                  "Plasma")))
+
+# Step 3: Plot
+cibersortPlot <- ggplot(cibersort, aes(x = Sample, y = Proportion, fill = Cluster)) +
+  geom_bar(stat = "identity") +
+  scale_fill_manual(values = celltype_colors) +
+  theme_minimal() +
+  ylab("Estimated Proportion") +
+  xlab("Sample") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))+
+  ggtitle("minExpr0_minGenes1")
+
+pdf(paste0(plotDir, "/bar/", fprefix, "_cibersortRes_minExpr0_minGenes1.pdf"),
+    height=4, width=7)
+print(cibersortPlot)
+dev.off()
+
+# Apply correction
+matched <- cibersort %>%
+  filter(Sample %in% unique(truePuritiesPlot$Sample)) %>%
+  inner_join(truePuritiesPlot %>% rename("Proportion"="True" ),
+             by = c("Sample", "Cluster")) %>%
+  # Add prefix and shape
+  mutate(Prefix = str_extract(Sample, "^[^T]+"),
+         Shape = if_else(str_detect(Sample, "_n$"), "Nuc", "Cell"))
+
+
+# Scatter plot
+matchedPlot <- ggplot(matched, aes(x = True, y = Proportion)) +
+  geom_point(aes(color = Prefix, shape = Shape), size = 2, alpha = 0.8) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "gray") +
+  facet_wrap(~Cluster, nrow = 1) +
+  coord_fixed(xlim = c(0, 1), ylim = c(0, 1)) +
+  scale_shape_manual(values = c(Cell = 16, Nuc = 17)) + # 16 = circle, 17 = triangle
+  scale_color_brewer(palette="Set1")+
+  labs(
+       x = "True Proportion",
+       y = "Estimated Proportion") +
+  theme_minimal() +
+  theme(
+    strip.text = element_text(size = 10),
+    axis.text.x = element_blank(),
+    axis.text.y =  element_blank()
+  )+
+  ggtitle("minExpr0_minGenes1") 
+
+
+pdf(paste0(plotDir, "/scatter/", fprefix, "_cibersortRes_minExpr0_minGenes1_matched.pdf"),
+    height=4, width=7)
+print(matchedPlot)
+dev.off()
+```
+
+#### 5.1.1.2 Bulk expression
+```{r}
+
+```
+
+
+### 5.1.2 Unique
+```{r}
+cibersort <- read_csv(paste0(resDir, "/snCountsFinalq1q4/sigMatrix_minExpr0_minGenes1_unique/CIBERSORTx_Job54_Results.csv")) %>%
+  column_to_rownames("Mixture") %>%
+  select(-c("P-value", "Correlation", "RMSE")) %>%
+  as.data.frame() %>%
+  rownames_to_column("Sample") %>%
+  pivot_longer(cols = -c("Sample"), names_to = "Cluster", values_to = "Proportion")
+
+cibersort$Cluster <- factor(music$Cluster, levels = rev(c("CTVT", 
+                                                  "Myeloid", 
+                                                  "Bcells",
+                                                  "CAF.Endo",
+                                                  "Tcells",
+                                                  "Plasma")))
+
+# Step 3: Plot
+cibersortPlot <- ggplot(cibersort, aes(x = Sample, y = Proportion, fill = Cluster)) +
+  geom_bar(stat = "identity") +
+  scale_fill_manual(values = celltype_colors) +
+  theme_minimal() +
+  ylab("Estimated Proportion") +
+  xlab("Sample") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))+
+  ggtitle("Unique_minExpr0_minGenes1")
+
+pdf(paste0(plotDir, "/bar/", fprefix, "_cibersortResUnique_minExpr0_minGenes1.pdf"),
+    height=4, width=7)
+print(cibersortPlot)
+dev.off()
+
+
+
+# Apply correction
+matched <- cibersort %>%
+  filter(Sample %in% unique(truePuritiesPlot$Sample)) %>%
+  inner_join(truePuritiesPlot %>% rename("Proportion"="True" ),
+             by = c("Sample", "Cluster")) %>%
+  # Add prefix and shape
+  mutate(Prefix = str_extract(Sample, "^[^T]+"),
+         Shape = if_else(str_detect(Sample, "_n$"), "Nuc", "Cell"))
+
+
+# Scatter plot
+matchedPlot <- ggplot(matched, aes(x = True, y = Proportion)) +
+  geom_point(aes(color = Prefix, shape = Shape), size = 2, alpha = 0.8) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "gray") +
+  facet_wrap(~Cluster, nrow = 1) +
+  coord_fixed(xlim = c(0, 1), ylim = c(0, 1)) +
+  scale_shape_manual(values = c(Cell = 16, Nuc = 17)) + # 16 = circle, 17 = triangle
+  scale_color_brewer(palette="Set1")+
+  labs(
+       x = "True Proportion",
+       y = "Estimated Proportion") +
+  theme_minimal() +
+  theme(
+    strip.text = element_text(size = 10),
+    axis.text.x = element_blank(),
+    axis.text.y =  element_blank()
+  )+
+  ggtitle("Unique_minExpr0_minGenes1")
+
+
+pdf(paste0(plotDir, "/scatter/", fprefix, "_cibersortResUnique_minExpr0_minGenes1_matched.pdf"),
+    height=4, width=7)
+print(matchedPlot)
+dev.off()
+```
+
+
+
+
+
+
+
+## 5.2 Min Expr 10, Min Genes 2 to 10
+### 5.2.1 Non-unique
+```{r}
+cibersort <- read_csv(paste0(resDir, "/snCountsFinalq1q4/sigMatrix_minExpr10_minGenes2to10/CIBERSORTx_Job43_Results.csv")) %>%
+  column_to_rownames("Mixture") %>%
+  select(-c("P-value", "Correlation", "RMSE")) %>%
+  as.data.frame() %>%
+  rownames_to_column("Sample") %>%
+  pivot_longer(cols = -c("Sample"), names_to = "Cluster", values_to = "Proportion")
+
+cibersort$Cluster <- factor(music$Cluster, levels = rev(c("CTVT", 
+                                                  "Myeloid", 
+                                                  "Bcells",
+                                                  "CAF.Endo",
+                                                  "Tcells",
+                                                  "Plasma")))
+
+# Step 3: Plot
+cibersortPlot <- ggplot(cibersort, aes(x = Sample, y = Proportion, fill = Cluster)) +
+  geom_bar(stat = "identity") +
+  scale_fill_manual(values = celltype_colors) +
+  theme_minimal() +
+  ylab("Estimated Proportion") +
+  xlab("Sample") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  ggtitle("minExpr10 minGenes2to10")
+
+pdf(paste0(plotDir, "/bar/", fprefix, "_cibersortRes_minExpr10_minGenes2to10.pdf"),
+    height=4, width=7)
+print(cibersortPlot)
+dev.off()
+
+
+
+# Apply correction
+matched <- cibersort %>%
+  filter(Sample %in% unique(truePuritiesPlot$Sample)) %>%
+  inner_join(truePuritiesPlot %>% rename("Proportion"="True" ),
+             by = c("Sample", "Cluster")) %>%
+  # Add prefix and shape
+  mutate(Prefix = str_extract(Sample, "^[^T]+"),
+         Shape = if_else(str_detect(Sample, "_n$"), "Nuc", "Cell"))
+
+
+# Scatter plot
+matchedPlot <- ggplot(matched, aes(x = True, y = Proportion)) +
+  geom_point(aes(color = Prefix, shape = Shape), size = 2, alpha = 0.8) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "gray") +
+  facet_wrap(~Cluster, nrow = 1) +
+  coord_fixed(xlim = c(0, 1), ylim = c(0, 1)) +
+  scale_shape_manual(values = c(Cell = 16, Nuc = 17)) + # 16 = circle, 17 = triangle
+  scale_color_brewer(palette="Set1")+
+  labs(
+       x = "True Proportion",
+       y = "Estimated Proportion") +
+  theme_minimal() +
+  theme(
+    strip.text = element_text(size = 10),
+    axis.text.x = element_blank(),
+    axis.text.y =  element_blank()
+  )+
+ ggtitle("minExpr10 minGenes2to10")
+
+
+pdf(paste0(plotDir, "/scatter/", fprefix, "_cibersortRes_minExpr10_minGenes2to10_matched.pdf"),
+    height=4, width=7)
+print(matchedPlot)
+dev.off()
+```
+
+## 5.3 Min Expr 10, Min Genes 4 to 6
+### 5.3.1 Non-unique
+```{r}
+cibersort <- read_csv(paste0(resDir, "/snCountsFinalq1q4/sigMatrix_minExpr10_minGenes4to6/CIBERSORTx_Job45_Results.csv")) %>%
+  column_to_rownames("Mixture") %>%
+  select(-c("P-value", "Correlation", "RMSE")) %>%
+  as.data.frame() %>%
+  rownames_to_column("Sample") %>%
+  pivot_longer(cols = -c("Sample"), names_to = "Cluster", values_to = "Proportion")
+
+cibersort$Cluster <- factor(music$Cluster, levels = rev(c("CTVT", 
+                                                  "Myeloid", 
+                                                  "Bcells",
+                                                  "CAF.Endo",
+                                                  "Tcells",
+                                                  "Plasma")))
+
+# Step 3: Plot
+cibersortPlot <- ggplot(cibersort, aes(x = Sample, y = Proportion, fill = Cluster)) +
+  geom_bar(stat = "identity") +
+  scale_fill_manual(values = celltype_colors) +
+  theme_minimal() +
+  ylab("Estimated Proportion") +
+  xlab("Sample") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  ggtitle("minExpr10 minGenes4to6")
+
+pdf(paste0(plotDir, "/bar/", fprefix, "_cibersortRes_minExpr10_minGenes4to6.pdf"),
+    height=4, width=7)
+print(cibersortPlot)
+dev.off()
+
+
+
+# Apply correction
+matched <- cibersort %>%
+  filter(Sample %in% unique(truePuritiesPlot$Sample)) %>%
+  inner_join(truePuritiesPlot %>% rename("Proportion"="True" ),
+             by = c("Sample", "Cluster")) %>%
+  # Add prefix and shape
+  mutate(Prefix = str_extract(Sample, "^[^T]+"),
+         Shape = if_else(str_detect(Sample, "_n$"), "Nuc", "Cell"))
+
+
+# Scatter plot
+matchedPlot <- ggplot(matched, aes(x = True, y = Proportion)) +
+  geom_point(aes(color = Prefix, shape = Shape), size = 2, alpha = 0.8) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "gray") +
+  facet_wrap(~Cluster, nrow = 1) +
+  coord_fixed(xlim = c(0, 1), ylim = c(0, 1)) +
+  scale_shape_manual(values = c(Cell = 16, Nuc = 17)) + # 16 = circle, 17 = triangle
+  scale_color_brewer(palette="Set1")+
+  labs(
+       x = "True Proportion",
+       y = "Estimated Proportion") +
+  theme_minimal() +
+  theme(
+    strip.text = element_text(size = 10),
+    axis.text.x = element_blank(),
+    axis.text.y =  element_blank()
+  )+
+ ggtitle("minExpr10 minGenes4to6")
+
+
+pdf(paste0(plotDir, "/scatter/", fprefix, "_cibersortRes_minExpr10_minGenes4to6_matched.pdf"),
+    height=4, width=7)
+print(matchedPlot)
+dev.off()
+```
+
+
+
+## 5.3 Min Expr 50, Min Genes 2 to 10
+### 5.3.1 Non-unique
+```{r}
+cibersort <- read_csv(paste0(resDir, "/snCountsFinalq1q4/sigMatrix_minExpr50_minGenes2to10/CIBERSORTx_Job47_Results.csv")) %>%
+  column_to_rownames("Mixture") %>%
+  select(-c("P-value", "Correlation", "RMSE")) %>%
+  as.data.frame() %>%
+  rownames_to_column("Sample") %>%
+  pivot_longer(cols = -c("Sample"), names_to = "Cluster", values_to = "Proportion")
+
+cibersort$Cluster <- factor(music$Cluster, levels = rev(c("CTVT", 
+                                                  "Myeloid", 
+                                                  "Bcells",
+                                                  "CAF.Endo",
+                                                  "Tcells",
+                                                  "Plasma")))
+
+# Step 3: Plot
+cibersortPlot <- ggplot(cibersort, aes(x = Sample, y = Proportion, fill = Cluster)) +
+  geom_bar(stat = "identity") +
+  scale_fill_manual(values = celltype_colors) +
+  theme_minimal() +
+  ylab("Estimated Proportion") +
+  xlab("Sample") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  ggtitle("minExpr50 minGenes2to10")
+
+pdf(paste0(plotDir, "/bar/", fprefix, "_cibersortRes_minExpr50_minGenes2to10.pdf"),
+    height=4, width=7)
+print(cibersortPlot)
+dev.off()
+
+
+# Apply correction
+matched <- cibersort %>%
+  filter(Sample %in% unique(truePuritiesPlot$Sample)) %>%
+  inner_join(truePuritiesPlot %>% rename("Proportion"="True" ),
+             by = c("Sample", "Cluster")) %>%
+  # Add prefix and shape
+  mutate(Prefix = str_extract(Sample, "^[^T]+"),
+         Shape = if_else(str_detect(Sample, "_n$"), "Nuc", "Cell"))
+
+
+# Scatter plot
+matchedPlot <- ggplot(matched, aes(x = True, y = Proportion)) +
+  geom_point(aes(color = Prefix, shape = Shape), size = 2, alpha = 0.8) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "gray") +
+  facet_wrap(~Cluster, nrow = 1) +
+  coord_fixed(xlim = c(0, 1), ylim = c(0, 1)) +
+  scale_shape_manual(values = c(Cell = 16, Nuc = 17)) + # 16 = circle, 17 = triangle
+  scale_color_brewer(palette="Set1")+
+  labs(
+       x = "True Proportion",
+       y = "Estimated Proportion") +
+  theme_minimal() +
+  theme(
+    strip.text = element_text(size = 10),
+    axis.text.x = element_blank(),
+    axis.text.y =  element_blank()
+  )+
+ ggtitle("minExpr50 minGenes2to10")
+
+
+pdf(paste0(plotDir, "/scatter/", fprefix, "_cibersortRes_minExpr50_minGenes2to10_matched.pdf"),
+    height=4, width=7)
+print(matchedPlot)
+dev.off()
+```
+
+## 5.6 Feature plots with sig. genes
+```{r}
+assay(objNoBad, "counts") <- as.matrix(assay(objNoBad, "counts"))
+assay(objNoBad, "logcounts") <- as.matrix(assay(objNoBad, "logcounts"))
+seuratobjNoBad <- as.Seurat(objNoBad, counts = "counts", data = "logcounts")
+seuratobjNoBad
+Idents(seuratobjNoBad) <- "manual.log.anot.fine"
+seuratobjNoBadNoBad <- subset(seuratobjNoBad, idents = "bad", invert=TRUE)
+table(Idents(seuratobjNoBadNoBad))
+```
+
+### 5.6.1 Min Expr 50, Min Genes 2 to 10
+```{r}
+sigGenes <- read.table(paste0(resDir, "/snCountsFinalq1q4/sigMatrix_minExpr50_minGenes2to10/CIBERSORTx_Job46_03_Deconvolution_CTVT_cibersort_snCountsFinal_snAnno_inferred_phenoclasses.CIBERSORTx_Job46_03_Deconvolution_CTVT_cibersort_snCountsFinal_snAnno_inferred_refsample.bm.K999.txt"), header = T) %>%
+  as.data.frame()
+
+sigGenes$NAME <- str_replace(sigGenes$NAME, "DLA.79", "DLA-79")
+
+for(n in sigGenes$NAME){
+  
+  plot <- FeaturePlot(seuratobjNoBad, n, reduction="TSNE_log_corrected")
+  
+  pdf(paste0(plotDir, "feature/", fprefix, "_minExpr50_minGenes2to10_", n, ".pdf"),
+      height=4,
+        width=4)
+  print(plot)
+  dev.off()
+  
+}
+```
+

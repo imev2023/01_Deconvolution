@@ -37,6 +37,7 @@ library(DESeq2)
 library(paletteer)
 library(scales)
 library(ggnewscale)
+library(UpSetR)
 
 ```
 
@@ -1579,6 +1580,10 @@ DimPlot(seuratObjNoBad, reduction = "TSNE_log_corrected")
 
 rm(obj, seuratObj)
 gc()
+
+
+FeaturePlot(seuratObjNoBad, "ANXA1", reduction="TSNE_log_corrected")
+FeaturePlot(seuratObjNoBad, "CXCL10", reduction="TSNE_log_corrected")
 ```
 
 ## 6.2 Find all markers
@@ -1912,7 +1917,16 @@ plotDf <- geneDf %>%
   mutate(medianEhLog = log1p(medianEh), 
          medianEtLog = log1p(medianEt),
          medianEtEditLog = log10(medianEtEdit),
-         label = ifelse(medianEh > 1000 & medianEt > 1000,
+         labelTH = ifelse(medianEh > 1000 & medianEt > 1000,
+                            Symbol, 
+                            NA),
+         labelNeither = ifelse(medianEh < 1000 & medianEt < 1000,
+                            Symbol, 
+                            NA),
+         labelH =  ifelse(medianEh > 1000 & medianEt < 1000,
+                            Symbol, 
+                            NA),
+         labelT = ifelse(medianEh < 1000 & medianEt > 1000,
                             Symbol, 
                             NA))
 
@@ -1924,7 +1938,7 @@ medianPlot <- ggplot(plotDf, aes(x = medianEhLog, y = medianEtLog)) +
     y = "logq1p(median(eT))"
   ) +
   geom_label_repel(
-    aes(label = label),
+    aes(label = labelTH),
     nudge_x = 0.1, 
     nudge_y = 0.1,
     label.padding = unit(0.15, "lines"),
@@ -1933,8 +1947,45 @@ medianPlot <- ggplot(plotDf, aes(x = medianEhLog, y = medianEtLog)) +
     fill = "#69b3a2",
     min.segment.length = .5,
     segment.color = "#69b3a2"  # line color from point to label
+  ) +
+  # geom_label_repel(
+  #   aes(label = labelNeither),
+  #   nudge_x = 0.1, 
+  #   nudge_y = 0.1,
+  #   label.padding = unit(0.15, "lines"),
+  #   label.size = 0.1,
+  #   color = "black",
+  #   fill = "firebrick2",
+  #   min.segment.length = .5,
+  #   segment.color = "firebrick2"  # line color from point to label
+  # ) +
+  
+  geom_label_repel(
+    aes(label = labelT),
+    nudge_x = 0.1, 
+    nudge_y = 0.1,
+    label.padding = unit(0.15, "lines"),
+    label.size = 0.1,
+    color = "black",
+    fill = "skyblue",
+    min.segment.length = .5,
+    segment.color = "skyblue"  # line color from point to label
+  ) +
+  geom_label_repel(
+    aes(label = labelH),
+    nudge_x = 0.1, 
+    nudge_y = 0.1,
+    label.padding = unit(0.15, "lines"),
+    label.size = 0.1,
+    color = "black",
+    fill = "gold",
+    min.segment.length = .5,
+    segment.color = "gold"  # line color from point to label
   )
 
+pdf(paste0(plotDir, "/scatter/", fprefix, "_medianEtEh_labelled.pdf"), height=10, width=10)
+print(medianPlot)
+dev.off()
 ```
 
 #### 7.2.1.1 Logscale
@@ -1971,3 +2022,1202 @@ meanPlot <- ggplot(tempPlotDf, aes(x=sampleCount, y=meanEhEdit)) +
 #### 7.2.1.2 Absolute
 
 ### 7.2.2 Distribution of delta eT and eH vs purity correlation
+#### 7.2.2.1 Delta eT and eH
+```{r}
+plotDf <- geneDf %>%
+  mutate(deltaEtEh = medianEt-medianEh,
+         medianEhLog = log1p(medianEh), 
+         medianEtLog = log1p(medianEt),
+         medianEtEditLog = log10(medianEtEdit),
+         labelTH = ifelse(medianEh > 1000 & medianEt > 1000,
+                            Symbol, 
+                            NA),
+         labelNeither = ifelse(medianEh < 1000 & medianEt < 1000,
+                            Symbol, 
+                            NA),
+         labelH =  ifelse(medianEh > 1000 & medianEt < 1000,
+                            Symbol, 
+                            NA),
+         labelT = ifelse(medianEh < 1000 & medianEt > 1000,
+                            Symbol, 
+                            NA))
+
+write.xlsx(plotDf, paste0(resDir, fprefix, "_deltaEtEh.xlsx"))
+```
+#### 7.2.2.2 Purity vs delta
+```{r}
+tempPlotDf <- plotDf %>%
+  rename("sampleCount"="variantCount") %>%
+  mutate(
+    fillPos = medianEtEdit,
+    fillNeg = medianEh
+  )
+
+# Max for scaling
+q1 <- subset(tempPlotDf, purity_correlation > 0 & deltaEtEh > 0)
+maxq1 <- max(q1$deltaEtEh)
+q1Label <- 
+
+q2 <- subset(tempPlotDf, purity_correlation > 0 & deltaEtEh < 0)
+maxq2 <- min(q2$deltaEtEh)
+
+q3 <- subset(tempPlotDf, purity_correlation < 0 & deltaEtEh > 0)
+maxq3 <- min(q3$deltaEtEh)
+
+q4 <- subset(tempPlotDf, purity_correlation < 0 & deltaEtEh < 0)
+maxq4 <- min(q4$deltaEtEh)
+
+
+medianPlot <- ggplot(tempPlotDf, aes(x = purity_correlation, y = deltaEtEh)) +
+  # NEUTRAL points layer
+  geom_point(data = subset(tempPlotDf, purity_correlation >= -0.5 & purity_correlation <= 0.5),
+             aes(size = sampleCount), fill = "grey80", color = "black", shape = 21, stroke = 0.2) +
+
+  # POS POS correlation points layer
+  new_scale_fill() +
+  geom_point(data = q1,
+             aes(fill = deltaEtEh, size = sampleCount), color = "black", shape = 21, stroke = 0.2) +
+  scale_fill_gradient(
+    name = "",
+    low = "mistyrose", high = "maroon",
+    limits = c(0, 5000), na.value = "grey90"
+  ) +
+   # NEG POS correlation points layer
+    new_scale_fill() +
+  geom_point(data = q2,
+             aes(fill = deltaEtEh, size = sampleCount), color = "black", shape = 21, stroke = 0.2) +
+  scale_fill_gradient(
+    name = "",
+    high = "#ffd580", low = "firebrick2",
+    limits = c(maxq2, 0), na.value = "grey90"
+  ) +
+  
+  # NEG POS correlation points layer
+    new_scale_fill() +
+  geom_point(data = q3,
+             aes(fill = deltaEtEh, size = sampleCount), color = "black", shape = 21, stroke = 0.2) +
+  scale_fill_gradient(
+    name = "",
+    low = "#7ED6B7", high = "#1831F5",
+    limits = c(0,  5000), na.value = "grey90"
+  ) +
+    # NEG POS correlation points layer
+  new_scale_fill() +
+  geom_point(data = q4,
+             aes(fill = deltaEtEh, size = sampleCount), color = "black", shape = 21, stroke = 0.2) +
+  scale_fill_gradient(
+    name = "",
+    low = "#7E53E6", high = "#D8BFD8",
+    limits = c(maxq4, 0), na.value = "grey90"
+  ) +
+  theme_minimal() +
+  labs(
+    title = "",
+    x = "Purity Correlation", 
+    y = "Median eT - Median eH"
+  ) 
+
+pdf(paste0(plotDir, "/volcano/", fprefix, "_deltaEtEh_purity.pdf"), height=10, width=10)
+print(medianPlot)
+dev.off()
+```
+#### 7.2.2.3 Labeled purity vs delta
+```{r}
+# Filter points with abs(deltaEtEh) > 500 in Q1 and Q3
+q1Label <- subset(q1, abs(deltaEtEh) > 200)
+q4Label <- subset(q4, abs(deltaEtEh) > 200)
+
+# Plot with labels
+medianPlot <- ggplot(tempPlotDf, aes(x = purity_correlation, y = deltaEtEh)) +
+  # NEUTRAL points
+  geom_point(data = subset(tempPlotDf, purity_correlation >= -0.5 & purity_correlation <= 0.5),
+             aes(size = variantCount), fill = "grey80", color = "black", shape = 21, stroke = 0.2) +
+
+  # Q1
+  new_scale_fill() +
+  geom_point(data = q1,
+             aes(fill = deltaEtEh, size = variantCount), color = "black", shape = 21, stroke = 0.2) +
+  scale_fill_gradient(low = "mistyrose", high = "maroon", limits = c(0, 5000), na.value = "grey90") +
+
+  # Q2
+  new_scale_fill() +
+  geom_point(data = q2,
+             aes(fill = deltaEtEh, size = variantCount), color = "black", shape = 21, stroke = 0.2) +
+  scale_fill_gradient(high = "#ffd580", low = "firebrick2", limits = c(maxq2, 0), na.value = "grey90") +
+
+  # Q3
+  new_scale_fill() +
+  geom_point(data = q3,
+             aes(fill = deltaEtEh, size = variantCount), color = "black", shape = 21, stroke = 0.2) +
+  scale_fill_gradient(low = "#7ED6B7", high = "#1831F5", limits = c(0, 5000), na.value = "grey90") +
+
+  # Q4
+  new_scale_fill() +
+  geom_point(data = q4,
+             aes(fill = deltaEtEh, size = variantCount), color = "black", shape = 21, stroke = 0.2) +
+  scale_fill_gradient(low = "#7E53E6", high = "#D8BFD8", limits = c(maxq4, 0), na.value = "grey90") +
+
+  # Labels for Q1 and Q4
+  geom_text(data = q1Label, aes(label = Symbol), size = 3, vjust = -1, check_overlap = TRUE) +
+  geom_text(data = q4Label, aes(label = Symbol), size = 3, vjust = -1, check_overlap = TRUE) +
+  scale_size(range = c(1,10)) +
+
+  theme_minimal() +
+  labs(x = "Purity Correlation", y = "Median eT - Median eH")
+
+pdf(paste0(plotDir, "/volcano/", fprefix, "_deltaEtEh_purity_labelled200.pdf"), height=10, width=10)
+print(medianPlot)
+dev.off()
+```
+
+## 7.3 With marker genes
+### 7.3.1 Candidate gene lists
+```{r}
+# Filter points with abs(deltaEtEh) > 500 in Q1 and Q3
+
+# q1 = tumor
+q1Label100 <- subset(q1, abs(deltaEtEh) > 100)
+
+# q4 = host
+q4Label100 <- subset(q4, abs(deltaEtEh) > 100)
+```
+
+### 7.3.2 CTVT
+#### 7.3.2.1 Filter genes 
+Testing positive genes from FAM with high purity correlations. 
+```{r}
+famWilcox <- read.xlsx(paste0(resDir, "findAllMarkers/", fprefix, "_seuratObjNoBad_famWilcox.xlsx"))
+
+famWilcoxDegs <- famWilcox %>%v
+  filter(p_val_adj < 0.05 & avg_log2FC > 2.5 & cluster == "CTVT") 
+
+intersecting <- intersect(famWilcoxDegs$gene, q1Label100$Symbol) ### 93 genes intersecting
+
+# intersectingStrict <- intersect(famWilcoxDegs$gene, tumorSpecDfStrict$Symbol) ### None overlap. 
+```
+
+#### 7.3.2.2 Merge with purity correlations and eT
+```{r}
+mergedFamWilcoxDegsCTVT <- famWilcox %>%
+  filter(p_val_adj < 0.01 & avg_log2FC > 2.5 & cluster=="CTVT") %>%
+  filter(gene %in% q1Label100$Symbol) %>%
+  dplyr::rename("Symbol"="gene") %>%
+  left_join(q1Label100) %>%
+  mutate("Annotation"=paste0("q1Label100_CTVTDeg")) 
+
+write.xlsx(mergedFamWilcoxDegsCTVT,
+           paste0(resDir, fprefix, "_mergedFamWilcoxDegs_q1100TumorGenes.xlsx"))
+
+ctvtSet <- mergedFamWilcoxDegsCTVT$Symbol
+```
+#### 7.3.2.3 Feature plots
+Merged and split by sample
+```{r}
+for(g in intersecting){
+
+  feat <- FeaturePlot(seuratObjNoBad,
+                      reduction = "TSNE_log_corrected",
+                      features=g) +
+
+    ggtitle(paste0("q1 + Wilcox DEG - ", g))
+
+  featSamp <- FeaturePlot(seuratObjNoBad,
+                          reduction = "TSNE_log_corrected",
+                          features=g,
+                          split.by = "Sample")
+
+  pdf(paste0("~/gitClones/01_Deconvolution/03_Deconvolution_CTVT/034_Plots/", fprefix, "/featureSeurat/tumorSpecificIntersect/03_Deconvolution_CTVT_q1label100_famWilcoxDegs_", g,"_expression.pdf"),
+      height=4,
+      width=4)
+
+  print(feat)
+
+  dev.off()
+
+
+
+  pdf(paste0("~/gitClones/01_Deconvolution/03_Deconvolution_CTVT/034_Plots/", fprefix,  "/featureSeurat/tumorSpecificIntersect/03_Deconvolution_CTVT_q1label100_famWilcoxDegs_", g,"_expressionBySample.pdf"),
+      height=4,
+      width=14)
+
+  print(featSamp)
+
+  dev.off()
+
+}
+```
+
+### 7.3.2 Host specific genes
+#### 7.3.2.1 Feature plots
+```{r}
+###### 2.1.4 Loop through NON CTVT FAM DEG's --> check against genetic deconv list. Test positive genes first.
+for(ctype in unique(famWilcox$cluster)){
+  if(ctype=="CTVT"){
+    next
+  }
+
+  tempFamWilcoxDegs <- famWilcox %>%
+    filter(p_val_adj < 0.05 & avg_log2FC > 2.5 & cluster == ctype)
+
+  tempIntersecting <- intersect(tempFamWilcoxDegs$gene, q4Label100$Symbol)
+
+  print(paste0("Cell type: ", ctype, " - Intersecting: ", length(tempIntersecting)))
+
+  tempPlotDir <- paste0("hostSpecificIntersect", ctype)
+
+  for(tg in tempIntersecting){
+
+    feat <- FeaturePlot(seuratObjNoBad,
+                        reduction = "TSNE_log_corrected",
+                        features=tg) +
+
+      ggtitle(paste0("q4Label100 + ", ctype, " Wilcox DEG - ", tg))
+
+    featSamp <- FeaturePlot(seuratObjNoBad,
+                            reduction = "TSNE_log_corrected",
+                            features=tg,
+                            split.by = "Sample")
+
+    pdf(paste0("~/gitClones/01_Deconvolution/03_Deconvolution_CTVT/034_Plots/", fprefix, "/featureSeurat/", tempPlotDir, "/03_Deconvolution_CTVT_q4Label100_famWilcoxDegs_", tg,"_expression.pdf"),
+        height=4,
+        width=4)
+
+    print(feat)
+
+    dev.off()
+
+
+
+    pdf(paste0("~/gitClones/01_Deconvolution/03_Deconvolution_CTVT/034_Plots/", fprefix, "/featureSeurat/", tempPlotDir, "/03_Deconvolution_CTVT_q4Label100_famWilcoxDegs_", tg,"_expressionBySample.pdf"),
+        height=4,
+        width=14)
+
+    print(featSamp)
+
+    dev.off()
+
+  }
+
+}
+```
+
+### 6.4.2 Merge with purity correlations
+```{r}
+mergedFamWilcoxDegsAdrian <- data.frame()
+
+
+for(ctype in unique(famWilcox$cluster)){
+  if(ctype=="CTVT"){
+    next
+  }
+  
+  temp <- famWilcox %>%
+    filter(p_val_adj < 0.05 & avg_log2FC > 2.5& cluster==ctype) %>%
+    filter(gene %in% q4Label100$Symbol) %>%
+    dplyr::rename("Symbol"="gene") %>%
+    left_join(q4Label100) %>%
+    mutate("Annotation"=paste0("q4Label100_", ctype, "Deg"))
+  
+  mergedFamWilcoxDegsAdrian <- rbind(mergedFamWilcoxDegsAdrian, temp)
+  
+}
+
+allDegs <- rbind(mergedFamWilcoxDegsAdrian, mergedFamWilcoxDegsCTVT)
+
+write.xlsx(allDegs,
+           paste0(resDir, fprefix, "_mergedFamWilcoxDegs_q1q4_100Genes.xlsx"))
+
+```
+
+
+## 7.5 Candidate gene lists
+### 7.5.1 Gene sets
+```{r}
+mergedFamWilcoxDegsCTVT <- famWilcox %>%
+  filter(p_val_adj < 0.05 & avg_log2FC > 2.5 & cluster=="CTVT") %>%
+  filter(gene %in% q1Label100$Symbol) %>%
+  dplyr::rename("Symbol"="gene") %>%
+  left_join(q1Label100) %>%
+  mutate("Annotation"=paste0("tumorSpec_", cluster, "Deg")) 
+
+# 17 genes are negative correlated with tumor purity and a Bcell DEG
+print(nrow(mergedFamWilcoxDegsAdrian %>% filter(cluster == "Bcells" & purity_correlation < -0)))
+candBcell <- mergedFamWilcoxDegsAdrian %>% 
+  filter(cluster == "Bcells" & purity_correlation < -0) %>% 
+  dplyr::select(Symbol, medianEh, purity_correlation, avg_log2FC)
+
+bcellSet <- candBcell$Symbol
+
+# 36 genes are negatively correlated with tumor purity and a Myeloid DEG
+print(nrow(mergedFamWilcoxDegsAdrian %>% filter(cluster == "Myeloid" & purity_correlation < -0)))
+candMyeloid <- mergedFamWilcoxDegsAdrian %>% 
+  filter(cluster == "Myeloid" & purity_correlation < -0) %>% 
+  dplyr::select(Symbol, medianEh, purity_correlation, avg_log2FC)
+
+myeloidSet <- candMyeloid$Symbol
+
+# 32 genes are negatively correlated with tumor purity and a Myeloid DEG
+print(nrow(mergedFamWilcoxDegsAdrian %>% filter(cluster == "CAF.Endo" & purity_correlation < -0)))
+candCAFEndo <- mergedFamWilcoxDegsAdrian %>% 
+  filter(cluster == "CAF.Endo" & purity_correlation < -0) %>% 
+  dplyr::select(Symbol, medianEh, purity_correlation, avg_log2FC)
+
+cafendoSet <- candCAFEndo$Symbol
+
+
+# 21 genes are negatively correlated with tumor purity and a Plasma DEG
+print(nrow(mergedFamWilcoxDegsAdrian %>% filter(cluster == "Plasma" & purity_correlation < -0)))
+candPlasma <- mergedFamWilcoxDegsAdrian %>% 
+  filter(cluster == "Plasma" & purity_correlation < -0) %>% 
+  dplyr::select(Symbol, medianEh, purity_correlation, avg_log2FC)
+
+plasmaSet <- candPlasma$Symbol
+
+# 9 genes are negatively correlated with tumor purity and a Tcells DEG
+print(nrow(mergedFamWilcoxDegsAdrian %>% filter(cluster == "Tcells" & purity_correlation < -0)))
+candTcells <- mergedFamWilcoxDegsAdrian %>% 
+  filter(cluster == "Tcells" & purity_correlation < -0) %>% 
+  dplyr::select(Symbol, medianEh, purity_correlation, avg_log2FC)
+
+tcellSet <- candTcells$Symbol
+```
+
+### 7.5.2 Upset
+```{r}
+geneSets <- list("ctvt"=ctvtSet,
+             "bcell"=bcellSet,
+             "myeloid"=myeloidSet,
+             "caf.endo"=cafendoSet,
+             "plasma"=plasmaSet,
+             "tcell"=tcellSet)
+
+
+genes <- sort(unique(unlist(geneSets)))
+
+sets <- t(+sapply(geneSets, "%in%", x = genes)) %>%
+  t() %>%
+  as.data.frame()
+
+rownames(sets) <- genes
+
+sets <- sets %>%
+  rownames_to_column("Gene")
+
+upsetPlot <- upset(sets,
+      sets = c("ctvt", "bcell", "myeloid", "caf.endo", "plasma", "tcell"),
+      # keep.order = TRUE,
+      nintersects = NA, # show all intersections
+      order.by = "freq") # optional, could be degree or freq
+
+upsetPlot <- upset(
+  sets,
+  sets = c("ctvt", "caf.endo", "myeloid", "plasma", "tcell", "bcell"),
+  keep.order = TRUE,
+  nintersects = NA,
+  sets.bar.color = c(
+    ctvt = "#E41A1C",
+    caf.endo = "gold",
+    myeloid = "#4DAF4A",
+    plasma = "skyblue",
+    tcell = "cornflowerblue",
+    bcell = "pink"
+  )
+)
+
+
+uniqueGenes <- sets %>%
+  column_to_rownames("Gene") %>%
+  mutate(rowsum = rowSums(.)) %>%
+  filter(rowsum==1)
+
+
+upsetData <- sets %>%
+  unite(col = "intersection", -c("Gene"), sep = "") %>%
+  group_by(intersection) %>%
+  summarise(list = list(Gene)) %>%
+  mutate(list = setNames(list, intersection)) %>%
+  pull(list)
+
+write.xlsx(sets, paste0(resDir, fprefix, "_geneCorrelations_famDegs.xlsx"))
+
+pdf(paste0(plotDir, "/upset/", fprefix, "_q1q4Genes_famDegs_intersection.pdf"), 
+    height=6, 
+    width=8)
+print(upsetPlot)
+dev.off()
+```
+
+### 7.5.3 Unique gene sets
+```{r}
+uniqueGenesFinal <- uniqueGenes %>%
+  dplyr::select(-rowsum)
+
+# Initialize a list to store unique genes per cell type
+uniqueGeneLists <- list()
+
+# Loop through each column (cell type)
+for (cell_type in colnames(uniqueGenesFinal)) {
+  # Identify genes that are only expressed (1) in this cell type
+  unique_genes <- rownames(uniqueGenesFinal)[
+    uniqueGenesFinal[, cell_type] == 1 & rowSums(uniqueGenesFinal) == 1
+  ]
+  
+  # Store in the list
+  uniqueGeneLists[[cell_type]] <- unique_genes
+}
+```
+
+
+
+
+
+
+
+
+# 8 eT/eH
+## 8.1 Data
+New approach for marker gene selection: 
+- Group by gene, take median eT and eH --> probably more complete with purity corr. by gene as well. 
+- Of note, max eT = Inf --> replacing with 60000. 
+```{r}
+# snpDf <- 
+geneDf <- adrianDf %>%
+  group_by( GeneID, Symbol) %>% # Group by SNP (Location)
+  mutate(etEdit = ifelse(eT == Inf, 
+                             50000,
+                             eT)) %>%
+  summarise(sampleCount = n(), 
+            medianEh = median(eH), 
+            medianEt = median(eT),
+            medianEtEdit = median(etEdit), 
+            sumEt = sum(eT),
+            sumEtEdit = sum(etEdit),
+            sumEh = sum(eH)) %>%
+  left_join(adrianCorr, 
+            by = join_by(Symbol))
+```
+
+## 8.2 Plot
+### 8.2.1 eT/eH vs eT+eH
+```{r}
+plotDf <- geneDf %>%
+  mutate(Sum = medianEh + medianEt, 
+         Frac = medianEt/medianEh,
+         fracEdit = medianEtEdit/medianEh,
+         sumEdit = medianEh + medianEtEdit,
+         # medianEtLog = log1p(medianEt),
+         # medianEtEditLog = log10(medianEtEdit),
+         labelTH = ifelse(medianEh > 1000 & medianEt > 1000,
+                            Symbol, 
+                            NA),
+         labelNeither = ifelse(medianEh < 1000 & medianEt < 1000,
+                            Symbol, 
+                            NA),
+         labelH =  ifelse(medianEh > 1000 & medianEt < 1000,
+                            Symbol, 
+                            NA),
+         labelT = ifelse(medianEh < 1000 & medianEt > 1000,
+                            Symbol, 
+                            NA))
+
+medianPlot <- ggplot(plotDf, aes(x = Sum, y =Frac)) +
+  geom_point() +
+  theme_minimal() +
+  labs(title = "eT vs eH",
+    x = "Total gene expression (eT + eH)", 
+    y = "Gene expression ratio (eT/eH)"
+  ) +
+  scale_x_log10(guide = "axis_logticks", limits = c(-10^2, 10^4)) +
+  scale_y_log10(guide = "axis_logticks", limits = c(-10^4, 10^4)) +
+  geom_label_repel(
+    aes(label = labelTH),
+    nudge_x = 0.1, 
+    nudge_y = 0.1,
+    label.padding = unit(0.15, "lines"),
+    label.size = 0.1,
+    color = "black",
+    fill = "#69b3a2",
+    min.segment.length = .5,
+    segment.color = "#69b3a2"  # line color from point to label
+  ) +
+  # geom_label_repel(
+  #   aes(label = labelNeither),
+  #   nudge_x = 0.1, 
+  #   nudge_y = 0.1,
+  #   label.padding = unit(0.15, "lines"),
+  #   label.size = 0.1,
+  #   color = "black",
+  #   fill = "firebrick2",
+  #   min.segment.length = .5,
+  #   segment.color = "firebrick2"  # line color from point to label
+  # ) +
+  
+  geom_label_repel(
+    aes(label = labelT),
+    nudge_x = 0.1, 
+    nudge_y = 0.1,
+    label.padding = unit(0.15, "lines"),
+    label.size = 0.1,
+    color = "black",
+    fill = "skyblue",
+    min.segment.length = .5,
+    segment.color = "skyblue"  # line color from point to label
+  ) +
+  geom_label_repel(
+    aes(label = labelH),
+    nudge_x = 0.1, 
+    nudge_y = 0.1,
+    label.padding = unit(0.15, "lines"),
+    label.size = 0.1,
+    color = "black",
+    fill = "gold",
+    min.segment.length = .5,
+    segment.color = "gold"  # line color from point to label
+  )
+
+pdf(paste0(plotDir, "/scatter/", fprefix, "_medianEtEh_labelled.pdf"), height=10, width=10)
+print(medianPlot)
+dev.off()
+```
+
+#### 8.2.1.1 Logscale
+```{r}
+medianPlot <- ggplot(plotDf, aes(x = medianEh, y = medianEt)) +
+  geom_point() +
+  scale_x_log10(guide = "axis_logticks", limits=c(10^-3, 10^4)) +
+  scale_y_log10(guide = "axis_logticks", limits=c(10^-3, 10^4)) + 
+  theme_minimal() +
+  labs(title = "eT vs eH",
+    x = "median(eH)", 
+    y = "median(eT)"
+  )
+
+medianLabel = ifelse(medianEh > 1000 & sampleCount > 20,
+                            Symbol, 
+                            NA))
+meanPlot <- ggplot(tempPlotDf, aes(x=sampleCount, y=meanEhEdit)) +
+  geom_point() + 
+  geom_label_repel(
+    aes(label = meanLabel),
+    nudge_x = 0.1, 
+    nudge_y = 0.1,
+    label.padding = unit(0.15, "lines"),
+    label.size = 0.1,
+    color = "black",
+    fill = "#69b3a2",
+    min.segment.length = .5,
+    segment.color = "#69b3a2"  # line color from point to label
+  ) +
+  theme_minimal()
+
+```
+#### 8.2.1.2 Absolute
+
+### 8.2.2 Distribution of delta eT and eH vs purity correlation
+#### 8.2.2.1 Delta eT and eH
+```{r}
+plotDf <- geneDf %>%
+  mutate(deltaEtEh = medianEt-medianEh,
+         medianEhLog = log1p(medianEh), 
+         medianEtLog = log1p(medianEt),
+         medianEtEditLog = log10(medianEtEdit),
+         labelTH = ifelse(medianEh > 1000 & medianEt > 1000,
+                            Symbol, 
+                            NA),
+         labelNeither = ifelse(medianEh < 1000 & medianEt < 1000,
+                            Symbol, 
+                            NA),
+         labelH =  ifelse(medianEh > 1000 & medianEt < 1000,
+                            Symbol, 
+                            NA),
+         labelT = ifelse(medianEh < 1000 & medianEt > 1000,
+                            Symbol, 
+                            NA))
+```
+#### 8.2.2.2 Purity vs delta
+```{r}
+tempPlotDf <- plotDf %>%
+  rename("sampleCount"="variantCount") %>%
+  mutate(
+    fillPos = medianEtEdit,
+    fillNeg = medianEh
+  )
+
+# Max for scaling
+q1 <- subset(tempPlotDf, purity_correlation > 0 & deltaEtEh > 0)
+maxq1 <- max(q1$deltaEtEh)
+# q1Label <- 
+
+q2 <- subset(tempPlotDf, purity_correlation > 0 & deltaEtEh < 0)
+maxq2 <- min(q2$deltaEtEh)
+
+q3 <- subset(tempPlotDf, purity_correlation < 0 & deltaEtEh > 0)
+maxq3 <- min(q3$deltaEtEh)
+
+q4 <- subset(tempPlotDf, purity_correlation < 0 & deltaEtEh < 0)
+maxq4 <- min(q4$deltaEtEh)
+
+
+medianPlot <- ggplot(tempPlotDf, aes(x = purity_correlation, y = deltaEtEh)) +
+  # NEUTRAL points layer
+  geom_point(data = subset(tempPlotDf, purity_correlation >= -0.5 & purity_correlation <= 0.5),
+             aes(size = sampleCount), fill = "grey80", color = "black", shape = 21, stroke = 0.2) +
+
+  # POS POS correlation points layer
+  new_scale_fill() +
+  geom_point(data = q1,
+             aes(fill = deltaEtEh, size = sampleCount), color = "black", shape = 21, stroke = 0.2) +
+  scale_fill_gradient(
+    name = "",
+    low = "mistyrose", high = "maroon",
+    limits = c(0, 5000), na.value = "grey90"
+  ) +
+   # NEG POS correlation points layer
+    new_scale_fill() +
+  geom_point(data = q2,
+             aes(fill = deltaEtEh, size = sampleCount), color = "black", shape = 21, stroke = 0.2) +
+  scale_fill_gradient(
+    name = "",
+    high = "#ffd580", low = "firebrick2",
+    limits = c(maxq2, 0), na.value = "grey90"
+  ) +
+  
+  # NEG POS correlation points layer
+    new_scale_fill() +
+  geom_point(data = q3,
+             aes(fill = deltaEtEh, size = sampleCount), color = "black", shape = 21, stroke = 0.2) +
+  scale_fill_gradient(
+    name = "",
+    low = "#7ED6B7", high = "#1831F5",
+    limits = c(0,  5000), na.value = "grey90"
+  ) +
+    # NEG POS correlation points layer
+  new_scale_fill() +
+  geom_point(data = q4,
+             aes(fill = deltaEtEh, size = sampleCount), color = "black", shape = 21, stroke = 0.2) +
+  scale_fill_gradient(
+    name = "",
+    low = "#7E53E6", high = "#D8BFD8",
+    limits = c(maxq4, 0), na.value = "grey90"
+  ) +
+  theme_minimal() +
+  labs(
+    title = "",
+    x = "Purity Correlation", 
+    y = "Median eT - Median eH"
+  ) 
+
+pdf(paste0(plotDir, "/volcano/", fprefix, "_deltaEtEh_purity.pdf"), height=10, width=10)
+print(medianPlot)
+dev.off()
+```
+#### 8.2.2.3 Labeled purity vs delta
+```{r}
+# Filter points with abs(deltaEtEh) > 500 in Q1 and Q3
+q1Label <- subset(q1, abs(deltaEtEh) > 200)
+q4Label <- subset(q4, abs(deltaEtEh) > 200)
+
+# Plot with labels
+medianPlot <- ggplot(tempPlotDf, aes(x = purity_correlation, y = deltaEtEh)) +
+  # NEUTRAL points
+  geom_point(data = subset(tempPlotDf, purity_correlation >= -0.5 & purity_correlation <= 0.5),
+             aes(size = variantCount), fill = "grey80", color = "black", shape = 21, stroke = 0.2) +
+
+  # Q1
+  new_scale_fill() +
+  geom_point(data = q1,
+             aes(fill = deltaEtEh, size = variantCount), color = "black", shape = 21, stroke = 0.2) +
+  scale_fill_gradient(low = "mistyrose", high = "maroon", limits = c(0, 5000), na.value = "grey90") +
+
+  # Q2
+  new_scale_fill() +
+  geom_point(data = q2,
+             aes(fill = deltaEtEh, size = variantCount), color = "black", shape = 21, stroke = 0.2) +
+  scale_fill_gradient(high = "#ffd580", low = "firebrick2", limits = c(maxq2, 0), na.value = "grey90") +
+
+  # Q3
+  new_scale_fill() +
+  geom_point(data = q3,
+             aes(fill = deltaEtEh, size = variantCount), color = "black", shape = 21, stroke = 0.2) +
+  scale_fill_gradient(low = "#7ED6B7", high = "#1831F5", limits = c(0, 5000), na.value = "grey90") +
+
+  # Q4
+  new_scale_fill() +
+  geom_point(data = q4,
+             aes(fill = deltaEtEh, size = variantCount), color = "black", shape = 21, stroke = 0.2) +
+  scale_fill_gradient(low = "#7E53E6", high = "#D8BFD8", limits = c(maxq4, 0), na.value = "grey90") +
+
+  # Labels for Q1 and Q4
+  geom_text(data = q1Label, aes(label = Symbol), size = 3, vjust = -1, check_overlap = TRUE) +
+  geom_text(data = q4Label, aes(label = Symbol), size = 3, vjust = -1, check_overlap = TRUE) +
+  scale_size(range = c(1,10)) +
+
+  theme_minimal() +
+  labs(x = "Purity Correlation", y = "Median eT - Median eH")
+
+pdf(paste0(plotDir, "/volcano/", fprefix, "_deltaEtEh_purity_labelled200.pdf"), height=10, width=10)
+print(medianPlot)
+dev.off()
+```
+
+## 8.3 With marker genes
+### 8.3.1 Candidate gene lists
+```{r}
+# Filter points with abs(deltaEtEh) > 500 in Q1 and Q4
+
+# q1 = tumor
+q1Label100 <- subset(q1, abs(deltaEtEh) > 100)
+
+# q4 = host
+q4Label100 <- subset(q4, abs(deltaEtEh) > 100)
+```
+
+### 8.3.2 CTVT
+#### 8.3.2.1 Filter genes 
+Testing positive genes from FAM with high purity correlations. 
+```{r}
+famWilcox <- read.xlsx(paste0(resDir, "findAllMarkers/", fprefix, "_seuratObjNoBad_famWilcox.xlsx"))
+
+famWilcoxDegs <- famWilcox %>%
+  filter(p_val_adj < 0.05 & avg_log2FC > 2.5 & cluster == "CTVT") 
+
+intersecting <- intersect(famWilcoxDegs$gene, q1Label100$Symbol) ### 93 genes intersecting
+
+# intersectingStrict <- intersect(famWilcoxDegs$gene, tumorSpecDfStrict$Symbol) ### None overlap. 
+```
+
+#### 8.3.2.2 Merge with purity correlations and eT
+```{r}
+mergedFamWilcoxDegsCTVT <- famWilcox %>%
+  filter(p_val_adj < 0.01 & avg_log2FC > 2.5 & cluster=="CTVT") %>%
+  filter(gene %in% q1Label100$Symbol) %>%
+  dplyr::rename("Symbol"="gene") %>%
+  left_join(q1Label100) %>%
+  mutate("Annotation"=paste0("q1Label100_CTVTDeg")) 
+
+write.xlsx(mergedFamWilcoxDegsCTVT,
+           paste0(resDir, fprefix, "_mergedFamWilcoxDegs_q1100TumorGenes.xlsx"))
+
+ctvtSet <- mergedFamWilcoxDegsCTVT$Symbol
+```
+#### 8.3.2.3 Feature plots
+Merged and split by sample
+```{r}
+for(g in intersecting){
+
+  feat <- FeaturePlot(seuratObjNoBad,
+                      reduction = "TSNE_log_corrected",
+                      features=g) +
+
+    ggtitle(paste0("q1 + Wilcox DEG - ", g))
+
+  featSamp <- FeaturePlot(seuratObjNoBad,
+                          reduction = "TSNE_log_corrected",
+                          features=g,
+                          split.by = "Sample")
+
+  pdf(paste0("~/gitClones/01_Deconvolution/03_Deconvolution_CTVT/034_Plots/", fprefix, "/featureSeurat/tumorSpecificIntersect/03_Deconvolution_CTVT_q1label100_famWilcoxDegs_", g,"_expression.pdf"),
+      height=4,
+      width=4)
+
+  print(feat)
+
+  dev.off()
+
+
+
+  pdf(paste0("~/gitClones/01_Deconvolution/03_Deconvolution_CTVT/034_Plots/", fprefix,  "/featureSeurat/tumorSpecificIntersect/03_Deconvolution_CTVT_q1label100_famWilcoxDegs_", g,"_expressionBySample.pdf"),
+      height=4,
+      width=14)
+
+  print(featSamp)
+
+  dev.off()
+
+}
+```
+
+### 8.3.2 Host specific genes
+#### 8.3.2.1 Feature plots
+```{r}
+###### 2.1.4 Loop through NON CTVT FAM DEG's --> check against genetic deconv list. Test positive genes first.
+for(ctype in unique(famWilcox$cluster)){
+  if(ctype=="CTVT"){
+    next
+  }
+
+  tempFamWilcoxDegs <- famWilcox %>%
+    filter(p_val_adj < 0.05 & avg_log2FC > 2.5 & cluster == ctype)
+
+  tempIntersecting <- intersect(tempFamWilcoxDegs$gene, q4Label100$Symbol)
+
+  print(paste0("Cell type: ", ctype, " - Intersecting: ", length(tempIntersecting)))
+
+  tempPlotDir <- paste0("hostSpecificIntersect", ctype)
+
+  for(tg in tempIntersecting){
+
+    feat <- FeaturePlot(seuratObjNoBad,
+                        reduction = "TSNE_log_corrected",
+                        features=tg) +
+
+      ggtitle(paste0("q4Label100 + ", ctype, " Wilcox DEG - ", tg))
+
+    featSamp <- FeaturePlot(seuratObjNoBad,
+                            reduction = "TSNE_log_corrected",
+                            features=tg,
+                            split.by = "Sample")
+
+    pdf(paste0("~/gitClones/01_Deconvolution/03_Deconvolution_CTVT/034_Plots/", fprefix, "/featureSeurat/", tempPlotDir, "/03_Deconvolution_CTVT_q4Label100_famWilcoxDegs_", tg,"_expression.pdf"),
+        height=4,
+        width=4)
+
+    print(feat)
+
+    dev.off()
+
+
+
+    pdf(paste0("~/gitClones/01_Deconvolution/03_Deconvolution_CTVT/034_Plots/", fprefix, "/featureSeurat/", tempPlotDir, "/03_Deconvolution_CTVT_q4Label100_famWilcoxDegs_", tg,"_expressionBySample.pdf"),
+        height=4,
+        width=14)
+
+    print(featSamp)
+
+    dev.off()
+
+  }
+
+}
+```
+
+### 6.4.2 Merge with purity correlations
+```{r}
+# mergedFamWilcoxDegsAdrian <- data.frame()
+# 
+# 
+# for(ctype in unique(famWilcox$cluster)){
+#   if(ctype=="CTVT"){
+#     next
+#   }
+#   
+#   temp <- famWilcox %>%
+#     filter(p_val_adj < 0.05 & avg_log2FC > 2.5& cluster==ctype) %>%
+#     filter(gene %in% q4Label100$Symbol) %>%
+#     dplyr::rename("Symbol"="gene") %>%
+#     left_join(q4Label100) %>%
+#     mutate("Annotation"=paste0("q4Label100_", ctype, "Deg"))
+#   
+#   mergedFamWilcoxDegsAdrian <- rbind(mergedFamWilcoxDegsAdrian, temp)
+#   
+# }
+# 
+# allDegs <- rbind(mergedFamWilcoxDegsAdrian, mergedFamWilcoxDegsCTVT)
+# 
+# write.xlsx(allDegs,
+#            paste0(resDir, fprefix, "_mergedFamWilcoxDegs_q1q4_100Genes.xlsx"))
+
+
+allDegs <- read.xlsx(paste0(resDir, fprefix, "_mergedFamWilcoxDegs_q1q4_100Genes.xlsx"))
+
+```
+
+
+## 8.5 Candidate gene lists
+### 8.5.1 Gene sets
+Includes marker genes shared by different clusters. 
+```{r}
+print(nrow(allDegs %>% filter(cluster == "CTVT" & purity_correlation > 0)))
+candCTVT <- allDegs %>% 
+  filter(cluster == "CTVT" & purity_correlation > -0) %>% 
+  dplyr::select(Symbol, medianEh, purity_correlation, avg_log2FC)
+
+ctvtSet <- candCTVT$Symbol
+
+# 17 genes are negative correlated with tumor purity and a Bcell DEG
+print(nrow(allDegs %>% filter(cluster == "Bcells" & purity_correlation < 0)))
+candBcell <- allDegs %>% 
+  filter(cluster == "Bcells" & purity_correlation < -0) %>% 
+  dplyr::select(Symbol, medianEh, purity_correlation, avg_log2FC)
+
+bcellSet <- candBcell$Symbol
+
+# 36 genes are negatively correlated with tumor purity and a Myeloid DEG
+print(nrow(allDegs %>% filter(cluster == "Myeloid" & purity_correlation < 0)))
+candMyeloid <- allDegs %>% 
+  filter(cluster == "Myeloid" & purity_correlation < -0) %>% 
+  dplyr::select(Symbol, medianEh, purity_correlation, avg_log2FC)
+
+myeloidSet <- candMyeloid$Symbol
+
+# 32 genes are negatively correlated with tumor purity and a Myeloid DEG
+print(nrow(allDegs %>% filter(cluster == "CAF.Endo" & purity_correlation < 0)))
+candCAFEndo <- allDegs %>% 
+  filter(cluster == "CAF.Endo" & purity_correlation < -0) %>% 
+  dplyr::select(Symbol, medianEh, purity_correlation, avg_log2FC)
+
+cafendoSet <- candCAFEndo$Symbol
+
+
+# 21 genes are negatively correlated with tumor purity and a Plasma DEG
+print(nrow(allDegs %>% filter(cluster == "Plasma" & purity_correlation < 0)))
+candPlasma <- allDegs %>% 
+  filter(cluster == "Plasma" & purity_correlation < -0) %>% 
+  dplyr::select(Symbol, medianEh, purity_correlation, avg_log2FC)
+
+plasmaSet <- candPlasma$Symbol
+
+# 9 genes are negatively correlated with tumor purity and a Tcells DEG
+print(nrow(allDegs %>% filter(cluster == "Tcells" & purity_correlation < 0)))
+candTcells <- allDegs %>% 
+  filter(cluster == "Tcells" & purity_correlation < -0) %>% 
+  dplyr::select(Symbol, medianEh, purity_correlation, avg_log2FC)
+
+tcellSet <- candTcells$Symbol
+```
+
+### 8.5.2 Upset
+```{r}
+geneSets <- list("ctvt"=ctvtSet,
+             "bcell"=bcellSet,
+             "myeloid"=myeloidSet,
+             "caf.endo"=cafendoSet,
+             "plasma"=plasmaSet,
+             "tcell"=tcellSet)
+
+
+genes <- sort(unique(unlist(geneSets)))
+
+sets <- t(+sapply(geneSets, "%in%", x = genes)) %>%
+  t() %>%
+  as.data.frame()
+
+rownames(sets) <- genes
+
+sets <- sets %>%
+  rownames_to_column("Gene")
+
+upsetPlot <- upset(sets,
+      sets = c("ctvt", "bcell", "myeloid", "caf.endo", "plasma", "tcell"),
+      # keep.order = TRUE,
+      nintersects = NA, # show all intersections
+      order.by = "freq") # optional, could be degree or freq
+
+upsetPlot <- upset(
+  sets,
+  sets = c("ctvt", "caf.endo", "myeloid", "plasma", "tcell", "bcell"),
+  keep.order = TRUE,
+  nintersects = NA,
+  sets.bar.color = c(
+    ctvt = "#E41A1C",
+    caf.endo = "gold",
+    myeloid = "#4DAF4A",
+    plasma = "skyblue",
+    tcell = "cornflowerblue",
+    bcell = "pink"
+  )
+)
+
+
+uniqueGenes <- sets %>%
+  column_to_rownames("Gene") %>%
+  mutate(rowsum = rowSums(.)) %>%
+  filter(rowsum==1)
+
+
+upsetData <- sets %>%
+  unite(col = "intersection", -c("Gene"), sep = "") %>%
+  group_by(intersection) %>%
+  summarise(list = list(Gene)) %>%
+  mutate(list = setNames(list, intersection)) %>%
+  pull(list)
+
+write.xlsx(sets, paste0(resDir, fprefix, "_geneCorrelations_famDegs.xlsx"))
+
+pdf(paste0(plotDir, "/upset/", fprefix, "_q1q4Genes_famDegs_intersection.pdf"), 
+    height=6, 
+    width=8)
+print(upsetPlot)
+dev.off()
+```
+
+### 8.5.3 Unique gene sets
+```{r}
+uniqueGenesFinal <- uniqueGenes %>%
+  dplyr::select(-rowsum)
+
+# Initialize a list to store unique genes per cell type
+uniqueGeneLists <- list()
+
+# Loop through each column (cell type)
+for (cell_type in colnames(uniqueGenesFinal)) {
+  # Identify genes that are only expressed (1) in this cell type
+  unique_genes <- rownames(uniqueGenesFinal)[
+    uniqueGenesFinal[, cell_type] == 1 & rowSums(uniqueGenesFinal) == 1
+  ]
+  
+  # Store in the list
+  uniqueGeneLists[[cell_type]] <- unique_genes
+}
+
+# allDegs$Unique <- ifelse(allDegs$Symbol %in% rownames(uniqueGenesFinal), "Unique", "Shared")
+
+
+### Create master table to merge with curated gene list (see next chunk).
+
+masterMarkerGenes <- allDegs %>%
+  mutate(Unique=ifelse(Symbol %in% rownames(uniqueGenesFinal), "Unique", "Shared"), 
+         Type = ifelse(cluster == "CTVT", 
+                       "100q1Wilcox", 
+                       "100q4Wilcox"),
+         
+         corrQuad = ifelse(cluster == "CTVT", 
+                       "q1", 
+                       "q4"))
+```
+
+
+### 8.5.4 Manually curate
+Get famWilcox and gene correlation information for curated (human) gene list. Subject to changing. 
+```{r}
+immune_set <- list(
+  `Bcells` = c("MS4A1", "PAX5", "BANK1", "BCL11A"),
+  `Tcells` = c("CD3E", "CD3G", "CD4", "CD8A", "ICOS", "CTLA4"),
+  # `MHCI` = c("TAP1", "B2M", "DLA-88", "DLA-64"),
+  # `MHCII`= c("DLA-DRA", "DLA-DQA1", "DLA-DMA"),
+  `Plasma` = c("JCHAIN", "IRF4", "POU2AF1"),
+  `Myeloid` = c("LYZ", "CD80", "CD86", "IL18", "MRC1", "GAB2"),
+  `CAF.Endo`= c("FAP", "CALD1", "COL6A3", "LAMA4", "ADGRL4", "VWF", "PDGFD"),
+  `CTVT` = c("LSAMP", "DPP10", "PDE1C", "PDGFC", "DLC1", "EPO", "MS4A2", "KIT") 
+)
+
+for (set in 1:length(immune_set)){
+  s <- immune_set[set]
+  tempName <- names(s)
+  
+  ### Filter genes from list not assigned to cluster of interest in find all markers results. Same for genes not included in Adrian's table?
+  
+  tempWilcox <- famWilcox %>%
+    filter(cluster==tempName & gene %in% s[[1]] & gene %in% tempPlotDf$Symbol)
+  
+  print(paste0(setdiff(s[[1]], tempWilcox$gene), " excluded from manual list because not found in FAM results for ", tempName, "."))
+  
+  print(paste0(setdiff(s[[1]], tempPlotDf$Symbol), " excluded from manual list because not found in Adrian's table. "))
+  
+  tempCorr <- tempPlotDf %>% 
+    filter(Symbol %in% tempWilcox$gene) %>%
+    mutate(corrQuad = ifelse(Symbol %in% q1$Symbol, "q1",
+                             ifelse(Symbol %in% q2$Symbol, "q2", ifelse(Symbol %in% q3$Symbol, "q3", "q4"))))
+  
+  tempDf <- cbind(tempWilcox, 
+                  tempCorr) %>%
+    mutate(Unique = NA,
+           
+           Annotation =paste0(corrQuad, "Manual_", tempName, 
+                         ifelse(p_val_adj<0.05 & avg_log2FC >2.5, "Deg", "")),
+           Type = paste0(corrQuad, "Manual"))
+  
+  masterMarkerGenes <- rbind(masterMarkerGenes, 
+                             tempDf[,colnames(masterMarkerGenes)])
+}
+
+### Update shared column!
+table(masterMarkerGenes$cluster)
+
+
+```
+
+### 8.5.5 Update unique gene sets
+```{r}
+geneSets <- list("ctvt"=masterMarkerGenes[which(masterMarkerGenes$cluster=="CTVT") , ]$Symbol,
+             "bcell"=masterMarkerGenes[which(masterMarkerGenes$cluster=="Bcells") , ]$Symbol,
+             "myeloid"=masterMarkerGenes[which(masterMarkerGenes$cluster=="Myeloid") , ]$Symbol,
+             "caf.endo"=masterMarkerGenes[which(masterMarkerGenes$cluster=="CAF.Endo") , ]$Symbol,
+             "plasma"=masterMarkerGenes[which(masterMarkerGenes$cluster=="Plasma") , ]$Symbol,
+             "tcell"=masterMarkerGenes[which(masterMarkerGenes$cluster=="Tcells") , ]$Symbol)
+
+
+genes <- sort(unique(unlist(geneSets)))
+
+sets <- t(+sapply(geneSets, "%in%", x = genes)) %>%
+  t() %>%
+  as.data.frame()
+
+rownames(sets) <- genes
+
+sets <- sets %>%
+  rownames_to_column("Gene")
+
+upsetPlot <- upset(sets,
+      sets = c("ctvt", "bcell", "myeloid", "caf.endo", "plasma", "tcell"),
+      # keep.order = TRUE,
+      nintersects = NA, # show all intersections
+      order.by = "freq") # optional, could be degree or freq
+
+upsetPlot <- upset(
+  sets,
+  sets = c("ctvt", "caf.endo", "myeloid", "plasma", "tcell", "bcell"),
+  keep.order = TRUE,
+  nintersects = NA,
+  sets.bar.color = c(
+    ctvt = "#E41A1C",
+    caf.endo = "gold",
+    myeloid = "#4DAF4A",
+    plasma = "skyblue",
+    tcell = "cornflowerblue",
+    bcell = "pink"
+  )
+)
+
+
+uniqueGenes <- sets %>%
+  column_to_rownames("Gene") %>%
+  mutate(rowsum = rowSums(.)) %>%
+  filter(rowsum==1)
+
+
+upsetData <- sets %>%
+  unite(col = "intersection", -c("Gene"), sep = "") %>%
+  group_by(intersection) %>%
+  summarise(list = list(Gene)) %>%
+  mutate(list = setNames(list, intersection)) %>%
+  pull(list)
+
+write.xlsx(sets, paste0(resDir, fprefix, "_masterMarkerGenes.xlsx"))
+
+pdf(paste0(plotDir, "/upset/", fprefix, "_masterMarkerGenes_intersection.pdf"), 
+    height=6, 
+    width=8)
+print(upsetPlot)
+dev.off()
+
+
+uniqueGenesFinal <- uniqueGenes %>%
+  dplyr::select(-rowsum)
+
+# Initialize a list to store unique genes per cell type
+uniqueGeneLists <- list()
+
+# Loop through each column (cell type)
+for (cell_type in colnames(uniqueGenesFinal)) {
+  # Identify genes that are only expressed (1) in this cell type
+  unique_genes <- rownames(uniqueGenesFinal)[
+    uniqueGenesFinal[, cell_type] == 1 & rowSums(uniqueGenesFinal) == 1
+  ]
+  
+  # Store in the list
+  uniqueGeneLists[[cell_type]] <- unique_genes
+}
+
+masterMarkerGenes <- masterMarkerGenes %>%
+  mutate(Unique=ifelse(Symbol %in% rownames(uniqueGenesFinal), "Unique", "Shared"))
+
+### None of the master marker genes added by manual are overlapping. 
+
+write.xlsx(masterMarkerGenes, paste0(resDir, fprefix, "_masterMarkerGenes.xlsx"))
+
+table(masterMarkerGenes$Symbol) # Some from manual overlap with fam/corr degs. 
+```
+
+
+

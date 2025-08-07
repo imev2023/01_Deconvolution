@@ -1,0 +1,466 @@
+---
+title: "03_Deconvolution_CTVT_pseudobulk"
+output: html_document
+---
+
+# 0 Environment
+## 0.1 Packages
+### 0.1.1 Installs
+```{r echo=F, message=F, warning=FALSE}
+# if (!requireNamespace("devtools", quietly = TRUE)) {
+#    install.packages("devtools")
+# }
+# devtools::install_github("Danko-Lab/BayesPrism/BayesPrism")
+# install.packages("paletteer")
+# Developmental version
+# devtools::install_github("awhstin/awtools")
+# install.packages("ggsci")
+# install.packages("ggnewscale")
+# install.packages('smplot2')
+
+
+```
+### 0.1.1 Library
+```{r echo=F, message=F, warning=FALSE}
+set.seed(123)
+library(tidyverse)
+library(openxlsx)
+library(SingleCellExperiment)
+setClassUnion("ExpData", c("matrix", "SummarizedExperiment"))
+# setClassUnion("characterORNULL", c("character", "NULL"))
+# setClassUnion("DataTableORNULL", c("DataTable", "NULL"))
+library(DESeq2)
+library(smplot2)
+```
+
+## 0.2 Paths
+```{r echo=F, message=FALSE, warning=FALSE}
+fprefix <- "03_Deconvolution_CTVT_pseudobulk"
+wDir <- paste0("~/gitClones/01_Deconvolution/03_Deconvolution_CTVT/")
+dataDir <- paste0(wDir, "/031_Data/")
+resDir <- paste0(wDir, "/033_Results/", fprefix, "/")
+plotDir <- paste0(wDir, "/034_Plots/", fprefix, "/")
+# dir.create(resDir)
+# dir.create(plotDir)
+```
+
+# 1 Data
+## 1.1 Single nuc
+AggregateExpression() returns log normalized counts in a matrix. 
+Of note, need to replace gene symbols with Id's once filtered on candidate genes. 
+### 1.1.1 Split by sample
+```{r}
+# obj <- readRDS(paste0(dataDir, "SCE_concat_CTVT_includingAllGenes_logCorrecDone_vstCorrecDone_ClustDone2_ManAnot.rds"))
+# 
+# assay(obj, "counts") <- as.matrix(assay(obj, "counts"))
+# assay(obj, "logcounts") <- as.matrix(assay(obj, "logcounts"))
+# seuratObj <- as.Seurat(obj, counts = "counts", data = "logcounts")
+# seuratObj
+# Idents(seuratObj) <- "manual.log.anot.fine"
+# seuratObjNoBad <- subset(seuratObj, idents = "bad", invert=TRUE)
+# table(Idents(seuratObjNoBad))
+# DimPlot(seuratObj, reduction = "TSNE_log_corrected")
+# DimPlot(seuratObjNoBad, reduction = "TSNE_log_corrected")
+# 
+# rm(obj, seuratObj)
+# gc()
+
+# saveRDS(seuratObjNoBad, paste0(dataDir, "03_Deconvolution_CTVT_seuratObjNoBad.rds"))
+
+seuratObjNoBad <- readRDS(paste0(dataDir, "03_Deconvolution_CTVT_seuratObjNoBad.rds"))
+
+rowData <- seuratObjNoBad@
+
+pb <- AggregateExpression(seuratObjNoBad, 
+                          group.by = "Sample") 
+
+# > dim(pb$originalexp)
+# [1] 15707     5
+
+# pbLogNorm <- AggregateExpression(seuratObjNoBad, 
+#                           return.seurat = T,
+#                           group.by = "Sample") 
+
+# > range(pbLogNorm@assays$originalexp$counts)
+# [1]      0 267879
+# > range(pbLogNorm@assays$originalexp$data)
+# [1] 0.000000 5.069594
+# > range(pbLogNorm@assays$originalexp$scale.data)
+# [1] -1.787700  1.788854
+
+# pbCpm <- AggregateExpression(seuratObjNoBad, 
+#                           return.seurat = T,
+#                           group.by = "Sample", 
+#                           normalization.method = "RC",
+#                           scale.factor = 1e6
+#                           ) 
+
+# > range(pbCpm@assays$originalexp$counts) ! raw counts. 
+# [1]      0 267879
+# > range(pbCpm@assays$originalexp$data)
+# [1]     0.00 15810.97
+# > range(pbCpm@assays$originalexp$scale.data)
+# [1] -1.787432  1.788854
+
+# From sNucConv
+# Transpose the matrix so that genes are columns, like in Seurat (cells as rows, genes as columns)
+# pseudo_counts <- t(as.matrix(seuratObjNoBad@assays$originalexp@counts))
+# > range(pseudo_counts)
+# [1]    0 1087
+# Normalize to counts per million (CPM)
+# pseudo_counts <- sweep(pseudo_counts, 1, rowSums(pseudo_counts), FUN = "/") * 1e6
+# 
+# range(pseudo_counts)
+
+#  0.0 438306.5
+pbCounts <- as.matrix(pb$originalexp)
+
+pseudobulkCpm <- DGEobj.utils::convertCounts(pbCounts,
+                                       unit = "CPM") 
+  
+
+# range(pbCounts)
+# range(pseudobulkCpm) --> equiv. to range(pbCpm@assays$originalexp$data)
+# [1]     0.00 15810.97
+  
+# Create the cell count matrix: rows = cell types, columns = samples
+snCellCounts <- seuratObjNoBad@meta.data %>%
+  as.data.frame() %>%
+  group_by(manual.log.anot.fine, 
+           Sample) %>%
+  summarise(cellCount = n()) %>%
+  pivot_wider(names_from = Sample, 
+              values_from = cellCount, 
+              values_fill = 0) %>%
+  column_to_rownames("manual.log.anot.fine")
+
+snCell <- colSums(snCellCounts)
+
+snCellProp <- sweep(snCellCounts, 2, snCell, FUN = '/') %>%
+  # t() %>%
+  as.data.frame() %>%
+  rownames_to_column("cellType") %>%
+  pivot_longer(cols=-cellType, names_to = "Sample", values_to = "groundTruth") 
+
+all.equal
+```
+### 1.1.1 Split by sample + cell type
+```{r}
+pbSC <- AggregateExpression(seuratObjNoBad, 
+                          group.by = c("Sample", "manual.log.anot.fine")) 
+
+pbCountsSC <- as.matrix(pbSC$originalexp)
+
+pseudobulkCpmSC <- DGEobj.utils::convertCounts(pbCountsSC,
+                                       unit = "CPM") 
+```
+## 1.2 Bulk
+```{r}
+bulk <- readRDS(paste0(dataDir, "01_Deconvolution_matchedBulkMatrixCTVT_bulkCountsFinal.rds"))
+bulkMeta <- read.xlsx(paste0(dataDir, "01_Deconvolution_matchedBulkMatrixCTVT_bulkCountsFinal_metadata.xlsx"))
+
+bulkCpm <- DGEobj.utils::convertCounts(bulk, 
+                                       unit = "CPM")
+
+# bulkCpmLog <- DGEobj.utils::convertCounts(bulk, 
+#                                        unit = "CPM",
+#                                        log = T)
+# 
+# bulkCpmNorm <- DGEobj.utils::convertCounts(bulk, 
+#                                        unit = "CPM",
+#                                        normalize = T) # Takes EdgeR calcNormFactors
+# 
+# bulkCpmLogNorm <- DGEobj.utils::convertCounts(bulk, 
+#                                        unit = "CPM",
+#                                        normalize = T,
+#                                        log=T)
+
+# > range(bulkCpm)
+# [1]      0.0 240593.4
+# > range(bulkCpmLog)
+# [1] -7.57210 17.87624
+# > range(bulkCpmNorm)
+# [1]      0 801318
+# > range(bulkCpmLogNorm)
+# [1] -7.577317 19.612015
+
+# From sNucConv
+# bulk_counts = apply(bulk, 
+#                     MARGIN = 2,
+#                     FUN=function(x) (x/sum(x))*1000000)
+# > range(bulk_counts)
+# [1]      0.0 240593.4 --> matches CPM. 
+```
+
+## 1.3 Candidate marker genes
+```{r}
+adrianq1q4100 <- read.xlsx("~/gitClones/01_Deconvolution/03_Deconvolution_CTVT/033_Results/03_Deconvolution_CTVT_geneCorrelations/03_Deconvolution_CTVT_geneCorrelations_mergedFamWilcoxDegs_q1q4_100Genes.xlsx") 
+
+goi <- unique(adrianq1q4100$Symbol)
+idoi <- unique(adrianq1q4100$GeneID)
+```
+
+## 1.4 Tidy dataframes
+### 1.4.1 Bulk cell only. 
+Start with bulkCell, then add bulkNuc. 
+```{r}
+pseudobulkGoi <- pseudobulkCpm[goi,]
+
+colnames(pseudobulkGoi) <- str_replace(colnames(pseudobulkGoi), "g", "")
+
+colnames(bulkCpm) <- str_replace(colnames(bulkCpm), "_2", "") 
+colnames(bulkCpm) <- str_replace(colnames(bulkCpm), "_p", "")
+intersect(colnames(bulkCpm), colnames(pseudobulkGoi))
+  
+  
+bulkGoi <- bulkCpm[idoi, colnames(pseudobulkGoi)] %>%
+  as.data.frame() %>%
+  rownames_to_column("GeneID") %>%
+  left_join(adrianq1q4100 %>% select("GeneID", "Symbol") %>% distinct()) %>%
+  column_to_rownames("Symbol") %>%
+  select(-GeneID)
+
+all.equal(colnames(pseudobulkGoi), colnames(bulkGoi))
+
+
+# Split by cluster won't match anymore 
+pseudobulkGoiSC <- pseudobulkCpmSC[goi,]
+
+colnames(pseudobulkGoiSC) <- str_replace(colnames(pseudobulkGoiSC), "g", "")
+
+colnames(bulkCpm) <- str_replace(colnames(bulkCpm), "_2", "") 
+colnames(bulkCpm) <- str_replace(colnames(bulkCpm), "_p", "")
+```
+
+### 1.4.2 Bulk nuc
+This could help us understand if bulk nuc captures sn expression better! We could use the difference in bulk cell to bulk nuc as a corrective factor. 
+
+# 2 Correlations
+Loop through marker genes of interest, compute correlation between pb and bulk sample expression. 
+## 2.1 Bulk cell 
+### 2.1.1 Pb by Sample
+From Correlations.R in sNuConv package
+```{r}
+df_corr_bc <- data.frame()
+
+for (gene in rownames(bulkGoi)) {
+  true_vec = unlist(bulkGoi[gene,] %>% as.vector())
+  pseudo_vec = pseudobulkGoi[gene,] %>% as.vector()
+  names(pseudo_vec) <- colnames(pseudobulkGoi)
+
+  gene_cor = cor(true_vec, pseudo_vec, method = "pearson")
+  # y ~ x
+  gene_lm = lm(true_vec ~ pseudo_vec)
+  new_gene_df = data.frame('Gene'=gene, 'Correlation'=gene_cor, 'abs_cor'=abs(gene_cor),
+                           'Slope'=gene_lm$coefficients[2], 'Intercept'=gene_lm$coefficients[1])
+
+  df_corr_bc = rbind(df_corr_bc, new_gene_df)
+
+}
+
+rownames(df_corr_bc) = df_corr_bc[,'Gene']
+
+df_corr_bc <- df_corr_bc[!is.na(df_corr_bc$abs_cor),] %>%
+  as.data.frame()
+
+write.xlsx(df_corr_bc, paste0(resDir, fprefix, "_dfCorrBc.xlsx"))
+```
+### 2.1.2 Pb by Sample+Celltype
+## 2.2 Plot
+Plot all candidate gene SETS on same axes.
+x-axis = pseudobulk
+y-axis = bulk
+size = percentage sn cell type in that sample. (ideally higher expression of the gene = more of that cell type.)
+line = regression
+
+maybe add a negative control? 
+
+### 2.2.1 Bulk cell 
+Loop through candidate marker set per cell type. 
+#### 2.2.1.1 Scatter plot per gene (pb by Sample)
+Add size as percentage of cell type in that sample (sn ground truth.)
+```{r}
+scatterDir <- paste0(plotDir, "scatter/")
+dir.create(scatterDir)
+
+cellTypes <- unique(adrianq1q4100$cluster)
+
+for (ctype in cellTypes){
+  temp <- adrianq1q4100 %>%
+    filter(cluster == ctype)
+  
+  tempScatterDir <- paste0(scatterDir, ctype, "/")
+  dir.create(tempScatterDir)
+  
+  
+  tempCorr <- df_corr_bc %>%
+    filter(Gene %in% temp$Symbol) 
+  
+  tempPb <- pseudobulkGoi[temp$Symbol, ] %>%
+    as.data.frame() %>%
+    rownames_to_column("Gene") %>%
+    pivot_longer(cols = -Gene, names_to = "Sample", values_to = "pbCPM")
+  
+  tempBulk <- bulkGoi[temp$Symbol, ] %>%
+    as.data.frame() %>%
+    rownames_to_column("Gene") %>%
+    pivot_longer(cols = -Gene, names_to = "Sample", values_to = "bulkCPM") 
+  
+  # Join by gene sample so that we have the pseudobulk and bulk CPM. 
+  tempPlotDf <- tempPb %>%
+    left_join(tempBulk) %>%
+    mutate(l2PbCpm = log2(pbCPM),
+           l2BulkCpm = log2(bulkCPM))
+  
+  tempGround <- snCellProp %>%
+    filter(cellType==ctype)
+  
+  
+  # Combined scatter plot
+  
+  
+  # Scatter plot per gene 
+  
+  for (gene in unique(tempPlotDf$Gene)){
+ 
+    test <- tempPlotDf %>%
+      # subjects = gene, we can add condition = bc/bn after.
+      filter(Gene == gene) %>%
+      left_join(tempGround)
+  
+    # y ~ x
+    res <- lm(  test$bulkCPM ~ test$pbCPM)
+    summary(res)
+  
+    # resLog <- lm(test$l2PbCpm ~ test$l2BulkCpm)
+    # summary(resLog) Use log for plotting, not corr. Potentially use lognorm values from above instead.
+    # lm = y ~ x.
+    # test %>% ggplot(aes(x = pbCPM, y = bulkCPM)) +
+    # geom_point() +
+    # geom_abline(slope = res$coefficients[2], intercept = res$coefficients[1])
+  
+    y_int <- data.frame(pbCPM = 0, bulkCPM = res$coefficients[[1]])
+  
+    tempPlot <- test %>% ggplot(aes(x = pbCPM, y = bulkCPM)) +
+      geom_point(aes(size=100*groundTruth, color=Sample)) +
+      geom_abline(
+        slope = res$coefficients[[2]],
+        intercept = res$coefficients[[1]]
+      ) +
+      # geom_point(data = y_int, color = sm_color("red"), size = 2) +
+      sm_hvgrid() +
+      annotate("text",
+        x = 50, y = 100, size = 3.5,
+        label = paste("Slope =", round(res$coefficients[[2]], 2))
+      ) +
+      annotate("text",
+        x =50, y = 0.9, size = 3.5,
+        label = paste("Intercept =", round(res$coefficients[[1]], 2))
+      ) +
+    scale_fill_brewer(palette = "Set3") +
+      scale_size(range = c(1,5)) +
+      ggtitle(paste0(ctype, " Marker Gene - ", gene))
+    
+    
+     pdf(paste0(tempScatterDir, fprefix, "_q1q4100_", ctype, "_", gene, "_noIntercept.pdf"), 
+         width=5, height=5)
+     print(tempPlot)
+     dev.off()
+  }
+}
+```
+
+#### 2.2.1.2 Scatter plot per gene (pb by Sample+Celltype)
+Add size as percentage of cell type in that sample (sn ground truth.)
+```{r}
+scatterDir <- paste0(plotDir, "scatter/")
+dir.create(scatterDir)
+
+cellTypes <- unique(adrianq1q4100$cluster)
+
+for (ctype in cellTypes){
+  temp <- adrianq1q4100 %>%
+    filter(cluster == ctype)
+  
+  tempScatterDir <- paste0(scatterDir, ctype, "/")
+  dir.create(tempScatterDir)
+
+  tempPb <- pseudobulkGoiSC[temp$Symbol,] %>%
+    as.data.frame() %>%
+    select(contains(ctype)) %>%
+    rownames_to_column("Gene") %>%
+    pivot_longer(cols = -Gene, names_to = "Sample", values_to = "pbCPM") 
+  
+  tempPb$Sample <- str_replace(tempPb$Sample, paste0("_", ctype), "")
+  
+  tempBulk <- bulkGoi[temp$Symbol, ] %>%
+    as.data.frame() %>%
+    rownames_to_column("Gene") %>%
+    pivot_longer(cols = -Gene, names_to = "Sample", values_to = "bulkCPM") 
+  
+  # Join by gene sample so that we have the pseudobulk and bulk CPM. 
+  tempPlotDf <- tempPb %>%
+    left_join(tempBulk) %>%
+    mutate(l2PbCpm = log2(pbCPM),
+           l2BulkCpm = log2(bulkCPM))
+  
+  tempGround <- snCellProp %>%
+    filter(cellType==ctype)
+  
+  
+  # Combined scatter plot
+  
+  
+  # Scatter plot per gene 
+  
+  for (gene in unique(tempPlotDf$Gene)){
+ 
+    test <- tempPlotDf %>%
+      # subjects = gene, we can add condition = bc/bn after.
+      filter(Gene == gene) %>%
+      left_join(tempGround)
+  
+    # y ~ x
+    res <- lm(  test$bulkCPM ~ test$pbCPM)
+    summary(res)
+  
+    # resLog <- lm(test$l2PbCpm ~ test$l2BulkCpm)
+    # summary(resLog) Use log for plotting, not corr. Potentially use lognorm values from above instead.
+    # lm = y ~ x.
+    # test %>% ggplot(aes(x = pbCPM, y = bulkCPM)) +
+    # geom_point() +
+    # geom_abline(slope = res$coefficients[2], intercept = res$coefficients[1])
+  
+    y_int <- data.frame(pbCPM = 0, bulkCPM = res$coefficients[[1]])
+  
+    tempPlot <- test %>% ggplot(aes(x = pbCPM, y = bulkCPM)) +
+      geom_point(aes(size=100*groundTruth, color=Sample)) +
+      geom_abline(
+        slope = res$coefficients[[2]],
+        intercept = res$coefficients[[1]]
+      ) +
+      # geom_point(data = y_int, color = sm_color("red"), size = 2) +
+      sm_hvgrid() +
+      annotate("text",
+        x = 50, y = 100, size = 3.5,
+        label = paste("Slope =", round(res$coefficients[[2]], 2))
+      ) +
+      annotate("text",
+        x =50, y = 0.9, size = 3.5,
+        label = paste("Intercept =", round(res$coefficients[[1]], 2))
+      ) +
+    scale_fill_brewer(palette = "Set3") +
+      scale_size(range = c(1,5)) +
+      ggtitle(paste0(ctype, " Marker Gene - ", gene))
+    
+    
+     pdf(paste0(tempScatterDir, fprefix, "_q1q4100_", ctype, "_", gene, "_sampleCelltype.pdf"), 
+         width=5, height=5)
+     print(tempPlot)
+     dev.off()
+  }
+}
+```
+#### 2.2.1.2 Volcano plot
+Use slope and R per gene, paste cell type and symbol for overlapping genes. 
+These values will change depending on the Sample+Celltype combination. 

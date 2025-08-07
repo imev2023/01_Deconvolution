@@ -1,0 +1,2580 @@
+---
+title: "01_Deconvolution_bayesPrism"
+author: "IMEV2"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+# 0 Environment
+## 0.1 Packages
+### 0.1.1 Installs
+```{r echo=F, message=F, warning=FALSE}
+# if (!requireNamespace("devtools", quietly = TRUE)) {
+#    install.packages("devtools")
+# }
+# devtools::install_github("Danko-Lab/BayesPrism/BayesPrism")
+```
+### 0.1.1 Library
+```{r echo=F, message=F, warning=FALSE}
+set.seed(123)
+library(BayesPrism)
+library(tidyverse)
+library(SingleCellExperiment)
+library(openxlsx)
+library(patchwork)
+library(pheatmap)
+library(ComplexHeatmap)
+library(circlize)
+setClassUnion("ExpData", c("matrix", "SummarizedExperiment"))
+```
+
+## 0.2 Paths
+```{r echo=F, message=FALSE, warning=FALSE}
+fprefix <- "03_Deconvolution_CTVT_bayesPrism"
+wDir <- paste0("~/gitClones/01_Deconvolution/03_Deconvolution_CTVT/")
+dataDir <- paste0(wDir, "/031_Data/")
+resDir <- paste0(wDir, "/033_Results/", fprefix, "/")
+plotDir <- paste0(wDir, "/034_Plots/", fprefix, "/")
+
+dir.create(resDir)
+dir.create(plotDir)
+
+scriptDir <- paste0(wDir, "/032_Scripts/03_Deconvolution_CTVT_deconBenchmark/")
+source(paste0(scriptDir, "03_Deconvolution_CTVT_deconBenchmark_metrics.R"))
+```
+
+# 1.0 Inputs
+BayesPrism will take intersect of genes in reference and bulk samples.
+Use unnormalized and untransformed count data.
+
+## 1.1 Genes of interest
+Mixed curated and non-curated list. 
+```{r}
+masterMarkerGenes <- read.xlsx("~/gitClones/01_Deconvolution/03_Deconvolution_CTVT/033_Results/03_Deconvolution_CTVT_geneCorrelations/03_Deconvolution_CTVT_geneCorrelations_masterMarkerGenes.xlsx")
+
+topCAFEndo <- masterMarkerGenes %>%
+  filter(cluster == "CAF.Endo") %>%
+  filter(Unique=="Unique") %>%
+  arrange(deltaEtEh) 
+
+topMyeloid <- masterMarkerGenes %>%
+  filter(cluster == "Myeloid") %>%
+  filter(Unique=="Unique") %>%
+  arrange(deltaEtEh) 
+  
+geneDict <- masterMarkerGenes %>%
+  select(Symbol, GeneID) %>%
+  # Take distinct as marker genes may overlap clusters.
+  distinct()
+
+uniqueGeneDict <- masterMarkerGenes %>%
+  filter(Unique=="Unique") %>%
+  select(Symbol, GeneID) %>%
+  # Take distinct as marker genes may overlap clusters.
+  distinct()
+
+table(masterMarkerGenes$cluster)
+
+# 
+#   Bcells CAF.Endo     CTVT  Myeloid   Plasma   Tcells 
+#       12       97       15       72       15        6 
+
+
+curated <- masterMarkerGenes %>%
+  filter(cluster %in% c("Bcells",
+                        "CTVT",
+                        "Plasma",
+                        "Tcells")|
+           Symbol %in% c(topCAFEndo[1:20,]$Symbol,
+                         topMyeloid[1:20,]$Symbol))
+
+table(curated$cluster)
+
+curatedDict <- curated %>%
+  select(Symbol, GeneID) %>%
+  # Take distinct as marker genes may overlap clusters.
+  distinct()
+
+  # Bcells CAF.Endo     CTVT  Myeloid   Plasma   Tcells 
+  #     12       20       15       20       15        6 
+
+
+curatedUnique <- masterMarkerGenes %>%
+  filter(cluster %in% c("Bcells",
+                        "CTVT",
+                        "Plasma",
+                        "Tcells")|
+           Symbol %in% c(topCAFEndo[1:20,]$Symbol,
+                         topMyeloid[1:20,]$Symbol) &
+           Unique == "Unique")
+
+table(curatedUnique$cluster)
+
+curatedUniqueDict <- curatedUnique %>%
+  select(Symbol, GeneID) %>%
+  # Take distinct as marker genes may overlap clusters.
+  distinct()
+
+cibersortMin50Genes2to10 <- read_table("~/gitClones/01_Deconvolution/03_Deconvolution_CTVT/033_Results/03_Deconvolution_CTVT_cibersort/snCountsFinalq1q4/sigMatrix_minExpr50_minGenes2to10/CIBERSORTx_Job46_03_Deconvolution_CTVT_cibersort_snCountsFinal_snAnno_inferred_phenoclasses.CIBERSORTx_Job46_03_Deconvolution_CTVT_cibersort_snCountsFinal_snAnno_inferred_refsample.bm.K999.txt")
+
+cibersortDictMin50 <- masterMarkerGenes %>%
+  filter(Symbol %in% cibersortMin50Genes2to10$NAME) %>%
+  select(Symbol, GeneID) %>%
+  # Take distinct as marker genes may overlap clusters.
+  distinct()
+
+cibersortUniqueDictMin50 <- masterMarkerGenes %>%
+  filter(Symbol %in% cibersortMin50Genes2to10$NAME & Unique == "Unique") %>%
+  select(Symbol, GeneID) %>%
+  # Take distinct as marker genes may overlap clusters.
+  distinct()
+
+
+cibersortMin10Genes2to10 <- read_table("~/gitClones/01_Deconvolution/03_Deconvolution_CTVT/033_Results/03_Deconvolution_CTVT_cibersort/snCountsFinalq1q4/sigMatrix_minExpr10_minGenes2to10/CIBERSORTx_Job42_03_Deconvolution_CTVT_cibersort_snCountsFinal_snAnno_inferred_phenoclasses.CIBERSORTx_Job42_03_Deconvolution_CTVT_cibersort_snCountsFinal_snAnno_inferred_refsample.bm.K999.txt")
+
+cibersortDictMin10 <- masterMarkerGenes %>%
+  filter(Symbol %in% cibersortMin10Genes2to10$NAME) %>%
+  select(Symbol, GeneID) %>%
+  # Take distinct as marker genes may overlap clusters.
+  distinct()
+
+cibersortUniqueDictMin10 <- masterMarkerGenes %>%
+  filter(Symbol %in% cibersortMin10Genes2to10$NAME & Unique == "Unique") %>%
+  select(Symbol, GeneID) %>%
+  # Take distinct as marker genes may overlap clusters.
+  distinct()
+```
+
+
+## 1.2 Reference
+Reference - cellxgene dense matrix.
+### 1.2.1 Matrix
+```{r}
+obj <- readRDS(paste0(dataDir, "SCE_concat_CTVT_includingAllGenes_logCorrecDone_vstCorrecDone_ClustDone2_ManAnot.rds"))
+
+objNoBad <- obj[,obj$manual.log.anot.fine!="bad"]
+
+rm(obj)
+gc()
+
+snCountsFinal <- counts(objNoBad) %>%
+  as.data.frame() %>%
+  rownames_to_column("Symbol") %>%
+  filter(Symbol %in% geneDict$Symbol) %>%
+  column_to_rownames("Symbol") 
+  
+
+colData <- colData(objNoBad)
+rm(objNoBad)
+gc()
+```
+
+### 1.1.2 Cell type annotations
+Cell type labels - character vector same length as # cells in reference.
+Cell state labels - optional, finer granularity character vector. (i.e. myeloid 1 vs myeloid 2). 
+Labels should have at least 20 to 50 cells. 
+```{r}
+snCountsFinal_colData <- colData
+
+snAnno <- snCountsFinal_colData$manual.log.anot.fine
+print(ncol(snCountsFinal)==length(snAnno))
+print(sort(table(snAnno)))
+
+# Create the cell count matrix: rows = cell types, columns = samples
+snCellCounts <- snCountsFinal_colData %>%
+  as.data.frame() %>%
+  dplyr::group_by(manual.log.anot.fine, 
+           Sample) %>%
+  summarise(cellCount = n()) %>%
+  pivot_wider(names_from = Sample, 
+              values_from = cellCount, 
+              values_fill = 0) %>%
+  column_to_rownames("manual.log.anot.fine")
+
+# Convert to percentages (column-wise normalization)
+snCellPercentages <- sweep(snCellCounts, 
+                           2, 
+                           colSums(snCellCounts), 
+                           FUN = "/") %>%
+  round(3) %>%
+  t() %>%
+  as.data.frame() %>%
+  rownames_to_column("sample") %>%
+  pivot_longer(
+    cols = -sample,
+    names_to = "manual.log.anot.fine",
+    values_to = "cellProportion"
+  ) %>%
+  # If sample name ends in b_n, type is bn (bulk nuc). Otherwise, it is bc (bulk cell)
+  mutate(
+    sampleType = "sn",
+    sampleName = sample, 
+    sampleNameEdit = str_remove(sampleName, "[ab]")
+  ) %>%
+  select(sampleName, sampleType, manual.log.anot.fine, cellProportion, sampleNameEdit) %>%
+  mutate("deconvBenchResType" = "groundTruth", # P for proportion
+         "Method" = "NA", 
+         "Parameters" = "NA", 
+         "Reference" = "full",
+         "Seed"=123)
+```
+
+## 1.3 Bulk
+### 1.2.1 Matrix
+```{r}
+bulkCountsFinal <- readRDS(paste0(dataDir, "01_Deconvolution_matchedBulkMatrixCTVT_bulkCountsFinal.rds")) %>%
+  as.data.frame() %>%
+  # select gene id's (stored as columns in df) that are hvgs.
+  rownames_to_column("GeneID") %>%
+  filter(GeneID %in% geneDict$GeneID) %>%
+  left_join(geneDict) %>%
+  column_to_rownames("Symbol") %>%
+  select(-GeneID) %>%
+  as.matrix()
+```
+### 1.3.2 Metadata
+```{r}
+bulkCountsFinal_metadata <- read.xlsx(paste0(dataDir, "01_Deconvolution_matchedBulkMatrixCTVT_bulkCountsFinal_metadata.xlsx"))
+```
+
+## 1.5 Transpose all matrices for BayesPrism
+BayesPrism takes a sample x gene matrix (rather than gene x sample, as is default.)
+```{r}
+bulkCountsFinal <- bulkCountsFinal[rownames(snCountsFinal),] %>%
+  t()
+
+snCountsFinal <- snCountsFinal %>%
+  t()
+
+gc()
+
+
+
+snCountsFinalUnique <- snCountsFinal[, masterMarkerGenes[which(masterMarkerGenes$Unique=="Unique"),]$Symbol]
+
+bulkCountsFinalUnique <- bulkCountsFinal[, masterMarkerGenes[which(masterMarkerGenes$Unique=="Unique"),]$Symbol]
+  
+
+gc()
+```
+
+## 1.6 Create masterDf's
+```{r}
+masterPropDf <- data.frame(sampleName = c(), 
+                           sampleType = c(), 
+                           manual.log.anot.fine = c(), 
+                           cellProportion =c(), 
+                           sampleNameEdit = c(), 
+                           deconvBenchResType = c(), 
+                           Method = c(), 
+                           Parameters = c())
+
+
+# masterMetricDf <- data.frame(bulkCellEstimate = c(), 
+#                              bulkNucEstimate = c(), 
+#                              Method = c(), 
+#                              Parameters = c(), 
+#                              Metric = c())
+
+masterGlobMetricDf <- data.frame(bulkCellEstimate = c(),
+                             bulkNucEstimate = c(),
+                             Method = c(),
+                             Parameters = c(),
+                             Metric = c())
+
+masterGranularMetricDf <- data.frame(
+  Metric = c(),
+  Value = c(),
+  Subject = c(),
+  Estimate = c()
+)
+
+masterRawPEDf <- data.frame(
+  Colname = c(),
+  Rowname = c(),
+  Estimate = c(),
+  Method = c(),
+  Parameters = c(),
+  Reference = c(),
+  Seed = c()
+)
+
+```
+
+
+
+# 2.0 QC of annotations. 
+## 2.1 Correlation between cell types and subtypes
+```{r}
+plot.cor.phi(input = snCountsFinal,
+                         input.labels=snAnno,
+                         title=paste0(fprefix, " ", "snAnno"),
+                         #specify pdf.prefix if need to output to pdf
+                         pdf.prefix=paste0(plotDir, fprefix, "_snAnno_pwCorrMatrix"), 
+                         cexRow=0.5, cexCol=0.5,
+                         margins=c(4,4)) # Good separation between cell types.
+
+plot.cor.phi(input = snCountsFinalUnique,
+                         input.labels=snAnno,
+                         title=paste0(fprefix, " ", "snAnno"),
+                         #specify pdf.prefix if need to output to pdf
+                         pdf.prefix=paste0(plotDir, fprefix, "_snAnno_pwCorrMatrix_uniqueGenes"), 
+                         cexRow=0.5, cexCol=0.5,
+                         margins=c(4,4)) 
+
+
+# # Uncomment if using subtypes.
+# plot.cor.phi (input=sc.dat, 
+#                          input.labels=cell.type.labels, 
+#                          title="cell type correlation",
+#                          #specify pdf.prefix if need to output to pdf
+#                          #pdf.prefix="gbm.cor.ct",
+#                          cexRow=0.5, cexCol=0.5,
+#                          )
+```
+## 2.2 Filter outlier genes
+Not supported for non Hs or Mm genomes. 
+TODO: Check functions --> use MSarHar reference. 
+### 2.2.1 Reference
+- Visualize ribosomal proteins, mt ribosomal proteins, ribosomal pseudogenes, chrM, Actin, Hemoglobin, MALAT1?
+- - TODO: Plot max expr spec vs log mean expr. 
+- - TODO: Check outlier genes in Maurine's script. 
+```{r}
+# sc.stat <- plot.scRNA.outlier(input=sc.dat, #make sure the colnames are gene symbol or ENSMEBL ID 
+#   cell.type.labels=cell.type.labels,
+#   species="hs", #currently only human(hs) and mouse(mm) annotations are supported
+#   return.raw=TRUE #return the data used for plotting. 
+#   #pdf.prefix="gbm.sc.stat" specify pdf.prefix if need to output to pdf
+# )
+```
+### 2.2.2 Bulk
+-- TODO: Bulk plot
+```{r}
+bk.stat <- plot.bulk.outlier(
+  bulk.input = bulkCountsFinal,
+  sc.input = snCountsFinal,
+  cell.type.labels=snAnno
+)
+```
+### 2.2.3 Filter outlier genes from reference
+- Remove gene groups (i.e. Rb, Mrp, ...)
+-- TODO: Check if this is necessary, leaning towards just taking filtered gene list from Maurine. 
+### 2.2.4 Concordance of gene expression 
+-- TODO: Plots for our data separated by protein coding, lncRNA, and pseudogenes. 
+-- TODO: If applicable, only keep protein coding genes?
+### 2.2.5 FindMarker (BioConductor)
+-- But because Maurine has run these kinds of function to perform clustering/annotation, I think we are better off just taking filtered gene list/HVGs from pre-processing diagrams. Need to check this. 
+- Find markers within subtypes within each type. 
+```{r}
+# diff.exp.stat <- get.exp.stat(sc.dat=snCountsFinal[,colSums(snCountsFinal>0)>3],# filter genes to reduce memory use. Columns are genes (opposite to Seurat/CellRanger/SCE etc.)
+#                                           cell.type.labels=snAnno,
+#                                           pseudo.count=0.1, #a numeric value used for log2 transformation. =0.1 for 10x data, =10 for smart-seq. Default=0.1.
+#                                           cell.count.cutoff=50, # a numeric value to exclude cell state with number of cells fewer than this value for t test. Default=50.
+#                                           n.cores=1 #number of threads
+#                                           )
+```
+### 2.2.6 Subset reference for marker genes only
+- Option to run select.marker. 
+- Instead, taking marker genes from Maurine. The sn matrix already has filtered because it came from integrated (03 in shared OneDrive). Perhaps filter more?
+- Of note: final matrix also needs to have genes in columns!
+
+```{r}
+# dim(snCountsFinal)
+```
+# ---- Version 1 ----
+
+# 3 Prism - "full"
+## 3.1key = Null 
+There is an option, key, to define the label that corresponds to the tumor. It should be NULL if there are no tumor cells OR if the reference and mixture are from matched sample. I'm not sure what this means for when we have non-matched samples so creating two prisms. 
+-- TODO: Check if its okay to define state and type labels as the same thing. Because the map will return correspondence between cell type and cell state/subtype. 
+
+### 3.1.1 masterMarkerGenes
+```{r}
+myPrismNull <- new.prism(
+  reference = snCountsFinal, 
+  mixture = bulkCountsFinal, 
+  cell.type.labels = snAnno, 
+  cell.state.labels = snAnno,
+  key = NULL, 
+  outlier.cut = 0.8, # Filter genes in the bulk sample with an expression fraction greater than 1% in more than 10% of bulk data. These genes may dominate as outliers resulting from less stringent QC after mapping. 
+  outlier.fraction = 0.00
+)
+# Print genes filtered out
+
+filtered <- setdiff(colnames(snCountsFinal), colnames(myPrismNull@mixture))
+
+bpResNull <- run.prism(prism = myPrismNull, 
+                       n.cores=8)
+slotNames(bpResNull)
+
+
+# extract posterior mean of cell type fraction theta
+thetaFirstNull <- get.fraction(bp=bpResNull,
+            which.theta="first", # After Gibbs
+            state.or.type="type")
+
+head(thetaFirstNull)
+
+# Pivot to long format
+bulkPercentagesFirstNull <- thetaFirstNull %>%
+  as.data.frame() %>%
+  rownames_to_column("sample") %>%
+  pivot_longer(
+    cols = -sample,
+    names_to = "manual.log.anot.fine",
+    values_to = "cellProportion"
+  ) %>%
+  # If sample name ends in _n, type is bn (bulk nuc). Otherwise, it is bc (bulk cell)
+  mutate(
+    sampleType = case_when(
+      str_ends(sample, "_n") ~ "bn",
+      TRUE ~ "bc"
+    ),
+    # If sample type is bn, remove b_n to save sample id only. 
+    sampleName = case_when(
+      sampleType == "bn" ~ str_remove(sample, "_n$"),
+      TRUE ~ sample
+    ), 
+    # If sample type is bn, remove a or b from the end of the sample name. 
+    sampleNameEdit = case_when(
+      sampleType == "bn" ~ str_remove(sampleName, "[ab]"),
+      TRUE ~ sampleName
+    ),
+  ) %>%
+  select(sampleName, sampleType, manual.log.anot.fine, cellProportion, sampleNameEdit) %>%
+  # Method details
+  mutate("deconvBenchResType" = "P", # P for proportion
+         "Method" = "customBayesPrism", 
+         "Parameters" = "keyNullThetaFirst",
+         "Reference" = "masterMarkerAll",
+         "Seed"=123)
+
+# Rbind proportion outputs to compute error metrics.
+bayesResGround <- rbind(bulkPercentagesFirstNull,
+                        snCellPercentages)
+
+# Reference will change for the four Prism situations, so not including in the masterPropDf. Instead, inlcluding notes in "Reference" column. 
+masterPropDf <- rbind(masterPropDf, 
+                      bulkPercentagesFirstNull)
+
+# Compute and rbind metric outputs
+bayesResMetrics <- deconError(bayesResGround, 
+                              parameters = "keyNullThetaFirst",
+                              method = "customBayesPrism",
+                              reference="masterMarkerAll",
+                              seed=123)
+# Rbind metric measurements 
+ masterGlobMetricDf <- rbind(masterGlobMetricDf, 
+                              bayesResMetrics$overviewMetrics)
+masterGranularMetricDf <- rbind(masterGranularMetricDf, 
+                              bayesResMetrics$granularMetrics)
+masterRawPEDf <- rbind(masterRawPEDf, 
+                              bayesResMetrics$rawPredictionError)
+
+# Cleanup
+rm(thetaFirstNull, bulkPercentagesFirstNull, bayesResGround, bayesResMetrics)
+gc()
+
+# extract posterior mean of cell type fraction theta
+thetaNullFinal <- get.fraction (bp=bpResNull,
+            which.theta="final", # After Gibbs
+            state.or.type="type")
+
+head(thetaNullFinal)
+
+# Pivot to long format
+bulkPercentagesFinalNull <- thetaNullFinal %>%
+  as.data.frame() %>%
+  rownames_to_column("sample") %>%
+  pivot_longer(
+    cols = -sample,
+    names_to = "manual.log.anot.fine",
+    values_to = "cellProportion"
+  ) %>%
+  # If sample name ends in _n, type is bn (bulk nuc). Otherwise, it is bc (bulk cell)
+  mutate(
+    sampleType = case_when(
+      str_ends(sample, "_n") ~ "bn",
+      TRUE ~ "bc"
+    ),
+    # If sample type is bn, remove b_n to save sample id only. 
+    sampleName = case_when(
+      sampleType == "bn" ~ str_remove(sample, "_n$"),
+      TRUE ~ sample
+    ), 
+    # If sample type is bn, remove a or b from the end of the sample name. 
+    sampleNameEdit = case_when(
+      sampleType == "bn" ~ str_remove(sampleName, "[ab]"),
+      TRUE ~ sampleName
+    ),
+  ) %>%
+  select(sampleName, sampleType, manual.log.anot.fine, cellProportion, sampleNameEdit) %>%
+  # Method details
+  mutate("deconvBenchResType" = "P", # P for proportion
+         "Method" = "customBayesPrism", 
+         "Parameters" = "keyNullThetaFinal",
+         "Reference" = "masterMarkerAll",
+         "Seed"=123)
+
+# Rbind proportion outputs to compute error metrics.
+bayesResGround <- rbind(bulkPercentagesFinalNull,
+                        snCellPercentages)
+
+# Reference will change for the four Prism situations, so not including in the masterPropDf. Instead, inlcluding notes in "Reference" column. 
+masterPropDf <- rbind(masterPropDf, 
+                      bulkPercentagesFinalNull)
+
+# Compute and rbind metric outputs
+bayesResMetrics <- deconError(bayesResGround, 
+                              parameters = "keyNullThetaFinal",
+                              method = "customBayesPrism",
+                              reference="masterMarkerAll",
+                              seed=123)
+# Rbind metric measurements 
+ masterGlobMetricDf <- rbind(masterGlobMetricDf, 
+                              bayesResMetrics$overviewMetrics)
+masterGranularMetricDf <- rbind(masterGranularMetricDf, 
+                              bayesResMetrics$granularMetrics)
+masterRawPEDf <- rbind(masterRawPEDf, 
+                              bayesResMetrics$rawPredictionError)
+
+# Cleanup
+rm(thetaFinalNull, bulkPercentagesFinalNull, bayesResGround, bayesResMetrics, myPrismNull, bpResNull)
+gc()
+```
+
+### 3.1.2 masterMarkerGenes Unique
+```{r}
+myPrismNull <- new.prism(
+  reference = snCountsFinalUnique, 
+  mixture = bulkCountsFinalUnique, 
+  cell.type.labels = snAnno, 
+  cell.state.labels = snAnno,
+  key = NULL, 
+  outlier.cut = 0.8, # Filter genes in the bulk sample with an expression fraction greater than 1% in more than 10% of bulk data. These genes may dominate as outliers resulting from less stringent QC after mapping. 
+  outlier.fraction = 0.00
+)
+# Print genes filtered out
+
+filtered <- setdiff(colnames(snCountsFinal), colnames(myPrismNull@mixture))
+
+bpResNull <- run.prism(prism = myPrismNull, 
+                       n.cores=8)
+slotNames(bpResNull)
+
+
+# extract posterior mean of cell type fraction theta
+thetaFirstNull <- get.fraction(bp=bpResNull,
+            which.theta="first", # After Gibbs
+            state.or.type="type")
+
+head(thetaFirstNull)
+
+# Pivot to long format
+bulkPercentagesFirstNull <- thetaFirstNull %>%
+  as.data.frame() %>%
+  rownames_to_column("sample") %>%
+  pivot_longer(
+    cols = -sample,
+    names_to = "manual.log.anot.fine",
+    values_to = "cellProportion"
+  ) %>%
+  # If sample name ends in _n, type is bn (bulk nuc). Otherwise, it is bc (bulk cell)
+  mutate(
+    sampleType = case_when(
+      str_ends(sample, "_n") ~ "bn",
+      TRUE ~ "bc"
+    ),
+    # If sample type is bn, remove b_n to save sample id only. 
+    sampleName = case_when(
+      sampleType == "bn" ~ str_remove(sample, "_n$"),
+      TRUE ~ sample
+    ), 
+    # If sample type is bn, remove a or b from the end of the sample name. 
+    sampleNameEdit = case_when(
+      sampleType == "bn" ~ str_remove(sampleName, "[ab]"),
+      TRUE ~ sampleName
+    ),
+  ) %>%
+  select(sampleName, sampleType, manual.log.anot.fine, cellProportion, sampleNameEdit) %>%
+  # Method details
+  mutate("deconvBenchResType" = "P", # P for proportion
+         "Method" = "customBayesPrism", 
+         "Parameters" = "keyNullThetaFirst",
+         "Reference" = "masterMarkerUnique",
+         "Seed"=123)
+
+# Rbind proportion outputs to compute error metrics.
+bayesResGround <- rbind(bulkPercentagesFirstNull,
+                        snCellPercentages)
+
+# Reference will change for the four Prism situations, so not including in the masterPropDf. Instead, inlcluding notes in "Reference" column. 
+masterPropDf <- rbind(masterPropDf, 
+                      bulkPercentagesFirstNull)
+
+# Compute and rbind metric outputs
+bayesResMetrics <- deconError(bayesResGround, 
+                              parameters = "keyNullThetaFirst",
+                              method = "customBayesPrism",
+                              reference="masterMarkerUnique",
+                              seed=123)
+# Rbind metric measurements 
+ masterGlobMetricDf <- rbind(masterGlobMetricDf, 
+                              bayesResMetrics$overviewMetrics)
+masterGranularMetricDf <- rbind(masterGranularMetricDf, 
+                              bayesResMetrics$granularMetrics)
+masterRawPEDf <- rbind(masterRawPEDf, 
+                              bayesResMetrics$rawPredictionError)
+
+# Cleanup
+rm(thetaFirstNull, bulkPercentagesFirstNull, bayesResGround, bayesResMetrics)
+gc()
+
+# extract posterior mean of cell type fraction theta
+thetaNullFinal <- get.fraction (bp=bpResNull,
+            which.theta="final", # After Gibbs
+            state.or.type="type")
+
+head(thetaNullFinal)
+
+# Pivot to long format
+bulkPercentagesFinalNull <- thetaNullFinal %>%
+  as.data.frame() %>%
+  rownames_to_column("sample") %>%
+  pivot_longer(
+    cols = -sample,
+    names_to = "manual.log.anot.fine",
+    values_to = "cellProportion"
+  ) %>%
+  # If sample name ends in _n, type is bn (bulk nuc). Otherwise, it is bc (bulk cell)
+  mutate(
+    sampleType = case_when(
+      str_ends(sample, "_n") ~ "bn",
+      TRUE ~ "bc"
+    ),
+    # If sample type is bn, remove b_n to save sample id only. 
+    sampleName = case_when(
+      sampleType == "bn" ~ str_remove(sample, "_n$"),
+      TRUE ~ sample
+    ), 
+    # If sample type is bn, remove a or b from the end of the sample name. 
+    sampleNameEdit = case_when(
+      sampleType == "bn" ~ str_remove(sampleName, "[ab]"),
+      TRUE ~ sampleName
+    ),
+  ) %>%
+  select(sampleName, sampleType, manual.log.anot.fine, cellProportion, sampleNameEdit) %>%
+  # Method details
+  mutate("deconvBenchResType" = "P", # P for proportion
+         "Method" = "customBayesPrism", 
+         "Parameters" = "keyNullThetaFinal",
+         "Reference" = "masterMarkerUnique",
+         "Seed"=123)
+
+# Rbind proportion outputs to compute error metrics.
+bayesResGround <- rbind(bulkPercentagesFinalNull,
+                        snCellPercentages)
+
+# Reference will change for the four Prism situations, so not including in the masterPropDf. Instead, inlcluding notes in "Reference" column. 
+masterPropDf <- rbind(masterPropDf, 
+                      bulkPercentagesFinalNull)
+
+# Compute and rbind metric outputs
+bayesResMetrics <- deconError(bayesResGround, 
+                              parameters = "keyNullThetaFinal",
+                              method = "customBayesPrism",
+                              reference="masterMarkerUnique",
+                              seed=123)
+# Rbind metric measurements 
+ masterGlobMetricDf <- rbind(masterGlobMetricDf, 
+                              bayesResMetrics$overviewMetrics)
+masterGranularMetricDf <- rbind(masterGranularMetricDf, 
+                              bayesResMetrics$granularMetrics)
+masterRawPEDf <- rbind(masterRawPEDf, 
+                              bayesResMetrics$rawPredictionError)
+
+# Cleanup
+rm(thetaFinalNull, bulkPercentagesFinalNull, bayesResGround, bayesResMetrics, myPrismNull, bpResNull)
+gc()
+```
+
+### 3.1.3 Curated
+```{r}
+myPrismNull <- new.prism(
+  reference = snCountsFinal, 
+  mixture = bulkCountsFinal, 
+  cell.type.labels = snAnno, 
+  cell.state.labels = snAnno,
+  key = NULL, 
+  outlier.cut = 0.8, # Filter genes in the bulk sample with an expression fraction greater than 1% in more than 10% of bulk data. These genes may dominate as outliers resulting from less stringent QC after mapping. 
+  outlier.fraction = 0.00
+)
+# Print genes filtered out
+
+filtered <- setdiff(colnames(snCountsFinal), colnames(myPrismNull@mixture))
+
+bpResNull <- run.prism(prism = myPrismNull, 
+                       n.cores=8)
+slotNames(bpResNull)
+
+
+# extract posterior mean of cell type fraction theta
+thetaFirstNull <- get.fraction(bp=bpResNull,
+            which.theta="first", # After Gibbs
+            state.or.type="type")
+
+head(thetaFirstNull)
+
+# Pivot to long format
+bulkPercentagesFirstNull <- thetaFirstNull %>%
+  as.data.frame() %>%
+  rownames_to_column("sample") %>%
+  pivot_longer(
+    cols = -sample,
+    names_to = "manual.log.anot.fine",
+    values_to = "cellProportion"
+  ) %>%
+  # If sample name ends in _n, type is bn (bulk nuc). Otherwise, it is bc (bulk cell)
+  mutate(
+    sampleType = case_when(
+      str_ends(sample, "_n") ~ "bn",
+      TRUE ~ "bc"
+    ),
+    # If sample type is bn, remove b_n to save sample id only. 
+    sampleName = case_when(
+      sampleType == "bn" ~ str_remove(sample, "_n$"),
+      TRUE ~ sample
+    ), 
+    # If sample type is bn, remove a or b from the end of the sample name. 
+    sampleNameEdit = case_when(
+      sampleType == "bn" ~ str_remove(sampleName, "[ab]"),
+      TRUE ~ sampleName
+    ),
+  ) %>%
+  select(sampleName, sampleType, manual.log.anot.fine, cellProportion, sampleNameEdit) %>%
+  # Method details
+  mutate("deconvBenchResType" = "P", # P for proportion
+         "Method" = "customBayesPrism", 
+         "Parameters" = "keyNullThetaFirst",
+         "Reference" = "masterMarkerAll",
+         "Seed"=123)
+
+# Rbind proportion outputs to compute error metrics.
+bayesResGround <- rbind(bulkPercentagesFirstNull,
+                        snCellPercentages)
+
+# Reference will change for the four Prism situations, so not including in the masterPropDf. Instead, inlcluding notes in "Reference" column. 
+masterPropDf <- rbind(masterPropDf, 
+                      bulkPercentagesFirstNull)
+
+# Compute and rbind metric outputs
+bayesResMetrics <- deconError(bayesResGround, 
+                              parameters = "keyNullThetaFirst",
+                              method = "customBayesPrism",
+                              reference="masterMarkerAll",
+                              seed=123)
+# Rbind metric measurements 
+ masterGlobMetricDf <- rbind(masterGlobMetricDf, 
+                              bayesResMetrics$overviewMetrics)
+masterGranularMetricDf <- rbind(masterGranularMetricDf, 
+                              bayesResMetrics$granularMetrics)
+masterRawPEDf <- rbind(masterRawPEDf, 
+                              bayesResMetrics$rawPredictionError)
+
+# Cleanup
+rm(thetaFirstNull, bulkPercentagesFirstNull, bayesResGround, bayesResMetrics)
+gc()
+
+# extract posterior mean of cell type fraction theta
+thetaNullFinal <- get.fraction (bp=bpResNull,
+            which.theta="final", # After Gibbs
+            state.or.type="type")
+
+head(thetaNullFinal)
+
+# Pivot to long format
+bulkPercentagesFinalNull <- thetaNullFinal %>%
+  as.data.frame() %>%
+  rownames_to_column("sample") %>%
+  pivot_longer(
+    cols = -sample,
+    names_to = "manual.log.anot.fine",
+    values_to = "cellProportion"
+  ) %>%
+  # If sample name ends in _n, type is bn (bulk nuc). Otherwise, it is bc (bulk cell)
+  mutate(
+    sampleType = case_when(
+      str_ends(sample, "_n") ~ "bn",
+      TRUE ~ "bc"
+    ),
+    # If sample type is bn, remove b_n to save sample id only. 
+    sampleName = case_when(
+      sampleType == "bn" ~ str_remove(sample, "_n$"),
+      TRUE ~ sample
+    ), 
+    # If sample type is bn, remove a or b from the end of the sample name. 
+    sampleNameEdit = case_when(
+      sampleType == "bn" ~ str_remove(sampleName, "[ab]"),
+      TRUE ~ sampleName
+    ),
+  ) %>%
+  select(sampleName, sampleType, manual.log.anot.fine, cellProportion, sampleNameEdit) %>%
+  # Method details
+  mutate("deconvBenchResType" = "P", # P for proportion
+         "Method" = "customBayesPrism", 
+         "Parameters" = "keyNullThetaFinal",
+         "Reference" = "masterMarkerAll",
+         "Seed"=123)
+
+# Rbind proportion outputs to compute error metrics.
+bayesResGround <- rbind(bulkPercentagesFinalNull,
+                        snCellPercentages)
+
+# Reference will change for the four Prism situations, so not including in the masterPropDf. Instead, inlcluding notes in "Reference" column. 
+masterPropDf <- rbind(masterPropDf, 
+                      bulkPercentagesFinalNull)
+
+# Compute and rbind metric outputs
+bayesResMetrics <- deconError(bayesResGround, 
+                              parameters = "keyNullThetaFinal",
+                              method = "customBayesPrism",
+                              reference="masterMarkerAll",
+                              seed=123)
+# Rbind metric measurements 
+ masterGlobMetricDf <- rbind(masterGlobMetricDf, 
+                              bayesResMetrics$overviewMetrics)
+masterGranularMetricDf <- rbind(masterGranularMetricDf, 
+                              bayesResMetrics$granularMetrics)
+masterRawPEDf <- rbind(masterRawPEDf, 
+                              bayesResMetrics$rawPredictionError)
+
+# Cleanup
+rm(thetaFinalNull, bulkPercentagesFinalNull, bayesResGround, bayesResMetrics, myPrismNull, bpResNull)
+gc()
+```
+
+### 3.1.4 Curated Unique
+```{r}
+myPrismNull <- new.prism(
+  reference = snCountsFinalUnique, 
+  mixture = bulkCountsFinalUnique, 
+  cell.type.labels = snAnno, 
+  cell.state.labels = snAnno,
+  key = NULL, 
+  outlier.cut = 0.8, # Filter genes in the bulk sample with an expression fraction greater than 1% in more than 10% of bulk data. These genes may dominate as outliers resulting from less stringent QC after mapping. 
+  outlier.fraction = 0.00
+)
+# Print genes filtered out
+
+filtered <- setdiff(colnames(snCountsFinal), colnames(myPrismNull@mixture))
+
+bpResNull <- run.prism(prism = myPrismNull, 
+                       n.cores=8)
+slotNames(bpResNull)
+
+
+# extract posterior mean of cell type fraction theta
+thetaFirstNull <- get.fraction(bp=bpResNull,
+            which.theta="first", # After Gibbs
+            state.or.type="type")
+
+head(thetaFirstNull)
+
+# Pivot to long format
+bulkPercentagesFirstNull <- thetaFirstNull %>%
+  as.data.frame() %>%
+  rownames_to_column("sample") %>%
+  pivot_longer(
+    cols = -sample,
+    names_to = "manual.log.anot.fine",
+    values_to = "cellProportion"
+  ) %>%
+  # If sample name ends in _n, type is bn (bulk nuc). Otherwise, it is bc (bulk cell)
+  mutate(
+    sampleType = case_when(
+      str_ends(sample, "_n") ~ "bn",
+      TRUE ~ "bc"
+    ),
+    # If sample type is bn, remove b_n to save sample id only. 
+    sampleName = case_when(
+      sampleType == "bn" ~ str_remove(sample, "_n$"),
+      TRUE ~ sample
+    ), 
+    # If sample type is bn, remove a or b from the end of the sample name. 
+    sampleNameEdit = case_when(
+      sampleType == "bn" ~ str_remove(sampleName, "[ab]"),
+      TRUE ~ sampleName
+    ),
+  ) %>%
+  select(sampleName, sampleType, manual.log.anot.fine, cellProportion, sampleNameEdit) %>%
+  # Method details
+  mutate("deconvBenchResType" = "P", # P for proportion
+         "Method" = "customBayesPrism", 
+         "Parameters" = "keyNullThetaFirst",
+         "Reference" = "masterMarkerUnique",
+         "Seed"=123)
+
+# Rbind proportion outputs to compute error metrics.
+bayesResGround <- rbind(bulkPercentagesFirstNull,
+                        snCellPercentages)
+
+# Reference will change for the four Prism situations, so not including in the masterPropDf. Instead, inlcluding notes in "Reference" column. 
+masterPropDf <- rbind(masterPropDf, 
+                      bulkPercentagesFirstNull)
+
+# Compute and rbind metric outputs
+bayesResMetrics <- deconError(bayesResGround, 
+                              parameters = "keyNullThetaFirst",
+                              method = "customBayesPrism",
+                              reference="masterMarkerUnique",
+                              seed=123)
+# Rbind metric measurements 
+ masterGlobMetricDf <- rbind(masterGlobMetricDf, 
+                              bayesResMetrics$overviewMetrics)
+masterGranularMetricDf <- rbind(masterGranularMetricDf, 
+                              bayesResMetrics$granularMetrics)
+masterRawPEDf <- rbind(masterRawPEDf, 
+                              bayesResMetrics$rawPredictionError)
+
+# Cleanup
+rm(thetaFirstNull, bulkPercentagesFirstNull, bayesResGround, bayesResMetrics)
+gc()
+
+# extract posterior mean of cell type fraction theta
+thetaNullFinal <- get.fraction (bp=bpResNull,
+            which.theta="final", # After Gibbs
+            state.or.type="type")
+
+head(thetaNullFinal)
+
+# Pivot to long format
+bulkPercentagesFinalNull <- thetaNullFinal %>%
+  as.data.frame() %>%
+  rownames_to_column("sample") %>%
+  pivot_longer(
+    cols = -sample,
+    names_to = "manual.log.anot.fine",
+    values_to = "cellProportion"
+  ) %>%
+  # If sample name ends in _n, type is bn (bulk nuc). Otherwise, it is bc (bulk cell)
+  mutate(
+    sampleType = case_when(
+      str_ends(sample, "_n") ~ "bn",
+      TRUE ~ "bc"
+    ),
+    # If sample type is bn, remove b_n to save sample id only. 
+    sampleName = case_when(
+      sampleType == "bn" ~ str_remove(sample, "_n$"),
+      TRUE ~ sample
+    ), 
+    # If sample type is bn, remove a or b from the end of the sample name. 
+    sampleNameEdit = case_when(
+      sampleType == "bn" ~ str_remove(sampleName, "[ab]"),
+      TRUE ~ sampleName
+    ),
+  ) %>%
+  select(sampleName, sampleType, manual.log.anot.fine, cellProportion, sampleNameEdit) %>%
+  # Method details
+  mutate("deconvBenchResType" = "P", # P for proportion
+         "Method" = "customBayesPrism", 
+         "Parameters" = "keyNullThetaFinal",
+         "Reference" = "masterMarkerUnique",
+         "Seed"=123)
+
+# Rbind proportion outputs to compute error metrics.
+bayesResGround <- rbind(bulkPercentagesFinalNull,
+                        snCellPercentages)
+
+# Reference will change for the four Prism situations, so not including in the masterPropDf. Instead, inlcluding notes in "Reference" column. 
+masterPropDf <- rbind(masterPropDf, 
+                      bulkPercentagesFinalNull)
+
+# Compute and rbind metric outputs
+bayesResMetrics <- deconError(bayesResGround, 
+                              parameters = "keyNullThetaFinal",
+                              method = "customBayesPrism",
+                              reference="masterMarkerUnique",
+                              seed=123)
+# Rbind metric measurements 
+ masterGlobMetricDf <- rbind(masterGlobMetricDf, 
+                              bayesResMetrics$overviewMetrics)
+masterGranularMetricDf <- rbind(masterGranularMetricDf, 
+                              bayesResMetrics$granularMetrics)
+masterRawPEDf <- rbind(masterRawPEDf, 
+                              bayesResMetrics$rawPredictionError)
+
+# Cleanup
+rm(thetaFinalNull, bulkPercentagesFinalNull, bayesResGround, bayesResMetrics, myPrismNull, bpResNull)
+gc()
+```
+
+### 3.1.5 Cibersort 50 
+```{r}
+myPrismNull <- new.prism(
+  reference = snCountsFinal, 
+  mixture = bulkCountsFinal, 
+  cell.type.labels = snAnno, 
+  cell.state.labels = snAnno,
+  key = NULL, 
+  outlier.cut = 0.8, # Filter genes in the bulk sample with an expression fraction greater than 1% in more than 10% of bulk data. These genes may dominate as outliers resulting from less stringent QC after mapping. 
+  outlier.fraction = 0.00
+)
+# Print genes filtered out
+
+filtered <- setdiff(colnames(snCountsFinal), colnames(myPrismNull@mixture))
+
+bpResNull <- run.prism(prism = myPrismNull, 
+                       n.cores=8)
+slotNames(bpResNull)
+
+
+# extract posterior mean of cell type fraction theta
+thetaFirstNull <- get.fraction(bp=bpResNull,
+            which.theta="first", # After Gibbs
+            state.or.type="type")
+
+head(thetaFirstNull)
+
+# Pivot to long format
+bulkPercentagesFirstNull <- thetaFirstNull %>%
+  as.data.frame() %>%
+  rownames_to_column("sample") %>%
+  pivot_longer(
+    cols = -sample,
+    names_to = "manual.log.anot.fine",
+    values_to = "cellProportion"
+  ) %>%
+  # If sample name ends in _n, type is bn (bulk nuc). Otherwise, it is bc (bulk cell)
+  mutate(
+    sampleType = case_when(
+      str_ends(sample, "_n") ~ "bn",
+      TRUE ~ "bc"
+    ),
+    # If sample type is bn, remove b_n to save sample id only. 
+    sampleName = case_when(
+      sampleType == "bn" ~ str_remove(sample, "_n$"),
+      TRUE ~ sample
+    ), 
+    # If sample type is bn, remove a or b from the end of the sample name. 
+    sampleNameEdit = case_when(
+      sampleType == "bn" ~ str_remove(sampleName, "[ab]"),
+      TRUE ~ sampleName
+    ),
+  ) %>%
+  select(sampleName, sampleType, manual.log.anot.fine, cellProportion, sampleNameEdit) %>%
+  # Method details
+  mutate("deconvBenchResType" = "P", # P for proportion
+         "Method" = "customBayesPrism", 
+         "Parameters" = "keyNullThetaFirst",
+         "Reference" = "masterMarkerAll",
+         "Seed"=123)
+
+# Rbind proportion outputs to compute error metrics.
+bayesResGround <- rbind(bulkPercentagesFirstNull,
+                        snCellPercentages)
+
+# Reference will change for the four Prism situations, so not including in the masterPropDf. Instead, inlcluding notes in "Reference" column. 
+masterPropDf <- rbind(masterPropDf, 
+                      bulkPercentagesFirstNull)
+
+# Compute and rbind metric outputs
+bayesResMetrics <- deconError(bayesResGround, 
+                              parameters = "keyNullThetaFirst",
+                              method = "customBayesPrism",
+                              reference="masterMarkerAll",
+                              seed=123)
+# Rbind metric measurements 
+ masterGlobMetricDf <- rbind(masterGlobMetricDf, 
+                              bayesResMetrics$overviewMetrics)
+masterGranularMetricDf <- rbind(masterGranularMetricDf, 
+                              bayesResMetrics$granularMetrics)
+masterRawPEDf <- rbind(masterRawPEDf, 
+                              bayesResMetrics$rawPredictionError)
+
+# Cleanup
+rm(thetaFirstNull, bulkPercentagesFirstNull, bayesResGround, bayesResMetrics)
+gc()
+
+# extract posterior mean of cell type fraction theta
+thetaNullFinal <- get.fraction (bp=bpResNull,
+            which.theta="final", # After Gibbs
+            state.or.type="type")
+
+head(thetaNullFinal)
+
+# Pivot to long format
+bulkPercentagesFinalNull <- thetaNullFinal %>%
+  as.data.frame() %>%
+  rownames_to_column("sample") %>%
+  pivot_longer(
+    cols = -sample,
+    names_to = "manual.log.anot.fine",
+    values_to = "cellProportion"
+  ) %>%
+  # If sample name ends in _n, type is bn (bulk nuc). Otherwise, it is bc (bulk cell)
+  mutate(
+    sampleType = case_when(
+      str_ends(sample, "_n") ~ "bn",
+      TRUE ~ "bc"
+    ),
+    # If sample type is bn, remove b_n to save sample id only. 
+    sampleName = case_when(
+      sampleType == "bn" ~ str_remove(sample, "_n$"),
+      TRUE ~ sample
+    ), 
+    # If sample type is bn, remove a or b from the end of the sample name. 
+    sampleNameEdit = case_when(
+      sampleType == "bn" ~ str_remove(sampleName, "[ab]"),
+      TRUE ~ sampleName
+    ),
+  ) %>%
+  select(sampleName, sampleType, manual.log.anot.fine, cellProportion, sampleNameEdit) %>%
+  # Method details
+  mutate("deconvBenchResType" = "P", # P for proportion
+         "Method" = "customBayesPrism", 
+         "Parameters" = "keyNullThetaFinal",
+         "Reference" = "masterMarkerAll",
+         "Seed"=123)
+
+# Rbind proportion outputs to compute error metrics.
+bayesResGround <- rbind(bulkPercentagesFinalNull,
+                        snCellPercentages)
+
+# Reference will change for the four Prism situations, so not including in the masterPropDf. Instead, inlcluding notes in "Reference" column. 
+masterPropDf <- rbind(masterPropDf, 
+                      bulkPercentagesFinalNull)
+
+# Compute and rbind metric outputs
+bayesResMetrics <- deconError(bayesResGround, 
+                              parameters = "keyNullThetaFinal",
+                              method = "customBayesPrism",
+                              reference="masterMarkerAll",
+                              seed=123)
+# Rbind metric measurements 
+ masterGlobMetricDf <- rbind(masterGlobMetricDf, 
+                              bayesResMetrics$overviewMetrics)
+masterGranularMetricDf <- rbind(masterGranularMetricDf, 
+                              bayesResMetrics$granularMetrics)
+masterRawPEDf <- rbind(masterRawPEDf, 
+                              bayesResMetrics$rawPredictionError)
+
+# Cleanup
+rm(thetaFinalNull, bulkPercentagesFinalNull, bayesResGround, bayesResMetrics, myPrismNull, bpResNull)
+gc()
+```
+
+### 3.1.6 Cibersort 50 Unique
+```{r}
+myPrismNull <- new.prism(
+  reference = snCountsFinalUnique, 
+  mixture = bulkCountsFinalUnique, 
+  cell.type.labels = snAnno, 
+  cell.state.labels = snAnno,
+  key = NULL, 
+  outlier.cut = 0.8, # Filter genes in the bulk sample with an expression fraction greater than 1% in more than 10% of bulk data. These genes may dominate as outliers resulting from less stringent QC after mapping. 
+  outlier.fraction = 0.00
+)
+# Print genes filtered out
+
+filtered <- setdiff(colnames(snCountsFinal), colnames(myPrismNull@mixture))
+
+bpResNull <- run.prism(prism = myPrismNull, 
+                       n.cores=8)
+slotNames(bpResNull)
+
+
+# extract posterior mean of cell type fraction theta
+thetaFirstNull <- get.fraction(bp=bpResNull,
+            which.theta="first", # After Gibbs
+            state.or.type="type")
+
+head(thetaFirstNull)
+
+# Pivot to long format
+bulkPercentagesFirstNull <- thetaFirstNull %>%
+  as.data.frame() %>%
+  rownames_to_column("sample") %>%
+  pivot_longer(
+    cols = -sample,
+    names_to = "manual.log.anot.fine",
+    values_to = "cellProportion"
+  ) %>%
+  # If sample name ends in _n, type is bn (bulk nuc). Otherwise, it is bc (bulk cell)
+  mutate(
+    sampleType = case_when(
+      str_ends(sample, "_n") ~ "bn",
+      TRUE ~ "bc"
+    ),
+    # If sample type is bn, remove b_n to save sample id only. 
+    sampleName = case_when(
+      sampleType == "bn" ~ str_remove(sample, "_n$"),
+      TRUE ~ sample
+    ), 
+    # If sample type is bn, remove a or b from the end of the sample name. 
+    sampleNameEdit = case_when(
+      sampleType == "bn" ~ str_remove(sampleName, "[ab]"),
+      TRUE ~ sampleName
+    ),
+  ) %>%
+  select(sampleName, sampleType, manual.log.anot.fine, cellProportion, sampleNameEdit) %>%
+  # Method details
+  mutate("deconvBenchResType" = "P", # P for proportion
+         "Method" = "customBayesPrism", 
+         "Parameters" = "keyNullThetaFirst",
+         "Reference" = "masterMarkerUnique",
+         "Seed"=123)
+
+# Rbind proportion outputs to compute error metrics.
+bayesResGround <- rbind(bulkPercentagesFirstNull,
+                        snCellPercentages)
+
+# Reference will change for the four Prism situations, so not including in the masterPropDf. Instead, inlcluding notes in "Reference" column. 
+masterPropDf <- rbind(masterPropDf, 
+                      bulkPercentagesFirstNull)
+
+# Compute and rbind metric outputs
+bayesResMetrics <- deconError(bayesResGround, 
+                              parameters = "keyNullThetaFirst",
+                              method = "customBayesPrism",
+                              reference="masterMarkerUnique",
+                              seed=123)
+# Rbind metric measurements 
+ masterGlobMetricDf <- rbind(masterGlobMetricDf, 
+                              bayesResMetrics$overviewMetrics)
+masterGranularMetricDf <- rbind(masterGranularMetricDf, 
+                              bayesResMetrics$granularMetrics)
+masterRawPEDf <- rbind(masterRawPEDf, 
+                              bayesResMetrics$rawPredictionError)
+
+# Cleanup
+rm(thetaFirstNull, bulkPercentagesFirstNull, bayesResGround, bayesResMetrics)
+gc()
+
+# extract posterior mean of cell type fraction theta
+thetaNullFinal <- get.fraction (bp=bpResNull,
+            which.theta="final", # After Gibbs
+            state.or.type="type")
+
+head(thetaNullFinal)
+
+# Pivot to long format
+bulkPercentagesFinalNull <- thetaNullFinal %>%
+  as.data.frame() %>%
+  rownames_to_column("sample") %>%
+  pivot_longer(
+    cols = -sample,
+    names_to = "manual.log.anot.fine",
+    values_to = "cellProportion"
+  ) %>%
+  # If sample name ends in _n, type is bn (bulk nuc). Otherwise, it is bc (bulk cell)
+  mutate(
+    sampleType = case_when(
+      str_ends(sample, "_n") ~ "bn",
+      TRUE ~ "bc"
+    ),
+    # If sample type is bn, remove b_n to save sample id only. 
+    sampleName = case_when(
+      sampleType == "bn" ~ str_remove(sample, "_n$"),
+      TRUE ~ sample
+    ), 
+    # If sample type is bn, remove a or b from the end of the sample name. 
+    sampleNameEdit = case_when(
+      sampleType == "bn" ~ str_remove(sampleName, "[ab]"),
+      TRUE ~ sampleName
+    ),
+  ) %>%
+  select(sampleName, sampleType, manual.log.anot.fine, cellProportion, sampleNameEdit) %>%
+  # Method details
+  mutate("deconvBenchResType" = "P", # P for proportion
+         "Method" = "customBayesPrism", 
+         "Parameters" = "keyNullThetaFinal",
+         "Reference" = "masterMarkerUnique",
+         "Seed"=123)
+
+# Rbind proportion outputs to compute error metrics.
+bayesResGround <- rbind(bulkPercentagesFinalNull,
+                        snCellPercentages)
+
+# Reference will change for the four Prism situations, so not including in the masterPropDf. Instead, inlcluding notes in "Reference" column. 
+masterPropDf <- rbind(masterPropDf, 
+                      bulkPercentagesFinalNull)
+
+# Compute and rbind metric outputs
+bayesResMetrics <- deconError(bayesResGround, 
+                              parameters = "keyNullThetaFinal",
+                              method = "customBayesPrism",
+                              reference="masterMarkerUnique",
+                              seed=123)
+# Rbind metric measurements 
+ masterGlobMetricDf <- rbind(masterGlobMetricDf, 
+                              bayesResMetrics$overviewMetrics)
+masterGranularMetricDf <- rbind(masterGranularMetricDf, 
+                              bayesResMetrics$granularMetrics)
+masterRawPEDf <- rbind(masterRawPEDf, 
+                              bayesResMetrics$rawPredictionError)
+
+# Cleanup
+rm(thetaFinalNull, bulkPercentagesFinalNull, bayesResGround, bayesResMetrics, myPrismNull, bpResNull)
+gc()
+```
+
+### 3.1.7 Cibersort 10 
+```{r}
+myPrismNull <- new.prism(
+  reference = snCountsFinal, 
+  mixture = bulkCountsFinal, 
+  cell.type.labels = snAnno, 
+  cell.state.labels = snAnno,
+  key = NULL, 
+  outlier.cut = 0.8, # Filter genes in the bulk sample with an expression fraction greater than 1% in more than 10% of bulk data. These genes may dominate as outliers resulting from less stringent QC after mapping. 
+  outlier.fraction = 0.00
+)
+# Print genes filtered out
+
+filtered <- setdiff(colnames(snCountsFinal), colnames(myPrismNull@mixture))
+
+bpResNull <- run.prism(prism = myPrismNull, 
+                       n.cores=8)
+slotNames(bpResNull)
+
+
+# extract posterior mean of cell type fraction theta
+thetaFirstNull <- get.fraction(bp=bpResNull,
+            which.theta="first", # After Gibbs
+            state.or.type="type")
+
+head(thetaFirstNull)
+
+# Pivot to long format
+bulkPercentagesFirstNull <- thetaFirstNull %>%
+  as.data.frame() %>%
+  rownames_to_column("sample") %>%
+  pivot_longer(
+    cols = -sample,
+    names_to = "manual.log.anot.fine",
+    values_to = "cellProportion"
+  ) %>%
+  # If sample name ends in _n, type is bn (bulk nuc). Otherwise, it is bc (bulk cell)
+  mutate(
+    sampleType = case_when(
+      str_ends(sample, "_n") ~ "bn",
+      TRUE ~ "bc"
+    ),
+    # If sample type is bn, remove b_n to save sample id only. 
+    sampleName = case_when(
+      sampleType == "bn" ~ str_remove(sample, "_n$"),
+      TRUE ~ sample
+    ), 
+    # If sample type is bn, remove a or b from the end of the sample name. 
+    sampleNameEdit = case_when(
+      sampleType == "bn" ~ str_remove(sampleName, "[ab]"),
+      TRUE ~ sampleName
+    ),
+  ) %>%
+  select(sampleName, sampleType, manual.log.anot.fine, cellProportion, sampleNameEdit) %>%
+  # Method details
+  mutate("deconvBenchResType" = "P", # P for proportion
+         "Method" = "customBayesPrism", 
+         "Parameters" = "keyNullThetaFirst",
+         "Reference" = "masterMarkerAll",
+         "Seed"=123)
+
+# Rbind proportion outputs to compute error metrics.
+bayesResGround <- rbind(bulkPercentagesFirstNull,
+                        snCellPercentages)
+
+# Reference will change for the four Prism situations, so not including in the masterPropDf. Instead, inlcluding notes in "Reference" column. 
+masterPropDf <- rbind(masterPropDf, 
+                      bulkPercentagesFirstNull)
+
+# Compute and rbind metric outputs
+bayesResMetrics <- deconError(bayesResGround, 
+                              parameters = "keyNullThetaFirst",
+                              method = "customBayesPrism",
+                              reference="masterMarkerAll",
+                              seed=123)
+# Rbind metric measurements 
+ masterGlobMetricDf <- rbind(masterGlobMetricDf, 
+                              bayesResMetrics$overviewMetrics)
+masterGranularMetricDf <- rbind(masterGranularMetricDf, 
+                              bayesResMetrics$granularMetrics)
+masterRawPEDf <- rbind(masterRawPEDf, 
+                              bayesResMetrics$rawPredictionError)
+
+# Cleanup
+rm(thetaFirstNull, bulkPercentagesFirstNull, bayesResGround, bayesResMetrics)
+gc()
+
+# extract posterior mean of cell type fraction theta
+thetaNullFinal <- get.fraction (bp=bpResNull,
+            which.theta="final", # After Gibbs
+            state.or.type="type")
+
+head(thetaNullFinal)
+
+# Pivot to long format
+bulkPercentagesFinalNull <- thetaNullFinal %>%
+  as.data.frame() %>%
+  rownames_to_column("sample") %>%
+  pivot_longer(
+    cols = -sample,
+    names_to = "manual.log.anot.fine",
+    values_to = "cellProportion"
+  ) %>%
+  # If sample name ends in _n, type is bn (bulk nuc). Otherwise, it is bc (bulk cell)
+  mutate(
+    sampleType = case_when(
+      str_ends(sample, "_n") ~ "bn",
+      TRUE ~ "bc"
+    ),
+    # If sample type is bn, remove b_n to save sample id only. 
+    sampleName = case_when(
+      sampleType == "bn" ~ str_remove(sample, "_n$"),
+      TRUE ~ sample
+    ), 
+    # If sample type is bn, remove a or b from the end of the sample name. 
+    sampleNameEdit = case_when(
+      sampleType == "bn" ~ str_remove(sampleName, "[ab]"),
+      TRUE ~ sampleName
+    ),
+  ) %>%
+  select(sampleName, sampleType, manual.log.anot.fine, cellProportion, sampleNameEdit) %>%
+  # Method details
+  mutate("deconvBenchResType" = "P", # P for proportion
+         "Method" = "customBayesPrism", 
+         "Parameters" = "keyNullThetaFinal",
+         "Reference" = "masterMarkerAll",
+         "Seed"=123)
+
+# Rbind proportion outputs to compute error metrics.
+bayesResGround <- rbind(bulkPercentagesFinalNull,
+                        snCellPercentages)
+
+# Reference will change for the four Prism situations, so not including in the masterPropDf. Instead, inlcluding notes in "Reference" column. 
+masterPropDf <- rbind(masterPropDf, 
+                      bulkPercentagesFinalNull)
+
+# Compute and rbind metric outputs
+bayesResMetrics <- deconError(bayesResGround, 
+                              parameters = "keyNullThetaFinal",
+                              method = "customBayesPrism",
+                              reference="masterMarkerAll",
+                              seed=123)
+# Rbind metric measurements 
+ masterGlobMetricDf <- rbind(masterGlobMetricDf, 
+                              bayesResMetrics$overviewMetrics)
+masterGranularMetricDf <- rbind(masterGranularMetricDf, 
+                              bayesResMetrics$granularMetrics)
+masterRawPEDf <- rbind(masterRawPEDf, 
+                              bayesResMetrics$rawPredictionError)
+
+# Cleanup
+rm(thetaFinalNull, bulkPercentagesFinalNull, bayesResGround, bayesResMetrics, myPrismNull, bpResNull)
+gc()
+```
+
+### 3.1.7 Cibersort 10 Unique
+```{r}
+myPrismNull <- new.prism(
+  reference = snCountsFinalUnique, 
+  mixture = bulkCountsFinalUnique, 
+  cell.type.labels = snAnno, 
+  cell.state.labels = snAnno,
+  key = NULL, 
+  outlier.cut = 0.8, # Filter genes in the bulk sample with an expression fraction greater than 1% in more than 10% of bulk data. These genes may dominate as outliers resulting from less stringent QC after mapping. 
+  outlier.fraction = 0.00
+)
+# Print genes filtered out
+
+filtered <- setdiff(colnames(snCountsFinal), colnames(myPrismNull@mixture))
+
+bpResNull <- run.prism(prism = myPrismNull, 
+                       n.cores=8)
+slotNames(bpResNull)
+
+
+# extract posterior mean of cell type fraction theta
+thetaFirstNull <- get.fraction(bp=bpResNull,
+            which.theta="first", # After Gibbs
+            state.or.type="type")
+
+head(thetaFirstNull)
+
+# Pivot to long format
+bulkPercentagesFirstNull <- thetaFirstNull %>%
+  as.data.frame() %>%
+  rownames_to_column("sample") %>%
+  pivot_longer(
+    cols = -sample,
+    names_to = "manual.log.anot.fine",
+    values_to = "cellProportion"
+  ) %>%
+  # If sample name ends in _n, type is bn (bulk nuc). Otherwise, it is bc (bulk cell)
+  mutate(
+    sampleType = case_when(
+      str_ends(sample, "_n") ~ "bn",
+      TRUE ~ "bc"
+    ),
+    # If sample type is bn, remove b_n to save sample id only. 
+    sampleName = case_when(
+      sampleType == "bn" ~ str_remove(sample, "_n$"),
+      TRUE ~ sample
+    ), 
+    # If sample type is bn, remove a or b from the end of the sample name. 
+    sampleNameEdit = case_when(
+      sampleType == "bn" ~ str_remove(sampleName, "[ab]"),
+      TRUE ~ sampleName
+    ),
+  ) %>%
+  select(sampleName, sampleType, manual.log.anot.fine, cellProportion, sampleNameEdit) %>%
+  # Method details
+  mutate("deconvBenchResType" = "P", # P for proportion
+         "Method" = "customBayesPrism", 
+         "Parameters" = "keyNullThetaFirst",
+         "Reference" = "masterMarkerUnique",
+         "Seed"=123)
+
+# Rbind proportion outputs to compute error metrics.
+bayesResGround <- rbind(bulkPercentagesFirstNull,
+                        snCellPercentages)
+
+# Reference will change for the four Prism situations, so not including in the masterPropDf. Instead, inlcluding notes in "Reference" column. 
+masterPropDf <- rbind(masterPropDf, 
+                      bulkPercentagesFirstNull)
+
+# Compute and rbind metric outputs
+bayesResMetrics <- deconError(bayesResGround, 
+                              parameters = "keyNullThetaFirst",
+                              method = "customBayesPrism",
+                              reference="masterMarkerUnique",
+                              seed=123)
+# Rbind metric measurements 
+ masterGlobMetricDf <- rbind(masterGlobMetricDf, 
+                              bayesResMetrics$overviewMetrics)
+masterGranularMetricDf <- rbind(masterGranularMetricDf, 
+                              bayesResMetrics$granularMetrics)
+masterRawPEDf <- rbind(masterRawPEDf, 
+                              bayesResMetrics$rawPredictionError)
+
+# Cleanup
+rm(thetaFirstNull, bulkPercentagesFirstNull, bayesResGround, bayesResMetrics)
+gc()
+
+# extract posterior mean of cell type fraction theta
+thetaNullFinal <- get.fraction (bp=bpResNull,
+            which.theta="final", # After Gibbs
+            state.or.type="type")
+
+head(thetaNullFinal)
+
+# Pivot to long format
+bulkPercentagesFinalNull <- thetaNullFinal %>%
+  as.data.frame() %>%
+  rownames_to_column("sample") %>%
+  pivot_longer(
+    cols = -sample,
+    names_to = "manual.log.anot.fine",
+    values_to = "cellProportion"
+  ) %>%
+  # If sample name ends in _n, type is bn (bulk nuc). Otherwise, it is bc (bulk cell)
+  mutate(
+    sampleType = case_when(
+      str_ends(sample, "_n") ~ "bn",
+      TRUE ~ "bc"
+    ),
+    # If sample type is bn, remove b_n to save sample id only. 
+    sampleName = case_when(
+      sampleType == "bn" ~ str_remove(sample, "_n$"),
+      TRUE ~ sample
+    ), 
+    # If sample type is bn, remove a or b from the end of the sample name. 
+    sampleNameEdit = case_when(
+      sampleType == "bn" ~ str_remove(sampleName, "[ab]"),
+      TRUE ~ sampleName
+    ),
+  ) %>%
+  select(sampleName, sampleType, manual.log.anot.fine, cellProportion, sampleNameEdit) %>%
+  # Method details
+  mutate("deconvBenchResType" = "P", # P for proportion
+         "Method" = "customBayesPrism", 
+         "Parameters" = "keyNullThetaFinal",
+         "Reference" = "masterMarkerUnique",
+         "Seed"=123)
+
+# Rbind proportion outputs to compute error metrics.
+bayesResGround <- rbind(bulkPercentagesFinalNull,
+                        snCellPercentages)
+
+# Reference will change for the four Prism situations, so not including in the masterPropDf. Instead, inlcluding notes in "Reference" column. 
+masterPropDf <- rbind(masterPropDf, 
+                      bulkPercentagesFinalNull)
+
+# Compute and rbind metric outputs
+bayesResMetrics <- deconError(bayesResGround, 
+                              parameters = "keyNullThetaFinal",
+                              method = "customBayesPrism",
+                              reference="masterMarkerUnique",
+                              seed=123)
+# Rbind metric measurements 
+ masterGlobMetricDf <- rbind(masterGlobMetricDf, 
+                              bayesResMetrics$overviewMetrics)
+masterGranularMetricDf <- rbind(masterGranularMetricDf, 
+                              bayesResMetrics$granularMetrics)
+masterRawPEDf <- rbind(masterRawPEDf, 
+                              bayesResMetrics$rawPredictionError)
+
+# Cleanup
+rm(thetaFinalNull, bulkPercentagesFinalNull, bayesResGround, bayesResMetrics, myPrismNull, bpResNull)
+gc()
+```
+
+## 3.2 key = "CTVT"
+There is an option, key, to define the label that corresponds to the tumor. It should be NULL if there are no tumor cells OR if the reference and mixture are from matched sample.
+I'm not sure what this means for when we have non-matched samples so creating two prisms. 
+### 3.2.1 Master marker all
+```{r}
+myPrismKey <- new.prism(
+  reference = snCountsFinal, 
+  mixture = bulkCountsFinal, 
+  cell.type.labels = snAnno, 
+  cell.state.labels = snAnno,
+  key = "CTVT", 
+  outlier.cut = 0.8, # Filter genes in the bulk sample with an expression fraction greater than 1% in more than 10% of bulk data. These genes may dominate as outliers resulting from less stringent QC after mapping. 
+  outlier.fraction = 0
+)
+
+# Number of outlier genes filtered from mixture = 50 genes have an expression fraction greater than 1 in more than 10 of bulk data. 
+
+bpResKey <- run.prism(prism = myPrismKey, 
+                       n.cores=8)
+
+# extract posterior mean of cell type fraction theta
+thetaFirstKey <- get.fraction (bp=bpResKey,
+            which.theta="first", # After Gibbs
+            state.or.type="type")
+
+head(thetaFirstKey)
+
+# Pivot to long format
+bulkPercentagesFirstKey <- thetaFirstKey %>%
+   as.data.frame() %>%
+  rownames_to_column("sample") %>%
+  pivot_longer(
+    cols = -sample,
+    names_to = "manual.log.anot.fine",
+    values_to = "cellProportion"
+  ) %>%
+  # If sample name ends in _n, type is bn (bulk nuc). Otherwise, it is bc (bulk cell)
+  mutate(
+    sampleType = case_when(
+      str_ends(sample, "_n") ~ "bn",
+      TRUE ~ "bc"
+    ),
+    # If sample type is bn, remove b_n to save sample id only. 
+    sampleName = case_when(
+      sampleType == "bn" ~ str_remove(sample, "_n$"),
+      TRUE ~ sample
+    ), 
+    # If sample type is bn, remove a or b from the end of the sample name. 
+    sampleNameEdit = case_when(
+      sampleType == "bn" ~ str_remove(sampleName, "[ab]"),
+      TRUE ~ sampleName
+    ),
+  ) %>%
+  select(sampleName, sampleType, manual.log.anot.fine, cellProportion, sampleNameEdit) %>%
+  # Method details
+  mutate("deconvBenchResType" = "P", # P for proportion
+         "Method" = "customBayesPrism", 
+         "Parameters" = "keyCTVTThetaFirst",
+         "Reference" = "masterMarkerAll",
+         "Seed"=123)
+
+# Rbind proportion outputs to compute error metrics.
+bayesResGround <- rbind(bulkPercentagesFirstKey,
+                        snCellPercentages)
+
+# Reference will change for the four Prism situations, so not including in the masterPropDf. Instead, inlcluding notes in "Reference" column. 
+masterPropDf <- rbind(masterPropDf, 
+                      bulkPercentagesFirstKey)
+
+# Compute and rbind metric outputs
+bayesResMetrics <- deconError(bayesResGround, 
+                              parameters = "keyCTVTThetaFirst",
+                              method = "customBayesPrism",
+                              reference="masterMarkerAll",
+                              seed=123)
+# Rbind metric measurements 
+# Rbind metric measurements 
+ masterGlobMetricDf <- rbind(masterGlobMetricDf, 
+                              bayesResMetrics$overviewMetrics)
+masterGranularMetricDf <- rbind(masterGranularMetricDf, 
+                              bayesResMetrics$granularMetrics)
+masterRawPEDf <- rbind(masterRawPEDf, 
+                              bayesResMetrics$rawPredictionError)
+
+# Cleanup
+rm(thetaFirstKey, bulkPercentagesFirstKey, bayesResGround, bayesResMetrics)
+gc()
+
+
+# extract posterior mean of cell type fraction theta
+thetaFinalKey <- get.fraction (bp=bpResKey,
+            which.theta="final", # After Gibbs
+            state.or.type="type")
+
+head(thetaFinalKey)
+
+# Pivot to long format
+bulkPercentagesFinalKey <- thetaFinalKey %>%
+  as.data.frame() %>%
+  rownames_to_column("sample") %>%
+  pivot_longer(
+    cols = -sample,
+    names_to = "manual.log.anot.fine",
+    values_to = "cellProportion"
+  ) %>%
+  # If sample name ends in _n, type is bn (bulk nuc). Otherwise, it is bc (bulk cell)
+  mutate(
+    sampleType = case_when(
+      str_ends(sample, "_n") ~ "bn",
+      TRUE ~ "bc"
+    ),
+    # If sample type is bn, remove b_n to save sample id only. 
+    sampleName = case_when(
+      sampleType == "bn" ~ str_remove(sample, "_n$"),
+      TRUE ~ sample
+    ), 
+    # If sample type is bn, remove a or b from the end of the sample name. 
+    sampleNameEdit = case_when(
+      sampleType == "bn" ~ str_remove(sampleName, "[ab]"),
+      TRUE ~ sampleName
+    ),
+  ) %>%
+  select(sampleName, sampleType, manual.log.anot.fine, cellProportion, sampleNameEdit) %>%
+  # Method details
+  mutate("deconvBenchResType" = "P", # P for proportion
+         "Method" = "customBayesPrism", 
+         "Parameters" = "keyCTVTThetaFinal",
+         "Reference" = "masterMarkerAll",
+         "Seed"=123)
+
+# Rbind proportion outputs to compute error metrics.
+bayesResGround <- rbind(bulkPercentagesFinalKey,
+                        snCellPercentages)
+
+# Reference will change for the four Prism situations, so not including in the masterPropDf. Instead, inlcluding notes in "Reference" column. 
+masterPropDf <- rbind(masterPropDf, 
+                      bulkPercentagesFinalKey)
+
+# Compute and rbind metric outputs
+bayesResMetrics <- deconError(bayesResGround, 
+                              parameters = "keyCTVTThetaFinal",
+                              method = "customBayesPrism",
+                              reference="masterMarkerAll",
+                              seed=123)
+
+ masterGlobMetricDf <- rbind(masterGlobMetricDf, 
+                              bayesResMetrics$overviewMetrics)
+masterGranularMetricDf <- rbind(masterGranularMetricDf, 
+                              bayesResMetrics$granularMetrics)
+masterRawPEDf <- rbind(masterRawPEDf, 
+                              bayesResMetrics$rawPredictionError)
+# Cleanup
+rm(thetaFinalKey, bulkPercentagesFinalKey, bayesResGround, bayesResMetrics, myPrismKey, bpResKey)
+
+gc()
+```
+
+### 3.2.2 Master marker unique
+```{r}
+myPrismKey <- new.prism(
+  reference = snCountsFinalUnique, 
+  mixture = bulkCountsFinalUnique, 
+  cell.type.labels = snAnno, 
+  cell.state.labels = snAnno,
+  key = "CTVT", 
+  outlier.cut = 0.8, # Filter genes in the bulk sample with an expression fraction greater than 1% in more than 10% of bulk data. These genes may dominate as outliers resulting from less stringent QC after mapping. 
+  outlier.fraction = 0
+)
+
+# Number of outlier genes filtered from mixture = 50 genes have an expression fraction greater than 1 in more than 10 of bulk data. 
+
+bpResKey <- run.prism(prism = myPrismKey, 
+                       n.cores=8)
+
+# extract posterior mean of cell type fraction theta
+thetaFirstKey <- get.fraction (bp=bpResKey,
+            which.theta="first", # After Gibbs
+            state.or.type="type")
+
+head(thetaFirstKey)
+
+# Pivot to long format
+bulkPercentagesFirstKey <- thetaFirstKey %>%
+   as.data.frame() %>%
+  rownames_to_column("sample") %>%
+  pivot_longer(
+    cols = -sample,
+    names_to = "manual.log.anot.fine",
+    values_to = "cellProportion"
+  ) %>%
+  # If sample name ends in _n, type is bn (bulk nuc). Otherwise, it is bc (bulk cell)
+  mutate(
+    sampleType = case_when(
+      str_ends(sample, "_n") ~ "bn",
+      TRUE ~ "bc"
+    ),
+    # If sample type is bn, remove b_n to save sample id only. 
+    sampleName = case_when(
+      sampleType == "bn" ~ str_remove(sample, "_n$"),
+      TRUE ~ sample
+    ), 
+    # If sample type is bn, remove a or b from the end of the sample name. 
+    sampleNameEdit = case_when(
+      sampleType == "bn" ~ str_remove(sampleName, "[ab]"),
+      TRUE ~ sampleName
+    ),
+  ) %>%
+  select(sampleName, sampleType, manual.log.anot.fine, cellProportion, sampleNameEdit) %>%
+  # Method details
+  mutate("deconvBenchResType" = "P", # P for proportion
+         "Method" = "customBayesPrism", 
+         "Parameters" = "keyCTVTThetaFirst",
+         "Reference" = "masterMarkerUnique",
+         "Seed"=123)
+
+# Rbind proportion outputs to compute error metrics.
+bayesResGround <- rbind(bulkPercentagesFirstKey,
+                        snCellPercentages)
+
+# Reference will change for the four Prism situations, so not including in the masterPropDf. Instead, inlcluding notes in "Reference" column. 
+masterPropDf <- rbind(masterPropDf, 
+                      bulkPercentagesFirstKey)
+
+# Compute and rbind metric outputs
+bayesResMetrics <- deconError(bayesResGround, 
+                              parameters = "keyCTVTThetaFirst",
+                              method = "customBayesPrism",
+                              reference="masterMarkerUnique",
+                              seed=123)
+# Rbind metric measurements 
+# Rbind metric measurements 
+ masterGlobMetricDf <- rbind(masterGlobMetricDf, 
+                              bayesResMetrics$overviewMetrics)
+masterGranularMetricDf <- rbind(masterGranularMetricDf, 
+                              bayesResMetrics$granularMetrics)
+masterRawPEDf <- rbind(masterRawPEDf, 
+                              bayesResMetrics$rawPredictionError)
+
+# Cleanup
+rm(thetaFirstKey, bulkPercentagesFirstKey, bayesResGround, bayesResMetrics)
+gc()
+
+
+# extract posterior mean of cell type fraction theta
+thetaFinalKey <- get.fraction (bp=bpResKey,
+            which.theta="final", # After Gibbs
+            state.or.type="type")
+
+head(thetaFinalKey)
+
+# Pivot to long format
+bulkPercentagesFinalKey <- thetaFinalKey %>%
+  as.data.frame() %>%
+  rownames_to_column("sample") %>%
+  pivot_longer(
+    cols = -sample,
+    names_to = "manual.log.anot.fine",
+    values_to = "cellProportion"
+  ) %>%
+  # If sample name ends in _n, type is bn (bulk nuc). Otherwise, it is bc (bulk cell)
+  mutate(
+    sampleType = case_when(
+      str_ends(sample, "_n") ~ "bn",
+      TRUE ~ "bc"
+    ),
+    # If sample type is bn, remove b_n to save sample id only. 
+    sampleName = case_when(
+      sampleType == "bn" ~ str_remove(sample, "_n$"),
+      TRUE ~ sample
+    ), 
+    # If sample type is bn, remove a or b from the end of the sample name. 
+    sampleNameEdit = case_when(
+      sampleType == "bn" ~ str_remove(sampleName, "[ab]"),
+      TRUE ~ sampleName
+    ),
+  ) %>%
+  select(sampleName, sampleType, manual.log.anot.fine, cellProportion, sampleNameEdit) %>%
+  # Method details
+  mutate("deconvBenchResType" = "P", # P for proportion
+         "Method" = "customBayesPrism", 
+         "Parameters" = "keyCTVTThetaFinal",
+         "Reference" = "masterMarkerUnique",
+         "Seed"=123)
+
+# Rbind proportion outputs to compute error metrics.
+bayesResGround <- rbind(bulkPercentagesFinalKey,
+                        snCellPercentages)
+
+# Reference will change for the four Prism situations, so not including in the masterPropDf. Instead, inlcluding notes in "Reference" column. 
+masterPropDf <- rbind(masterPropDf, 
+                      bulkPercentagesFinalKey)
+
+# Compute and rbind metric outputs
+bayesResMetrics <- deconError(bayesResGround, 
+                              parameters = "keyCTVTThetaFinal",
+                              method = "customBayesPrism",
+                              reference="masterMarkerUnique",
+                              seed=123)
+
+ masterGlobMetricDf <- rbind(masterGlobMetricDf, 
+                              bayesResMetrics$overviewMetrics)
+masterGranularMetricDf <- rbind(masterGranularMetricDf, 
+                              bayesResMetrics$granularMetrics)
+masterRawPEDf <- rbind(masterRawPEDf, 
+                              bayesResMetrics$rawPredictionError)
+# Cleanup
+rm(thetaFinalKey, bulkPercentagesFinalKey, bayesResGround, bayesResMetrics, myPrismKey, bpResKey)
+
+gc()
+```
+
+
+
+### 3.2.1 Master marker all
+```{r}
+myPrismKey <- new.prism(
+  reference = snCountsFinal, 
+  mixture = bulkCountsFinal, 
+  cell.type.labels = snAnno, 
+  cell.state.labels = snAnno,
+  key = "CTVT", 
+  outlier.cut = 0.8, # Filter genes in the bulk sample with an expression fraction greater than 1% in more than 10% of bulk data. These genes may dominate as outliers resulting from less stringent QC after mapping. 
+  outlier.fraction = 0
+)
+
+# Number of outlier genes filtered from mixture = 50 genes have an expression fraction greater than 1 in more than 10 of bulk data. 
+
+bpResKey <- run.prism(prism = myPrismKey, 
+                       n.cores=8)
+
+# extract posterior mean of cell type fraction theta
+thetaFirstKey <- get.fraction (bp=bpResKey,
+            which.theta="first", # After Gibbs
+            state.or.type="type")
+
+head(thetaFirstKey)
+
+# Pivot to long format
+bulkPercentagesFirstKey <- thetaFirstKey %>%
+   as.data.frame() %>%
+  rownames_to_column("sample") %>%
+  pivot_longer(
+    cols = -sample,
+    names_to = "manual.log.anot.fine",
+    values_to = "cellProportion"
+  ) %>%
+  # If sample name ends in _n, type is bn (bulk nuc). Otherwise, it is bc (bulk cell)
+  mutate(
+    sampleType = case_when(
+      str_ends(sample, "_n") ~ "bn",
+      TRUE ~ "bc"
+    ),
+    # If sample type is bn, remove b_n to save sample id only. 
+    sampleName = case_when(
+      sampleType == "bn" ~ str_remove(sample, "_n$"),
+      TRUE ~ sample
+    ), 
+    # If sample type is bn, remove a or b from the end of the sample name. 
+    sampleNameEdit = case_when(
+      sampleType == "bn" ~ str_remove(sampleName, "[ab]"),
+      TRUE ~ sampleName
+    ),
+  ) %>%
+  select(sampleName, sampleType, manual.log.anot.fine, cellProportion, sampleNameEdit) %>%
+  # Method details
+  mutate("deconvBenchResType" = "P", # P for proportion
+         "Method" = "customBayesPrism", 
+         "Parameters" = "keyCTVTThetaFirst",
+         "Reference" = "masterMarkerAll",
+         "Seed"=123)
+
+# Rbind proportion outputs to compute error metrics.
+bayesResGround <- rbind(bulkPercentagesFirstKey,
+                        snCellPercentages)
+
+# Reference will change for the four Prism situations, so not including in the masterPropDf. Instead, inlcluding notes in "Reference" column. 
+masterPropDf <- rbind(masterPropDf, 
+                      bulkPercentagesFirstKey)
+
+# Compute and rbind metric outputs
+bayesResMetrics <- deconError(bayesResGround, 
+                              parameters = "keyCTVTThetaFirst",
+                              method = "customBayesPrism",
+                              reference="masterMarkerAll",
+                              seed=123)
+# Rbind metric measurements 
+# Rbind metric measurements 
+ masterGlobMetricDf <- rbind(masterGlobMetricDf, 
+                              bayesResMetrics$overviewMetrics)
+masterGranularMetricDf <- rbind(masterGranularMetricDf, 
+                              bayesResMetrics$granularMetrics)
+masterRawPEDf <- rbind(masterRawPEDf, 
+                              bayesResMetrics$rawPredictionError)
+
+# Cleanup
+rm(thetaFirstKey, bulkPercentagesFirstKey, bayesResGround, bayesResMetrics)
+gc()
+
+
+# extract posterior mean of cell type fraction theta
+thetaFinalKey <- get.fraction (bp=bpResKey,
+            which.theta="final", # After Gibbs
+            state.or.type="type")
+
+head(thetaFinalKey)
+
+# Pivot to long format
+bulkPercentagesFinalKey <- thetaFinalKey %>%
+  as.data.frame() %>%
+  rownames_to_column("sample") %>%
+  pivot_longer(
+    cols = -sample,
+    names_to = "manual.log.anot.fine",
+    values_to = "cellProportion"
+  ) %>%
+  # If sample name ends in _n, type is bn (bulk nuc). Otherwise, it is bc (bulk cell)
+  mutate(
+    sampleType = case_when(
+      str_ends(sample, "_n") ~ "bn",
+      TRUE ~ "bc"
+    ),
+    # If sample type is bn, remove b_n to save sample id only. 
+    sampleName = case_when(
+      sampleType == "bn" ~ str_remove(sample, "_n$"),
+      TRUE ~ sample
+    ), 
+    # If sample type is bn, remove a or b from the end of the sample name. 
+    sampleNameEdit = case_when(
+      sampleType == "bn" ~ str_remove(sampleName, "[ab]"),
+      TRUE ~ sampleName
+    ),
+  ) %>%
+  select(sampleName, sampleType, manual.log.anot.fine, cellProportion, sampleNameEdit) %>%
+  # Method details
+  mutate("deconvBenchResType" = "P", # P for proportion
+         "Method" = "customBayesPrism", 
+         "Parameters" = "keyCTVTThetaFinal",
+         "Reference" = "masterMarkerAll",
+         "Seed"=123)
+
+# Rbind proportion outputs to compute error metrics.
+bayesResGround <- rbind(bulkPercentagesFinalKey,
+                        snCellPercentages)
+
+# Reference will change for the four Prism situations, so not including in the masterPropDf. Instead, inlcluding notes in "Reference" column. 
+masterPropDf <- rbind(masterPropDf, 
+                      bulkPercentagesFinalKey)
+
+# Compute and rbind metric outputs
+bayesResMetrics <- deconError(bayesResGround, 
+                              parameters = "keyCTVTThetaFinal",
+                              method = "customBayesPrism",
+                              reference="masterMarkerAll",
+                              seed=123)
+
+ masterGlobMetricDf <- rbind(masterGlobMetricDf, 
+                              bayesResMetrics$overviewMetrics)
+masterGranularMetricDf <- rbind(masterGranularMetricDf, 
+                              bayesResMetrics$granularMetrics)
+masterRawPEDf <- rbind(masterRawPEDf, 
+                              bayesResMetrics$rawPredictionError)
+# Cleanup
+rm(thetaFinalKey, bulkPercentagesFinalKey, bayesResGround, bayesResMetrics, myPrismKey, bpResKey)
+
+gc()
+```
+
+### 3.2.2 Master marker unique
+```{r}
+myPrismKey <- new.prism(
+  reference = snCountsFinalUnique, 
+  mixture = bulkCountsFinalUnique, 
+  cell.type.labels = snAnno, 
+  cell.state.labels = snAnno,
+  key = "CTVT", 
+  outlier.cut = 0.8, # Filter genes in the bulk sample with an expression fraction greater than 1% in more than 10% of bulk data. These genes may dominate as outliers resulting from less stringent QC after mapping. 
+  outlier.fraction = 0
+)
+
+# Number of outlier genes filtered from mixture = 50 genes have an expression fraction greater than 1 in more than 10 of bulk data. 
+
+bpResKey <- run.prism(prism = myPrismKey, 
+                       n.cores=8)
+
+# extract posterior mean of cell type fraction theta
+thetaFirstKey <- get.fraction (bp=bpResKey,
+            which.theta="first", # After Gibbs
+            state.or.type="type")
+
+head(thetaFirstKey)
+
+# Pivot to long format
+bulkPercentagesFirstKey <- thetaFirstKey %>%
+   as.data.frame() %>%
+  rownames_to_column("sample") %>%
+  pivot_longer(
+    cols = -sample,
+    names_to = "manual.log.anot.fine",
+    values_to = "cellProportion"
+  ) %>%
+  # If sample name ends in _n, type is bn (bulk nuc). Otherwise, it is bc (bulk cell)
+  mutate(
+    sampleType = case_when(
+      str_ends(sample, "_n") ~ "bn",
+      TRUE ~ "bc"
+    ),
+    # If sample type is bn, remove b_n to save sample id only. 
+    sampleName = case_when(
+      sampleType == "bn" ~ str_remove(sample, "_n$"),
+      TRUE ~ sample
+    ), 
+    # If sample type is bn, remove a or b from the end of the sample name. 
+    sampleNameEdit = case_when(
+      sampleType == "bn" ~ str_remove(sampleName, "[ab]"),
+      TRUE ~ sampleName
+    ),
+  ) %>%
+  select(sampleName, sampleType, manual.log.anot.fine, cellProportion, sampleNameEdit) %>%
+  # Method details
+  mutate("deconvBenchResType" = "P", # P for proportion
+         "Method" = "customBayesPrism", 
+         "Parameters" = "keyCTVTThetaFirst",
+         "Reference" = "masterMarkerUnique",
+         "Seed"=123)
+
+# Rbind proportion outputs to compute error metrics.
+bayesResGround <- rbind(bulkPercentagesFirstKey,
+                        snCellPercentages)
+
+# Reference will change for the four Prism situations, so not including in the masterPropDf. Instead, inlcluding notes in "Reference" column. 
+masterPropDf <- rbind(masterPropDf, 
+                      bulkPercentagesFirstKey)
+
+# Compute and rbind metric outputs
+bayesResMetrics <- deconError(bayesResGround, 
+                              parameters = "keyCTVTThetaFirst",
+                              method = "customBayesPrism",
+                              reference="masterMarkerUnique",
+                              seed=123)
+# Rbind metric measurements 
+# Rbind metric measurements 
+ masterGlobMetricDf <- rbind(masterGlobMetricDf, 
+                              bayesResMetrics$overviewMetrics)
+masterGranularMetricDf <- rbind(masterGranularMetricDf, 
+                              bayesResMetrics$granularMetrics)
+masterRawPEDf <- rbind(masterRawPEDf, 
+                              bayesResMetrics$rawPredictionError)
+
+# Cleanup
+rm(thetaFirstKey, bulkPercentagesFirstKey, bayesResGround, bayesResMetrics)
+gc()
+
+
+# extract posterior mean of cell type fraction theta
+thetaFinalKey <- get.fraction (bp=bpResKey,
+            which.theta="final", # After Gibbs
+            state.or.type="type")
+
+head(thetaFinalKey)
+
+# Pivot to long format
+bulkPercentagesFinalKey <- thetaFinalKey %>%
+  as.data.frame() %>%
+  rownames_to_column("sample") %>%
+  pivot_longer(
+    cols = -sample,
+    names_to = "manual.log.anot.fine",
+    values_to = "cellProportion"
+  ) %>%
+  # If sample name ends in _n, type is bn (bulk nuc). Otherwise, it is bc (bulk cell)
+  mutate(
+    sampleType = case_when(
+      str_ends(sample, "_n") ~ "bn",
+      TRUE ~ "bc"
+    ),
+    # If sample type is bn, remove b_n to save sample id only. 
+    sampleName = case_when(
+      sampleType == "bn" ~ str_remove(sample, "_n$"),
+      TRUE ~ sample
+    ), 
+    # If sample type is bn, remove a or b from the end of the sample name. 
+    sampleNameEdit = case_when(
+      sampleType == "bn" ~ str_remove(sampleName, "[ab]"),
+      TRUE ~ sampleName
+    ),
+  ) %>%
+  select(sampleName, sampleType, manual.log.anot.fine, cellProportion, sampleNameEdit) %>%
+  # Method details
+  mutate("deconvBenchResType" = "P", # P for proportion
+         "Method" = "customBayesPrism", 
+         "Parameters" = "keyCTVTThetaFinal",
+         "Reference" = "masterMarkerUnique",
+         "Seed"=123)
+
+# Rbind proportion outputs to compute error metrics.
+bayesResGround <- rbind(bulkPercentagesFinalKey,
+                        snCellPercentages)
+
+# Reference will change for the four Prism situations, so not including in the masterPropDf. Instead, inlcluding notes in "Reference" column. 
+masterPropDf <- rbind(masterPropDf, 
+                      bulkPercentagesFinalKey)
+
+# Compute and rbind metric outputs
+bayesResMetrics <- deconError(bayesResGround, 
+                              parameters = "keyCTVTThetaFinal",
+                              method = "customBayesPrism",
+                              reference="masterMarkerUnique",
+                              seed=123)
+
+ masterGlobMetricDf <- rbind(masterGlobMetricDf, 
+                              bayesResMetrics$overviewMetrics)
+masterGranularMetricDf <- rbind(masterGranularMetricDf, 
+                              bayesResMetrics$granularMetrics)
+masterRawPEDf <- rbind(masterRawPEDf, 
+                              bayesResMetrics$rawPredictionError)
+# Cleanup
+rm(thetaFinalKey, bulkPercentagesFinalKey, bayesResGround, bayesResMetrics, myPrismKey, bpResKey)
+
+gc()
+```
+
+### 3.2.1 Master marker all
+```{r}
+myPrismKey <- new.prism(
+  reference = snCountsFinal, 
+  mixture = bulkCountsFinal, 
+  cell.type.labels = snAnno, 
+  cell.state.labels = snAnno,
+  key = "CTVT", 
+  outlier.cut = 0.8, # Filter genes in the bulk sample with an expression fraction greater than 1% in more than 10% of bulk data. These genes may dominate as outliers resulting from less stringent QC after mapping. 
+  outlier.fraction = 0
+)
+
+# Number of outlier genes filtered from mixture = 50 genes have an expression fraction greater than 1 in more than 10 of bulk data. 
+
+bpResKey <- run.prism(prism = myPrismKey, 
+                       n.cores=8)
+
+# extract posterior mean of cell type fraction theta
+thetaFirstKey <- get.fraction (bp=bpResKey,
+            which.theta="first", # After Gibbs
+            state.or.type="type")
+
+head(thetaFirstKey)
+
+# Pivot to long format
+bulkPercentagesFirstKey <- thetaFirstKey %>%
+   as.data.frame() %>%
+  rownames_to_column("sample") %>%
+  pivot_longer(
+    cols = -sample,
+    names_to = "manual.log.anot.fine",
+    values_to = "cellProportion"
+  ) %>%
+  # If sample name ends in _n, type is bn (bulk nuc). Otherwise, it is bc (bulk cell)
+  mutate(
+    sampleType = case_when(
+      str_ends(sample, "_n") ~ "bn",
+      TRUE ~ "bc"
+    ),
+    # If sample type is bn, remove b_n to save sample id only. 
+    sampleName = case_when(
+      sampleType == "bn" ~ str_remove(sample, "_n$"),
+      TRUE ~ sample
+    ), 
+    # If sample type is bn, remove a or b from the end of the sample name. 
+    sampleNameEdit = case_when(
+      sampleType == "bn" ~ str_remove(sampleName, "[ab]"),
+      TRUE ~ sampleName
+    ),
+  ) %>%
+  select(sampleName, sampleType, manual.log.anot.fine, cellProportion, sampleNameEdit) %>%
+  # Method details
+  mutate("deconvBenchResType" = "P", # P for proportion
+         "Method" = "customBayesPrism", 
+         "Parameters" = "keyCTVTThetaFirst",
+         "Reference" = "masterMarkerAll",
+         "Seed"=123)
+
+# Rbind proportion outputs to compute error metrics.
+bayesResGround <- rbind(bulkPercentagesFirstKey,
+                        snCellPercentages)
+
+# Reference will change for the four Prism situations, so not including in the masterPropDf. Instead, inlcluding notes in "Reference" column. 
+masterPropDf <- rbind(masterPropDf, 
+                      bulkPercentagesFirstKey)
+
+# Compute and rbind metric outputs
+bayesResMetrics <- deconError(bayesResGround, 
+                              parameters = "keyCTVTThetaFirst",
+                              method = "customBayesPrism",
+                              reference="masterMarkerAll",
+                              seed=123)
+# Rbind metric measurements 
+# Rbind metric measurements 
+ masterGlobMetricDf <- rbind(masterGlobMetricDf, 
+                              bayesResMetrics$overviewMetrics)
+masterGranularMetricDf <- rbind(masterGranularMetricDf, 
+                              bayesResMetrics$granularMetrics)
+masterRawPEDf <- rbind(masterRawPEDf, 
+                              bayesResMetrics$rawPredictionError)
+
+# Cleanup
+rm(thetaFirstKey, bulkPercentagesFirstKey, bayesResGround, bayesResMetrics)
+gc()
+
+
+# extract posterior mean of cell type fraction theta
+thetaFinalKey <- get.fraction (bp=bpResKey,
+            which.theta="final", # After Gibbs
+            state.or.type="type")
+
+head(thetaFinalKey)
+
+# Pivot to long format
+bulkPercentagesFinalKey <- thetaFinalKey %>%
+  as.data.frame() %>%
+  rownames_to_column("sample") %>%
+  pivot_longer(
+    cols = -sample,
+    names_to = "manual.log.anot.fine",
+    values_to = "cellProportion"
+  ) %>%
+  # If sample name ends in _n, type is bn (bulk nuc). Otherwise, it is bc (bulk cell)
+  mutate(
+    sampleType = case_when(
+      str_ends(sample, "_n") ~ "bn",
+      TRUE ~ "bc"
+    ),
+    # If sample type is bn, remove b_n to save sample id only. 
+    sampleName = case_when(
+      sampleType == "bn" ~ str_remove(sample, "_n$"),
+      TRUE ~ sample
+    ), 
+    # If sample type is bn, remove a or b from the end of the sample name. 
+    sampleNameEdit = case_when(
+      sampleType == "bn" ~ str_remove(sampleName, "[ab]"),
+      TRUE ~ sampleName
+    ),
+  ) %>%
+  select(sampleName, sampleType, manual.log.anot.fine, cellProportion, sampleNameEdit) %>%
+  # Method details
+  mutate("deconvBenchResType" = "P", # P for proportion
+         "Method" = "customBayesPrism", 
+         "Parameters" = "keyCTVTThetaFinal",
+         "Reference" = "masterMarkerAll",
+         "Seed"=123)
+
+# Rbind proportion outputs to compute error metrics.
+bayesResGround <- rbind(bulkPercentagesFinalKey,
+                        snCellPercentages)
+
+# Reference will change for the four Prism situations, so not including in the masterPropDf. Instead, inlcluding notes in "Reference" column. 
+masterPropDf <- rbind(masterPropDf, 
+                      bulkPercentagesFinalKey)
+
+# Compute and rbind metric outputs
+bayesResMetrics <- deconError(bayesResGround, 
+                              parameters = "keyCTVTThetaFinal",
+                              method = "customBayesPrism",
+                              reference="masterMarkerAll",
+                              seed=123)
+
+ masterGlobMetricDf <- rbind(masterGlobMetricDf, 
+                              bayesResMetrics$overviewMetrics)
+masterGranularMetricDf <- rbind(masterGranularMetricDf, 
+                              bayesResMetrics$granularMetrics)
+masterRawPEDf <- rbind(masterRawPEDf, 
+                              bayesResMetrics$rawPredictionError)
+# Cleanup
+rm(thetaFinalKey, bulkPercentagesFinalKey, bayesResGround, bayesResMetrics, myPrismKey, bpResKey)
+
+gc()
+```
+
+### 3.2.2 Master marker unique
+```{r}
+myPrismKey <- new.prism(
+  reference = snCountsFinalUnique, 
+  mixture = bulkCountsFinalUnique, 
+  cell.type.labels = snAnno, 
+  cell.state.labels = snAnno,
+  key = "CTVT", 
+  outlier.cut = 0.8, # Filter genes in the bulk sample with an expression fraction greater than 1% in more than 10% of bulk data. These genes may dominate as outliers resulting from less stringent QC after mapping. 
+  outlier.fraction = 0
+)
+
+# Number of outlier genes filtered from mixture = 50 genes have an expression fraction greater than 1 in more than 10 of bulk data. 
+
+bpResKey <- run.prism(prism = myPrismKey, 
+                       n.cores=8)
+
+# extract posterior mean of cell type fraction theta
+thetaFirstKey <- get.fraction (bp=bpResKey,
+            which.theta="first", # After Gibbs
+            state.or.type="type")
+
+head(thetaFirstKey)
+
+# Pivot to long format
+bulkPercentagesFirstKey <- thetaFirstKey %>%
+   as.data.frame() %>%
+  rownames_to_column("sample") %>%
+  pivot_longer(
+    cols = -sample,
+    names_to = "manual.log.anot.fine",
+    values_to = "cellProportion"
+  ) %>%
+  # If sample name ends in _n, type is bn (bulk nuc). Otherwise, it is bc (bulk cell)
+  mutate(
+    sampleType = case_when(
+      str_ends(sample, "_n") ~ "bn",
+      TRUE ~ "bc"
+    ),
+    # If sample type is bn, remove b_n to save sample id only. 
+    sampleName = case_when(
+      sampleType == "bn" ~ str_remove(sample, "_n$"),
+      TRUE ~ sample
+    ), 
+    # If sample type is bn, remove a or b from the end of the sample name. 
+    sampleNameEdit = case_when(
+      sampleType == "bn" ~ str_remove(sampleName, "[ab]"),
+      TRUE ~ sampleName
+    ),
+  ) %>%
+  select(sampleName, sampleType, manual.log.anot.fine, cellProportion, sampleNameEdit) %>%
+  # Method details
+  mutate("deconvBenchResType" = "P", # P for proportion
+         "Method" = "customBayesPrism", 
+         "Parameters" = "keyCTVTThetaFirst",
+         "Reference" = "masterMarkerUnique",
+         "Seed"=123)
+
+# Rbind proportion outputs to compute error metrics.
+bayesResGround <- rbind(bulkPercentagesFirstKey,
+                        snCellPercentages)
+
+# Reference will change for the four Prism situations, so not including in the masterPropDf. Instead, inlcluding notes in "Reference" column. 
+masterPropDf <- rbind(masterPropDf, 
+                      bulkPercentagesFirstKey)
+
+# Compute and rbind metric outputs
+bayesResMetrics <- deconError(bayesResGround, 
+                              parameters = "keyCTVTThetaFirst",
+                              method = "customBayesPrism",
+                              reference="masterMarkerUnique",
+                              seed=123)
+# Rbind metric measurements 
+# Rbind metric measurements 
+ masterGlobMetricDf <- rbind(masterGlobMetricDf, 
+                              bayesResMetrics$overviewMetrics)
+masterGranularMetricDf <- rbind(masterGranularMetricDf, 
+                              bayesResMetrics$granularMetrics)
+masterRawPEDf <- rbind(masterRawPEDf, 
+                              bayesResMetrics$rawPredictionError)
+
+# Cleanup
+rm(thetaFirstKey, bulkPercentagesFirstKey, bayesResGround, bayesResMetrics)
+gc()
+
+
+# extract posterior mean of cell type fraction theta
+thetaFinalKey <- get.fraction (bp=bpResKey,
+            which.theta="final", # After Gibbs
+            state.or.type="type")
+
+head(thetaFinalKey)
+
+# Pivot to long format
+bulkPercentagesFinalKey <- thetaFinalKey %>%
+  as.data.frame() %>%
+  rownames_to_column("sample") %>%
+  pivot_longer(
+    cols = -sample,
+    names_to = "manual.log.anot.fine",
+    values_to = "cellProportion"
+  ) %>%
+  # If sample name ends in _n, type is bn (bulk nuc). Otherwise, it is bc (bulk cell)
+  mutate(
+    sampleType = case_when(
+      str_ends(sample, "_n") ~ "bn",
+      TRUE ~ "bc"
+    ),
+    # If sample type is bn, remove b_n to save sample id only. 
+    sampleName = case_when(
+      sampleType == "bn" ~ str_remove(sample, "_n$"),
+      TRUE ~ sample
+    ), 
+    # If sample type is bn, remove a or b from the end of the sample name. 
+    sampleNameEdit = case_when(
+      sampleType == "bn" ~ str_remove(sampleName, "[ab]"),
+      TRUE ~ sampleName
+    ),
+  ) %>%
+  select(sampleName, sampleType, manual.log.anot.fine, cellProportion, sampleNameEdit) %>%
+  # Method details
+  mutate("deconvBenchResType" = "P", # P for proportion
+         "Method" = "customBayesPrism", 
+         "Parameters" = "keyCTVTThetaFinal",
+         "Reference" = "masterMarkerUnique",
+         "Seed"=123)
+
+# Rbind proportion outputs to compute error metrics.
+bayesResGround <- rbind(bulkPercentagesFinalKey,
+                        snCellPercentages)
+
+# Reference will change for the four Prism situations, so not including in the masterPropDf. Instead, inlcluding notes in "Reference" column. 
+masterPropDf <- rbind(masterPropDf, 
+                      bulkPercentagesFinalKey)
+
+# Compute and rbind metric outputs
+bayesResMetrics <- deconError(bayesResGround, 
+                              parameters = "keyCTVTThetaFinal",
+                              method = "customBayesPrism",
+                              reference="masterMarkerUnique",
+                              seed=123)
+
+ masterGlobMetricDf <- rbind(masterGlobMetricDf, 
+                              bayesResMetrics$overviewMetrics)
+masterGranularMetricDf <- rbind(masterGranularMetricDf, 
+                              bayesResMetrics$granularMetrics)
+masterRawPEDf <- rbind(masterRawPEDf, 
+                              bayesResMetrics$rawPredictionError)
+# Cleanup
+rm(thetaFinalKey, bulkPercentagesFinalKey, bayesResGround, bayesResMetrics, myPrismKey, bpResKey)
+
+gc()
+```
+
+
+# 7 Update prisms for batch effect from sn vs bulk cell?
+Update prism function should account for "batch" effect of sn vs sc. We can test how well this works by comparing cell vs nuc and with and without update prism. If nuc without update looks similar to cell with update prism, this would indicate update prism can capture differences. 
+
+- Update prism is stored in which.theta = final.
+
+# 8 Embedding learning
+Could be interesting to understand tumor subset expression in bulk with removal of inferred immune cell subsets. 
+
+# 9 Export results
+```{r}
+openxlsx::write.xlsx(masterPropDf, 
+           paste0(resDir, fprefix, "_masterProportionDf.xlsx"))
+write.xlsx(masterGlobMetricDf, 
+           paste0(resDir, fprefix, "_masterGlobalMetricDf.xlsx"))
+write.xlsx(masterGranularMetricDf, 
+           paste0(resDir, fprefix, "_masterGranularMetricDf.xlsx"))
+write.xlsx(masterRawPEDf, 
+           paste0(resDir, fprefix, "_masterRawPEDf.xlsx"))
+```
+

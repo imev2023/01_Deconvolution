@@ -38,6 +38,8 @@ obj <- readRDS(paste0(dataDir, "SCE_concat_CTVT_includingAllGenes_logCorrecDone_
 
 objNoBad <- obj[,obj$manual.log.anot.fine!="bad"]
 
+
+
 gc()
 ```
 
@@ -101,18 +103,26 @@ goi <- c(### Host specific ###
                       "DLC1",
                       "EPO",
                       "MS4A2",
-                      "KIT"
-                       
-                       )
+                      "KIT")
 
+masterMarkerGenes <- read.xlsx("~/gitClones/01_Deconvolution/03_Deconvolution_CTVT/033_Results/03_Deconvolution_CTVT_geneCorrelations/03_Deconvolution_CTVT_geneCorrelations_masterMarkerGenes.xlsx")
 
+geneDict <- masterMarkerGenes %>%
+  select(Symbol, GeneID) %>%
+  # Take distinct as marker genes may overlap clusters.
+  distinct()
 
-
+uniqueGeneDict <- masterMarkerGenes %>%
+  filter(Unique=="Unique") %>%
+  select(Symbol, GeneID) %>%
+  # Take distinct as marker genes may overlap clusters.
+  distinct()
 ```
 
 
 ## 1.3 Map genes of interest to ENSCAF ID's
 Create "rownames" column to merge with counts matrix from single-nuc sequencing. 
+### 1.3.1 Overlapping
 ```{r}
 rowDataObj <- rowData(obj) %>%
   as.data.frame()
@@ -120,16 +130,21 @@ rowDataObj <- rowData(obj) %>%
 setdiff(goi, rowDataObj$Symbol) # 0, so all goi have a corresponding ENSCAF ID!
 
 rowDataObjMapped <- rowDataObj %>%
-  filter(Symbol %in% goi) %>%
+  filter(Symbol %in% geneDict$Symbol) %>%
+  rownames_to_column("rownames") 
+```
+### 1.3.2 Unique
+```{r}
+rowDataObj <- rowData(obj) %>%
+  as.data.frame()
+
+setdiff(goi, rowDataObj$Symbol) # 0, so all goi have a corresponding ENSCAF ID!
+
+rowDataObjMappedUnique <- rowDataObj %>%
+  filter(Symbol %in% uniqueGeneDict$Symbol) %>%
   rownames_to_column("rownames") 
 
-length(unique(goi))==length(unique(rowDataObjMapped$Symbol))
-length(unique(goi))==length(unique(rowDataObjMapped$ID))
-length(unique(goi))==length(rownames(rowDataObjMapped))
-
-enscaf <- rowDataObjMapped$ID
 ```
-
 # 2 Export snRNAseq counts
 Scaden requires a .h5ad file. 
 Reading in SCE object, but subsetting genes to those defined by Maurine. 
@@ -150,6 +165,7 @@ OF NOTE, This is working because every goi has a unique escaf ID, but may cause 
 ### 2.1.1 Full object
 counts.txt needs to be cells x genes. 
 celltype.txt is a list of length(cells), with the column name, "Celltype". 
+#### 2.1.1.1 Full object --> DONT RUN!
 ```{r}
 # snCountsFinal_colData <- colData(obj)
 # 
@@ -226,6 +242,7 @@ write.table(
 ```
 
 ### 2.1.2 Without "bad" cluster
+#### 2.1.2.1 Mapped
 ```{r}
 snCountsFinalNoBad <- assay(objNoBad, "counts") %>%
   as.data.frame() %>%
@@ -262,11 +279,10 @@ snCellPropNoBad <- apply(snCellCountsNoBad, 2, function(x) x/sum(x))
 
 colSums(snCellPropNoBad) # Should all be 1.
 
-
 write.table(
   snCountsFinalNoBad, 
   file = paste0(resDir, 
-                "/0_scadenInput/snCountsNoBad/snCountsNoBad_counts.txt"), 
+                "/0_scadenInput/snCountsNoBadq1q4/snCountsNoBadq1q4_counts.txt"), 
   sep = "\t", 
   quote = FALSE, 
   row.names = c(seq(from=0, to=nrow(snCountsFinalNoBad)-1, by=1)),
@@ -276,7 +292,7 @@ write.table(
 write.table(
   snAnnoFinalNoBad, 
   file = paste0(resDir,
-                "/0_scadenInput/snCountsNoBad/snCountsNoBad_celltypes.txt"), 
+                "/0_scadenInput/snCountsNoBadq1q4/snCountsNoBadq1q4_celltypes.txt"), 
   sep = "\t", 
   quote = FALSE,
   col.names = T,  # Ensures first column (gene names) gets no name, 
@@ -286,7 +302,75 @@ write.table(
 write.table(
   snSamplesFinalNoBad, 
   file = paste0(resDir,
-                "/0_scadenInput/snCountsNoBad/snCountsNoBad_samples.txt"), 
+                "/0_scadenInput/snCountsNoBadq1q4/snCountsNoBadq1q4_samples.txt"), 
+  sep = "\t", 
+  quote = FALSE,
+  col.names = T,  # Ensures first column (gene names) gets no name, 
+  row.names = F
+)
+```
+
+#### 2.1.2.2 Mapped unique
+```{r}
+snCountsFinalNoBad <- assay(objNoBad, "counts") %>%
+  as.data.frame() %>%
+  rownames_to_column("rownames") %>%
+  left_join(rowDataObjMapped) %>% 
+  drop_na("ID") %>% 
+  column_to_rownames("ID") %>%
+  select(-c("rownames",
+            "Symbol",
+            "Type",
+            "Chromosome",
+            "hvgs" )) %>%
+  t()
+
+snAnnoFinalNoBad <- data.frame("Celltype" = colData(objNoBad)$manual.log.anot.fine)
+snSamplesFinalNoBad <- data.frame("SampleID" = objNoBad$Sample)
+
+snCountsColdataNoBad <- colData(objNoBad)
+rm(objNoBad)
+gc()
+
+# Create the cell count matrix: rows = cell types, columns = samples
+snCellCountsNoBad <- snCountsColdataNoBad %>%
+  as.data.frame() %>%
+  group_by(manual.log.anot.fine,
+           Sample) %>%
+  summarise(cellCount = n()) %>%
+  pivot_wider(names_from = Sample,
+              values_from = cellCount,
+              values_fill = 0) %>%
+  column_to_rownames("manual.log.anot.fine")
+
+snCellPropNoBad <- apply(snCellCountsNoBad, 2, function(x) x/sum(x))
+
+colSums(snCellPropNoBad) # Should all be 1.
+
+write.table(
+  snCountsFinalNoBad, 
+  file = paste0(resDir, 
+                "/0_scadenInput/snCountsNoBadq1q4Unique/snCountsNoBadq1q4Unique_counts.txt"), 
+  sep = "\t", 
+  quote = FALSE, 
+  row.names = c(seq(from=0, to=nrow(snCountsFinalNoBad)-1, by=1)),
+  col.names = NA  # Ensures first column (cell id's names) gets no name
+)
+
+write.table(
+  snAnnoFinalNoBad, 
+  file = paste0(resDir,
+                "/0_scadenInput/snCountsNoBadq1q4Unique/snCountsNoBadq1q4Unique_celltypes.txt"), 
+  sep = "\t", 
+  quote = FALSE,
+  col.names = T,  # Ensures first column (gene names) gets no name, 
+  row.names = F
+)
+
+write.table(
+  snSamplesFinalNoBad, 
+  file = paste0(resDir,
+                "/0_scadenInput/snCountsNoBadq1q4Unique/snCountsNoBadq1q4Unique_samples.txt"), 
   sep = "\t", 
   quote = FALSE,
   col.names = T,  # Ensures first column (gene names) gets no name, 

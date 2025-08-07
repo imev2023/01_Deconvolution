@@ -1,0 +1,26 @@
+---
+title: "Untitled"
+author: "IMEV2"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r cars}
+# remotes::install_github("omnideconv/omnideconv")
+install.packages("remotes")
+remotes::install_github("omnideconv/immunedeconv")
+```
+
+
+## Including Plots
+
+You can also embed plots, for example:
+
+```{r pressure, echo=FALSE}
+library(immunedeconv)
+library(Seurat)
+library(tidyverse)
+library(readxl)
+```
+
+
