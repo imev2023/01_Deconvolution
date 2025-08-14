@@ -1094,3 +1094,85 @@ for (d in 1:length(dirs)){
     }
 }
 ```
+
+
+### 7.2.5 snCountsMarkerGenes
+```{r}
+dirs <- list.dirs(paste0(resDir, "snCountsMarkerGenes/4_predict/"), full.names = T, recursive = F)
+names <- list.dirs(paste0(resDir, "snCountsMarkerGenes/4_predict/"), full.names = F, recursive = F)
+
+res <- list.files(path="~/gitClones/01_Deconvolution/03_Deconvolution_CTVT/032_Scripts/03_Deconvolution_CTVT_reDeconv/Results_4_deconvolution/", pattern = "ReDeconv_results", full.names = T)
+
+names <- str_replace(list.files(path="~/gitClones/01_Deconvolution/03_Deconvolution_CTVT/032_Scripts/03_Deconvolution_CTVT_reDeconv/Results_4_deconvolution/", pattern = "ReDeconv_results", full.names = F),
+                     "_markerGenes",
+                     "")
+
+for (d in 1:length(dirs)){
+  
+  tempDir <- dirs[d]
+  tempName <- names[d]
+  
+  res <- list.files(tempDir, full.names = T)
+  resNames <- str_replace(list.files(tempDir, full.names = F),
+                     "_markerGenes",
+                     "")
+  
+  
+  for (r in 1:length(res)){
+    
+    tempRes <- read_tsv(res[r]) %>%
+        as.data.frame() %>%
+        rename("...1"="Sample") %>%
+      pivot_longer(cols = -c("Sample"),
+                   values_to = "Proportion",
+                   names_to = "Cluster") %>%
+      rbind(groundTruth) %>%
+      mutate(Type = ifelse(grepl("- GT$", Sample), 
+                           "Ground truth",
+                           "Estimated"))
+  
+    tempName <- str_replace(resNames[r], ".txt", "")
+    
+    tempRes$Cluster <- factor(tempRes$Cluster, levels = rev(c("CTVT", 
+                                                    "Myeloid", 
+                                                    "Bcells",
+                                                    "CAF.Endo",
+                                                    "Tcells",
+                                                    "Plasma")))
+
+  # Step 3: Plot
+  plot <- ggplot(
+    tempRes,
+    aes(
+      x = Sample,
+      y = Proportion,
+      fill = Cluster,
+      pattern = Type  # TRUE/FALSE
+    )
+  ) +
+  geom_bar_pattern(
+    stat = "identity",
+    pattern_fill = "whitesmoke",           # color of stripes
+    pattern_angle = 45,               # diagonal stripes
+    pattern_density = 0.01,            # small + widely spaced
+    pattern_spacing = 0.01,           # space between stripes
+    pattern_key_scale_factor = 0.5, 
+    pattern_alpha = 0.4 # smaller legend pattern
+  ) +
+  scale_pattern_manual(values = c("Estimated" = "none", "Ground truth" = "stripe")) +
+  scale_fill_manual(values = celltype_colors) +
+  theme_minimal() +
+  ylab("Estimated Proportion") +
+  xlab("Sample") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))+
+    ggtitle(paste0(tempName))+
+    theme(title = element_text(size=6))
+  
+  
+   pdf(paste0(plotDir, "/bar/snCountsMarkerGenes/", fprefix, "_", tempName, ".pdf"),
+      height=4, width=7)
+  print(plot)
+  dev.off()
+    }
+}
+```

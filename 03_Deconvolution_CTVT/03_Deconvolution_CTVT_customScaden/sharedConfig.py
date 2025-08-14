@@ -6,8 +6,8 @@ import random
 
 BASE_PATH = "/Users/nv4/gitClones/01_Deconvolution/03_Deconvolution_CTVT/033_Results/03_Deconvolution_CTVT_customScaden/snCountsMarkerGenes/0_scadenInput/"
 BULK = os.path.join("/Users/nv4/gitClones/01_Deconvolution/03_Deconvolution_CTVT/033_Results/03_Deconvolution_CTVT_customScaden/0_scadenInput/03_Deconvolution_CTVT_customScaden_bulkCountsFinal.txt")
-# BULK_PURITY = os.path.join("/Users/nv4/gitClones/01_Deconvolution/03_Deconvolution_CTVT/033_Results/03_Deconvolution_CTVT_customScaden/0_scadenInput/03_Deconvolution_CTVT_customScaden_bulkCountsGoiPurityNoBadAndy.txt")
-BULK_PURITY = os.path.join("/Users/nv4/gitClones/01_Deconvolution/03_Deconvolution_CTVT/033_Results/03_Deconvolution_CTVT_customScaden/0_scadenInput/03_Deconvolution_CTVT_customScaden_bulkCountsFinal.txt")
+BULK_PURITY = os.path.join("/Users/nv4/gitClones/01_Deconvolution/03_Deconvolution_CTVT/033_Results/03_Deconvolution_CTVT_customScaden/0_scadenInput/03_Deconvolution_CTVT_customScaden_bulkCountsGoiPurityNoBadAndy.txt")
+# BULK_PURITY = os.path.join("/Users/nv4/gitClones/01_Deconvolution/03_Deconvolution_CTVT/033_Results/03_Deconvolution_CTVT_customScaden/0_scadenInput/03_Deconvolution_CTVT_customScaden_bulkCountsFinal.txt")
 PURITY = "CTVT"
 # PURITY = None
 
@@ -15,12 +15,12 @@ PURITY = "CTVT"
 SEEDS = [14]
 BALANCED = [False]
 THRESHOLDS = [0]
-RANDOMS = [0, .50] # Mixing between different samples. 
+RANDOMS = [0] # Mixing between different samples. 
 VARIANCES = [0]
 SAMPLES = [1500] # Training improvements leveled off at 1500 according to paper. 
 CELLS = [500]
 LEARN_RATES = [0.00001]
-STEPS = [5000 ]#, 10000]
+STEPS = [5000]#, 10000]
 CELLRANDOM = [0, 0.5] 
 
 def generate_batches():
