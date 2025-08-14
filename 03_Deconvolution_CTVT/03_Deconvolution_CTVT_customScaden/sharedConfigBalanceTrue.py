@@ -22,13 +22,13 @@ PURITY = "CTVT"
 SEEDS = [14]
 BALANCED = [True]
 THRESHOLDS = [None, 0.2]
-RANDOMS = [0, 0.3, .70]
+RANDOMS = [0, 0.3]
 VARIANCES = [0]
 SAMPLES = [500, 1500] # Training improvements leveled off at 1500 according to paper. 
 CELLS = [100, 500]
 LEARN_RATES = [0.0001, 0.00001]
 STEPS = [1000, 5000]
-# CELLRANDOM = [0, .50, 1]
+CELLRANDOM = [.50]
 
 # SEEDS = [123]
 # BALANCED = [False]

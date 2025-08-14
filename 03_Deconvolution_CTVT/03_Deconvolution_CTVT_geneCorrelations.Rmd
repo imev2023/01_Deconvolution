@@ -2071,12 +2071,12 @@ maxq4 <- min(q4$deltaEtEh)
 medianPlot <- ggplot(tempPlotDf, aes(x = purity_correlation, y = deltaEtEh)) +
   # NEUTRAL points layer
   geom_point(data = subset(tempPlotDf, purity_correlation >= -0.5 & purity_correlation <= 0.5),
-             aes(size = sampleCount), fill = "grey80", color = "black", shape = 21, stroke = 0.2) +
+             aes(size = variantCount), fill = "grey80", color = "black", shape = 21, stroke = 0.2) +
 
   # POS POS correlation points layer
   new_scale_fill() +
   geom_point(data = q1,
-             aes(fill = deltaEtEh, size = sampleCount), color = "black", shape = 21, stroke = 0.2) +
+             aes(fill = deltaEtEh, size = variantCount), color = "black", shape = 21, stroke = 0.2) +
   scale_fill_gradient(
     name = "",
     low = "mistyrose", high = "maroon",
@@ -2085,7 +2085,7 @@ medianPlot <- ggplot(tempPlotDf, aes(x = purity_correlation, y = deltaEtEh)) +
    # NEG POS correlation points layer
     new_scale_fill() +
   geom_point(data = q2,
-             aes(fill = deltaEtEh, size = sampleCount), color = "black", shape = 21, stroke = 0.2) +
+             aes(fill = deltaEtEh, size = variantCount), color = "black", shape = 21, stroke = 0.2) +
   scale_fill_gradient(
     name = "",
     high = "#ffd580", low = "firebrick2",
@@ -2095,7 +2095,7 @@ medianPlot <- ggplot(tempPlotDf, aes(x = purity_correlation, y = deltaEtEh)) +
   # NEG POS correlation points layer
     new_scale_fill() +
   geom_point(data = q3,
-             aes(fill = deltaEtEh, size = sampleCount), color = "black", shape = 21, stroke = 0.2) +
+             aes(fill = deltaEtEh, size = variantCount), color = "black", shape = 21, stroke = 0.2) +
   scale_fill_gradient(
     name = "",
     low = "#7ED6B7", high = "#1831F5",
@@ -2104,7 +2104,7 @@ medianPlot <- ggplot(tempPlotDf, aes(x = purity_correlation, y = deltaEtEh)) +
     # NEG POS correlation points layer
   new_scale_fill() +
   geom_point(data = q4,
-             aes(fill = deltaEtEh, size = sampleCount), color = "black", shape = 21, stroke = 0.2) +
+             aes(fill = deltaEtEh, size = variantCount), color = "black", shape = 21, stroke = 0.2) +
   scale_fill_gradient(
     name = "",
     low = "#7E53E6", high = "#D8BFD8",
@@ -2174,7 +2174,6 @@ dev.off()
 ### 7.3.1 Candidate gene lists
 ```{r}
 # Filter points with abs(deltaEtEh) > 500 in Q1 and Q3
-
 # q1 = tumor
 q1Label100 <- subset(q1, abs(deltaEtEh) > 100)
 
@@ -2183,17 +2182,82 @@ q4Label100 <- subset(q4, abs(deltaEtEh) > 100)
 ```
 
 ### 7.3.2 CTVT
-#### 7.3.2.1 Filter genes 
+#### 7.3.2.1 Filter genes and plot cell type on 4-way volcano
 Testing positive genes from FAM with high purity correlations. 
 ```{r}
 famWilcox <- read.xlsx(paste0(resDir, "findAllMarkers/", fprefix, "_seuratObjNoBad_famWilcox.xlsx"))
 
-famWilcoxDegs <- famWilcox %>%v
-  filter(p_val_adj < 0.05 & avg_log2FC > 2.5 & cluster == "CTVT") 
+famWilcoxDegs <- famWilcox %>%
+  filter(p_val_adj < 0.05 & avg_log2FC > 2.5) 
 
-intersecting <- intersect(famWilcoxDegs$gene, q1Label100$Symbol) ### 93 genes intersecting
+intersectingQ1Label100 <- intersect(famWilcoxDegs$gene, q1Label100$Symbol) # 11 CTVT candidate genes, only 9 of which are CTVT!
 
+overlapQ1 <- famWilcox %>%
+  filter(p_val_adj < 0.05 & avg_log2FC > 2.5 & gene %in% intersectingQ1Label100) %>%
+  rename("gene"="Symbol")
+
+overlapCTVT <- famWilcox %>%
+  filter(p_val_adj < 0.05 & avg_log2FC > 2.5 & gene %in% intersectingQ1Label100 & cluster =="CTVT") 
+
+intersectingQ4Label100 <- intersect(famWilcoxDegs$gene, q4Label100$Symbol) ### 93 genes intersecting
 # intersectingStrict <- intersect(famWilcoxDegs$gene, tumorSpecDfStrict$Symbol) ### None overlap. 
+
+overlapQ4 <- famWilcox %>%
+  filter(p_val_adj < 0.05 & avg_log2FC > 2.5 & gene %in% intersectingQ4Label100)  %>%
+  rename("gene"="Symbol")
+
+table(overlapQ4$cluster)
+  # Bcells CAF.Endo  Myeloid   Plasma   Tcells 
+  #      8       90       66       12        2 
+
+# Filter points with abs(deltaEtEh) > 500 in Q1 and Q3
+q1Label <- subset(q1, abs(deltaEtEh) > 200) %>%
+  left_join(overlapQ1)
+
+q4Label <- subset(q4, abs(deltaEtEh) > 200) %>%
+  left_join(overlapQ4)
+
+# Plot with labels
+medianPlot <- ggplot(tempPlotDf, aes(x = purity_correlation, y = deltaEtEh)) +
+  # NEUTRAL points
+  geom_point(data = subset(tempPlotDf, purity_correlation >= -0.5 & purity_correlation <= 0.5),
+             aes(size = variantCount), fill = "grey80", color = "black", shape = 21, stroke = 0.2) +
+
+  # Q1
+  new_scale_fill() +
+  geom_point(data = q1,
+             aes(fill = deltaEtEh, size = variantCount), color = "black", shape = 21, stroke = 0.2) +
+  scale_fill_gradient(low = "mistyrose", high = "maroon", limits = c(0, 5000), na.value = "grey90") +
+
+  # Q2
+  new_scale_fill() +
+  geom_point(data = q2,
+             aes(fill = deltaEtEh, size = variantCount), color = "black", shape = 21, stroke = 0.2) +
+  scale_fill_gradient(high = "#ffd580", low = "firebrick2", limits = c(maxq2, 0), na.value = "grey90") +
+
+  # Q3
+  new_scale_fill() +
+  geom_point(data = q3,
+             aes(fill = deltaEtEh, size = variantCount), color = "black", shape = 21, stroke = 0.2) +
+  scale_fill_gradient(low = "#7ED6B7", high = "#1831F5", limits = c(0, 5000), na.value = "grey90") +
+
+  # Q4
+  new_scale_fill() +
+  geom_point(data = q4,
+             aes(fill = deltaEtEh, size = variantCount), color = "black", shape = 21, stroke = 0.2) +
+  scale_fill_gradient(low = "#7E53E6", high = "#D8BFD8", limits = c(maxq4, 0), na.value = "grey90") +
+
+  # Labels for Q1 and Q4
+  geom_text(data = q1Label, aes(label = cluster), size = 3, vjust = -1, check_overlap = TRUE) +
+  geom_text(data = q4Label, aes(label = cluster), size = 3, vjust = -1, check_overlap = TRUE) +
+  scale_size(range = c(1,10)) +
+
+  theme_minimal() +
+  labs(x = "Purity Correlation", y = "Median eT - Median eH")
+
+pdf(paste0(plotDir, "/volcano/", fprefix, "_deltaEtEh_purity_labelled200_FAM.pdf"), height=10, width=10)
+print(medianPlot)
+dev.off()
 ```
 
 #### 7.3.2.2 Merge with purity correlations and eT
@@ -2312,7 +2376,7 @@ for(ctype in unique(famWilcox$cluster)){
   }
   
   temp <- famWilcox %>%
-    filter(p_val_adj < 0.05 & avg_log2FC > 2.5& cluster==ctype) %>%
+    filter(p_val_adj < 0.05 & avg_log2FC > 2.5 & cluster==ctype) %>%
     filter(gene %in% q4Label100$Symbol) %>%
     dplyr::rename("Symbol"="gene") %>%
     left_join(q4Label100) %>%
@@ -2465,6 +2529,134 @@ for (cell_type in colnames(uniqueGenesFinal)) {
   # Store in the list
   uniqueGeneLists[[cell_type]] <- unique_genes
 }
+```
+
+
+
+
+
+
+
+
+
+### 7.5.4 Plot number of overlapping markers at different delta eT eH + purity thresholds. 
+#### 7.5.4.1 Dataframe
+```{r}
+plotDf <- geneDf %>%
+  mutate(deltaEtEh = medianEt-medianEh,
+         medianEhLog = log1p(medianEh), 
+         medianEtLog = log1p(medianEt),
+         medianEtEditLog = log10(medianEtEdit),
+         labelTH = ifelse(medianEh > 1000 & medianEt > 1000,
+                            Symbol, 
+                            NA),
+         labelNeither = ifelse(medianEh < 1000 & medianEt < 1000,
+                            Symbol, 
+                            NA),
+         labelH =  ifelse(medianEh > 1000 & medianEt < 1000,
+                            Symbol, 
+                            NA),
+         labelT = ifelse(medianEh < 1000 & medianEt > 1000,
+                            Symbol, 
+                            NA)) %>%
+  rename("sampleCount"="variantCount") %>%
+  mutate(
+    fillPos = medianEtEdit,
+    fillNeg = medianEh
+  )
+
+
+plotDfFamDegs <- plotDf %>%
+  left_join(famWilcox %>% rename("gene"="Symbol")) %>%
+  filter(avg_log2FC >= 2.5, p_val_adj < 0.05)
+```
+
+#### 7.5.4.2 Facet wrap
+How do the number of markers change as you adjust the delta and purity corr thresholds?
+```{r}
+# Define thresholds (positive values only — direction handled later)
+delta_thresholds <- seq(0, 100, by = 1)
+purity_thresholds <- seq(0, 1, by = 0.2)
+
+# Filter significant genes once
+filtered_df <- plotDfFamDegs %>%
+  filter(avg_log2FC >= 2.5, p_val_adj < 0.05)
+
+clusters <- unique(filtered_df$cluster)
+
+# Function to get density for a given cluster
+get_density_grid_per_cluster <- function(cluster_name) {
+  cluster_df <- filtered_df %>% filter(cluster == cluster_name)
+
+  grid_data <- purrr::map_df(delta_thresholds, function(d_thresh) {
+    purrr::map_df(purity_thresholds, function(p_thresh) {
+      
+      # Filtering logic
+      if (cluster_name == "CTVT") {
+        df <- cluster_df %>%
+          filter(deltaEtEh > d_thresh, purity_correlation > p_thresh)
+        
+        signed_delta <- d_thresh
+        signed_purity <- p_thresh
+        
+      } else {
+        df <- cluster_df %>%
+          filter(deltaEtEh < -d_thresh, purity_correlation < -p_thresh)
+        
+        signed_delta <- -d_thresh
+        signed_purity <- -p_thresh
+      }
+
+      df <- df %>% distinct(Symbol)
+
+      if (nrow(df) == 0) return(NULL)
+
+      tibble(
+        cluster = cluster_name,
+        delta_thresh = signed_delta,
+        purity_thresh = signed_purity,
+        gene_count = nrow(df)
+      )
+    })
+  })
+
+  return(grid_data)
+}
+
+# Apply to all clusters
+density_results <- map_df(clusters, get_density_grid_per_cluster)
+
+
+
+# Common plotting function
+plots <- map(clusters, function(clust) {
+  df <- density_results %>% filter(cluster == clust)
+
+  ggplot(df, aes(x = purity_thresh, y = delta_thresh, fill = gene_count)) +
+    geom_tile() +
+    scale_fill_viridis_c(option = "C") +
+    labs(
+      title = paste("Gene density grid for", clust),
+      subtitle = ifelse(clust == "CTVT",
+                        "Positive deltaEtEh & purity",
+                        "Negative deltaEtEh & purity"),
+      x = "Purity Threshold (signed)",
+      y = "deltaEtEh Threshold (signed)",
+      fill = "Gene Count"
+    ) +
+    xlim(-1,1)+
+    # coord_cartesian(xlim = c(-1, 1), ylim = c(-100000, 100000)) +
+    geom_hline(yintercept = -100, colour = "darkblue", linewidth = 0.5)+
+    geom_hline(yintercept = 100, colour = "firebrick2", linewidth = 0.5)+
+    theme_minimal() +
+    theme(plot.title = element_text(face = "bold"))
+})
+
+
+pdf(paste0(plotDir, "/density/", fprefix, "_deltaEtEh_purity_famDegs.pdf"), 
+    height=5, width=8)
+print(plots)
+dev.off()
 ```
 
 
@@ -2764,7 +2956,6 @@ dev.off()
 ### 8.3.1 Candidate gene lists
 ```{r}
 # Filter points with abs(deltaEtEh) > 500 in Q1 and Q4
-
 # q1 = tumor
 q1Label100 <- subset(q1, abs(deltaEtEh) > 100)
 

@@ -44,16 +44,6 @@ Use unnormalized and untransformed count data.
 ## 1.1 Marker genes
 ```{r}
 masterMarkerGenes <- read.xlsx("~/gitClones/01_Deconvolution/03_Deconvolution_CTVT/033_Results/03_Deconvolution_CTVT_geneCorrelations/03_Deconvolution_CTVT_geneCorrelations_masterMarkerGenes.xlsx")
-
-topCAFEndo <- masterMarkerGenes %>%
-  filter(cluster == "CAF.Endo") %>%
-  filter(Unique=="Unique") %>%
-  arrange(deltaEtEh) 
-
-topMyeloid <- masterMarkerGenes %>%
-  filter(cluster == "Myeloid") %>%
-  filter(Unique=="Unique") %>%
-  arrange(deltaEtEh) 
   
 geneDict <- masterMarkerGenes %>%
   select(Symbol, GeneID) %>%
@@ -82,31 +72,6 @@ curated <- masterMarkerGenes %>%
                          topMyeloid[1:20,]$Symbol))
 
 table(curated$cluster)
-
-curatedDict <- curated %>%
-  select(Symbol, GeneID) %>%
-  # Take distinct as marker genes may overlap clusters.
-  distinct()
-
-  # Bcells CAF.Endo     CTVT  Myeloid   Plasma   Tcells 
-  #     12       20       15       20       15        6 
-
-
-curatedUnique <- masterMarkerGenes %>%
-  filter(cluster %in% c("Bcells",
-                        "CTVT",
-                        "Plasma",
-                        "Tcells")|
-           Symbol %in% c(topCAFEndo[1:20,]$Symbol,
-                         topMyeloid[1:20,]$Symbol) &
-           Unique == "Unique")
-
-table(curatedUnique$cluster)
-
-curatedUniqueDict <- curatedUnique %>%
-  select(Symbol, GeneID) %>%
-  # Take distinct as marker genes may overlap clusters.
-  distinct()
 
 cibersortMin50Genes2to10 <- read_table("~/gitClones/01_Deconvolution/03_Deconvolution_CTVT/033_Results/03_Deconvolution_CTVT_cibersort/snCountsFinalq1q4/sigMatrix_minExpr50_minGenes2to10/CIBERSORTx_Job46_03_Deconvolution_CTVT_cibersort_snCountsFinal_snAnno_inferred_phenoclasses.CIBERSORTx_Job46_03_Deconvolution_CTVT_cibersort_snCountsFinal_snAnno_inferred_refsample.bm.K999.txt")
 
@@ -137,6 +102,37 @@ cibersortUniqueDictMin10 <- masterMarkerGenes %>%
   # Take distinct as marker genes may overlap clusters.
   distinct()
 ```
+## 1.2 Curated Marker Genes
+Using DEGs
+```{r}
+resTypeMatched <- read.xlsx(paste0( "~/gitClones/01_Deconvolution/03_Deconvolution_CTVT/033_Results/03_Deconvolution_CTVT_DESEQ/03_Deconvolution_CTVT_DESEQ_resTypeMatched.xlsx"))
+
+resTypeMatchedDegs <- resTypeMatched %>%
+  as.data.frame() %>%
+  filter(abs(log2FoldChange) >= 2.0 & padj < 0.05) 
+
+curatedMarkers <- masterMarkerGenes %>%
+  filter(GeneID != intersect(resTypeMatchedDegs$GeneID, masterMarkerGenes$GeneID))
+
+curatedMarkersUnique <- masterMarkerGenes %>%
+  filter(GeneID != intersect(resTypeMatchedDegs$GeneID, masterMarkerGenes$GeneID))
+  
+# intersect(resTypeMatchedDegs$GeneID, cibersortDictMin10$GeneID) --> 0
+# [1] "ENSCAFG00000032358"
+
+curatedCib10 <- cibersortDictMin10 
+
+curatedCib10Unique <- cibersortUniqueDictMin10
+
+intersect(resTypeMatchedDegs$GeneID, cibersortDictMin50$GeneID)
+
+curatedCib50 <- cibersortDictMin50 %>%
+  filter(GeneID != intersect(resTypeMatchedDegs$GeneID, cibersortDictMin50$GeneID))
+
+curatedCib50Unique <- cibersortUniqueDictMin50 %>%
+  filter(GeneID != intersect(resTypeMatchedDegs$GeneID, cibersortUniqueDictMin50$GeneID))
+```
+
 
 
 ## 1.1 Reference
@@ -161,6 +157,20 @@ snAnno <- snCountsFinal_colData$manual.log.anot.fine %>%
 
 print(sort(table(snAnno)))
 
+# Create the cell count matrix: rows = cell types, columns = samples
+snCellCountsNoBad <- snCountsFinal_colData %>%
+  as.data.frame() %>%
+  group_by(manual.log.anot.fine,
+           Sample) %>%
+  summarise(cellCount = n()) %>%
+  pivot_wider(names_from = Sample,
+              values_from = cellCount,
+              values_fill = 0) %>%
+  column_to_rownames("manual.log.anot.fine")
+
+snCellPropNoBad <- apply(snCellCountsNoBad, 2, function(x) x/sum(x))
+
+colSums(snCellPropNoBad) # Should all be 1.
 
 # df = data.frame(cellNames = snAnno, Sample = snCountsFinal_colData$Sample)
 # row.names(df) <- row.names(snCountsFinal_colData)
@@ -765,6 +775,140 @@ resList$musicResCibersort50Unique <- musicResCibersort50Unique
 saveRDS(resList, paste0(resDir, fprefix, "_musicResAll_manualTree.rds"))
 ```
 
+
+## 3.3 Curated 
+```{r}
+resList <- list()
+
+clusters <- list(C1 = "CTVT",
+                 C2 = c("Bcells", "Tcells", "Myeloid", "CAF.Endo", "Plasma"))
+
+
+cl.type = as.character(objNoBad$manual.log.anot.fine)
+
+for(cl in 1:length(clusters)){
+  cl.type[cl.type %in% clusters[[cl]]] = names(clusters)[cl]
+}
+
+objNoBad$clusterType = factor(cl.type, levels = c(names(clusters)))
+
+unlist(clusters)
+
+
+
+# We now construct the list of group marker
+curatedMarkersUniqueList <- list()
+
+markersUnique = list(uniqueCTVTMarkers$Symbol, uniqueOther$Symbol)
+names(markersUnique) = c('C1', 'C2')
+
+markersUniqueCibersort50 = list(uniqueCTVTMarkersCibersort50$Symbol, uniqueOtherCibersort50$Symbol)
+names(markersUniqueCibersort50) = c('C1', 'C2')
+
+markersUniqueCibersort10 = list(uniqueCTVTMarkersCibersort10$Symbol, uniqueOtherCibersort10$Symbol)
+names(markersUniqueCibersort10) = c('C1', 'C2')
+```
+
+### 3.2.1 Non-unique
+```{r}
+musicResCurated = MuSiC::music_prop(bulk.mtx = bulkCountsFinal,
+                             sc.sce = objNoBad,
+                             group.markers = curatedMarkers,
+                            samples = 'Sample',
+                            groups = 'clusterType', 
+                            clusters = 'manual.log.anot.fine', 
+                            clusters.type = clusters,
+                            markers=curatedMarkers$GeneID)
+
+resList$musicResCurated <- musicResCurated
+
+# musicResCurated = MuSiC::music_prop(bulk.mtx = bulkCountsFinal,
+#                              sc.sce = objNoBad,
+#                              group.markers = markersUnique, 
+#                           samples = 'Sample',
+#                           groups = 'clusterType', 
+#                           clusters = 'manual.log.anot.fine', 
+#                           clusters.type = clusters,
+#                     markers=curatedDict$Symbol) # Running MuSiC
+# 
+# 
+# resList$musicResCurated <- musicResCurated
+
+musicResCibersort10 = MuSiC::music_prop(bulk.mtx = bulkCountsFinal,
+                             sc.sce = objNoBad,
+                             group.markers = markersUniqueCibersort10, 
+                          samples = 'Sample',
+                          groups = 'clusterType', 
+                          clusters = 'manual.log.anot.fine', 
+                          clusters.type = clusters,
+                    markers=cibersortDictMin10$Symbol)
+
+resList$musicResCibersort10 <- musicResCibersort10
+
+musicResCibersort50 = MuSiC::music_prop(bulk.mtx = bulkCountsFinal,
+                             sc.sce = objNoBad,
+                            group.markers = markersUniqueCibersort50, 
+                          samples = 'Sample',
+                          groups = 'clusterType', 
+                          clusters = 'manual.log.anot.fine', 
+                          clusters.type = clusters,
+                    markers=cibersortDictMin50$Symbol)
+
+resList$musicResCibersort50 <- musicResCibersort50
+```
+### 3.2.2 Unique
+```{r}
+musicResUnique = MuSiC::music_prop(bulk.mtx = bulkCountsFinal,
+                             sc.sce = objNoBad,
+                             group.markers = markersUnique, 
+                          samples = 'Sample',
+                          groups = 'clusterType', 
+                          clusters = 'manual.log.anot.fine', 
+                          clusters.type = clusters,
+                    markers=uniqueGeneDict$Symbol) # Running MuSiC
+
+resList$musicResUnique <- musicResUnique
+
+# musicResCuratedUnique = MuSiC::music_prop(bulk.mtx = bulkCountsFinal,
+#                              sc.sce = objNoBad,
+#                              group.markers = markersUnique, 
+#                           samples = 'Sample',
+#                           groups = 'clusterType', 
+#                           clusters = 'manual.log.anot.fine', 
+#                           clusters.type = clusters,
+#                     markers=curatedUniqueDict$Symbol) # Running MuSiC
+# 
+# 
+# resList$musicResCuratedUnique <- musicResCuratedUnique
+
+musicResCibersort10Unique = MuSiC::music_prop(bulk.mtx = bulkCountsFinal,
+                             sc.sce = objNoBad,
+                             group.markers = markersUniqueCibersort10, 
+                          samples = 'Sample',
+                          groups = 'clusterType', 
+                          clusters = 'manual.log.anot.fine', 
+                          clusters.type = clusters,
+                    markers=cibersortUniqueDictMin10$Symbol)
+
+
+
+resList$musicResCibersort10Unique <- musicResCibersort10Unique
+
+musicResCibersort50Unique = MuSiC::music_prop(bulk.mtx = bulkCountsFinal,
+                             sc.sce = objNoBad,
+                             group.markers = markersUniqueCibersort50, 
+                          samples = 'Sample',
+                          groups = 'clusterType', 
+                          clusters = 'manual.log.anot.fine', 
+                          clusters.type = clusters,
+                    markers=cibersortUniqueDictMin50$Symbol)
+
+resList$musicResCibersort50Unique <- musicResCibersort50Unique
+
+
+saveRDS(resList, paste0(resDir, fprefix, "_musicResAll_manualTree.rds"))
+```
+
 # 4.0 Write results to masterDf
 ## 4.1 No tree
 ```{r}
@@ -814,13 +958,31 @@ write.xlsx(nnlsDf, paste0(resDir, fprefix, "_estPropAllgene_manualTree.xlsx"))
 ```{r}
 # Step 2: Define a color mapping
 celltype_colors <- c(
-  "CTVT" = "seagreen",
+  "CTVT" = "#BCD0C7",
   "CAF.Endo" = "#FDDFA4FF",
-  "Myeloid" = "lightpink",
+  "Myeloid" = "#F5FDC6",
   "Plasma" = "#B4B9E0FF",
-  "Tcells" = "#C2697FFF",
-  "Bcells" = "darkblue"
+  "Tcells" = "#D56AA0",
+  "Bcells" = "#A8D5E2",
+  
+  "CTVT - GT" = "#898980",
+  "CAF.Endo - GT" = "#F9A620",
+  "Myeloid - GT" = "#CACC90",
+  "Plasma - GT" = "#5F5AA2",
+  "Tcells - GT" = "#861657",
+  "Bcells - GT" = "darkblue"
+  
 )
+
+groundTruth <- snCellPropNoBad %>%
+  t() %>%
+  as.data.frame() %>%
+  rownames_to_column("Sample") %>%
+  pivot_longer(cols = -c("Sample"), names_to = "Cluster", values_to = "Proportion") %>%
+  mutate(
+         Sample = paste0(Sample, " - GT"))
+
+
 ```
 
 ## 5.1 No clustering 
@@ -831,9 +993,13 @@ for (i in 1:length(resList)){
   tempName <- str_replace(names(resList)[i], "music", "")
   
   music <- resList[[i]]$Est.prop.weighted %>%
-  as.data.frame() %>%
-  rownames_to_column("Sample") %>%
-  pivot_longer(cols = -c("Sample"), names_to = "Cluster", values_to = "Proportion")
+    as.data.frame() %>%
+    rownames_to_column("Sample") %>%
+    pivot_longer(cols = -c("Sample"), names_to = "Cluster", values_to = "Proportion") %>%
+    rbind(groundTruth) %>%
+    mutate(Type = ifelse(grepl("- GT$", Sample), 
+                         "Ground truth",
+                         "Estimated"))
 
   music$Cluster <- factor(music$Cluster, levels = rev(c("CTVT", 
                                                     "Myeloid", 
@@ -843,47 +1009,65 @@ for (i in 1:length(resList)){
                                                     "Plasma")))
 
   # Step 3: Plot
-  musicPlot <- ggplot(music, aes(x = Sample, y = Proportion, fill = Cluster)) +
-    geom_bar(stat = "identity") +
-    scale_fill_manual(values = celltype_colors) +
-    theme_minimal() +
-    ylab("Estimated Proportion") +
-    xlab("Sample") +
-    theme(axis.text.x = element_text(angle = 45, hjust = 1))+
-    ggtitle(paste0("MuSiC - ", tempName))
+  musicPlot <- ggplot(
+    music,
+    aes(
+      x = Sample,
+      y = Proportion,
+      fill = Cluster,
+      pattern = Type  # TRUE/FALSE
+    )
+  ) +
+  geom_bar_pattern(
+    stat = "identity",
+    pattern_fill = "whitesmoke",           # color of stripes
+    pattern_angle = 45,               # diagonal stripes
+    pattern_density = 0.01,            # small + widely spaced
+    pattern_spacing = 0.01,           # space between stripes
+    pattern_key_scale_factor = 0.5, 
+    pattern_alpha = 0.4 # smaller legend pattern
+  ) +
+  scale_pattern_manual(values = c("Estimated" = "none", "Ground truth" = "stripe")) +
+  scale_fill_manual(values = celltype_colors) +
+  theme_minimal() +
+  ylab("Estimated Proportion") +
+  xlab("Sample") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  ggtitle(paste0("MuSiC - ", tempName))
+
   
   pdf(paste0(plotDir, "/bar/", fprefix, "_music", tempName, ".pdf"),
       height=4, width=7)
   print(musicPlot)
   dev.off()
-  
-  
-  nnls <- resList[[i]]$Est.prop.allgene %>%
-    as.data.frame() %>%
-    rownames_to_column("Sample") %>%
-    pivot_longer(cols = -c("Sample"), names_to = "Cluster", values_to = "Proportion")
-  
-  nnls$Cluster <- factor(nnls$Cluster, levels = rev(c("CTVT", 
-                                                    "Myeloid", 
-                                                    "Bcells",
-                                                    "CAF.Endo",
-                                                    "Tcells",
-                                                    "Plasma")))
-  
-  # Step 3: Plot
-  nnlsPlot <- ggplot(nnls, aes(x = Sample, y = Proportion, fill = Cluster)) +
-    geom_bar(stat = "identity") +
-    scale_fill_manual(values = celltype_colors) +
-    theme_minimal() +
-    ylab("Estimated Proportion") +
-    xlab("Sample") +
-    theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
-    ggtitle(paste0("NNLS - ", tempName))
-  
-  pdf(paste0(plotDir, "/bar/", fprefix, "_nnls", tempName, ".pdf"),
-      height=4, width=7)
-  print(nnlsPlot)
-  dev.off()
+  # 
+  # 
+  # nnls <- resList[[i]]$Est.prop.allgene %>%
+  #   as.data.frame() %>%
+  #   rownames_to_column("Sample") %>%
+  #   pivot_longer(cols = -c("Sample"), names_to = "Cluster", values_to = "Proportion")
+  # 
+  # nnls$Cluster <- factor(nnls$Cluster, levels = rev(c("CTVT", 
+  #                                                   "Myeloid", 
+  #                                                   "Bcells",
+  #                                                   "CAF.Endo",
+  #                                                   "Tcells",
+  #                                                   "Plasma")))
+  # 
+  # # Step 3: Plot
+  # nnlsPlot <- ggplot(nnls, aes(x = Sample, y = Proportion, fill = Cluster)) +
+  #   geom_bar(stat = "identity") +
+  #   scale_fill_manual(values = celltype_colors) +
+  #   theme_minimal() +
+  #   ylab("Estimated Proportion") +
+  #   xlab("Sample") +
+  #   theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  #   ggtitle(paste0("NNLS - ", tempName))
+  # 
+  # pdf(paste0(plotDir, "/bar/", fprefix, "_nnls", tempName, ".pdf"),
+  #     height=4, width=7)
+  # print(nnlsPlot)
+  # dev.off()
 
 }
 ```
@@ -899,9 +1083,13 @@ for (i in 1:length(resListTree)){
   tempName <- str_replace(names(resListTree)[i], "music", "")
   
   music <- resListTree[[i]]$Est.prop.weighted %>%
-  as.data.frame() %>%
-  rownames_to_column("Sample") %>%
-  pivot_longer(cols = -c("Sample"), names_to = "Cluster", values_to = "Proportion")
+    as.data.frame() %>%
+    rownames_to_column("Sample") %>%
+    pivot_longer(cols = -c("Sample"), names_to = "Cluster", values_to = "Proportion") %>%
+    rbind(groundTruth) %>%
+    mutate(Type = ifelse(grepl("- GT$", Sample), 
+                         "Ground truth",
+                         "Estimated"))
 
   music$Cluster <- factor(music$Cluster, levels = rev(c("CTVT", 
                                                     "Myeloid", 
@@ -911,47 +1099,65 @@ for (i in 1:length(resListTree)){
                                                     "Plasma")))
 
   # Step 3: Plot
-  musicPlot <- ggplot(music, aes(x = Sample, y = Proportion, fill = Cluster)) +
-    geom_bar(stat = "identity") +
-    scale_fill_manual(values = celltype_colors) +
-    theme_minimal() +
-    ylab("Estimated Proportion") +
-    xlab("Sample") +
-    theme(axis.text.x = element_text(angle = 45, hjust = 1))+
-    ggtitle(paste0("Tree - MuSiC - ", tempName))
+  musicPlot <- ggplot(
+    music,
+    aes(
+      x = Sample,
+      y = Proportion,
+      fill = Cluster,
+      pattern = Type  # TRUE/FALSE
+    )
+  ) +
+  geom_bar_pattern(
+    stat = "identity",
+    pattern_fill = "whitesmoke",           # color of stripes
+    pattern_angle = 45,               # diagonal stripes
+    pattern_density = 0.01,            # small + widely spaced
+    pattern_spacing = 0.01,           # space between stripes
+    pattern_key_scale_factor = 0.5, 
+    pattern_alpha = 0.4 # smaller legend pattern
+  ) +
+  scale_pattern_manual(values = c("Estimated" = "none", "Ground truth" = "stripe")) +
+  scale_fill_manual(values = celltype_colors) +
+  theme_minimal() +
+  ylab("Estimated Proportion") +
+  xlab("Sample") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  ggtitle(paste0("MuSiC Tree - ", tempName))
+
   
   pdf(paste0(plotDir, "/bar/", fprefix, "_music", tempName, "_manualTree.pdf"),
       height=4, width=7)
   print(musicPlot)
   dev.off()
   
-  
-  nnls <- resListTree[[i]]$Est.prop.allgene %>%
-    as.data.frame() %>%
-    rownames_to_column("Sample") %>%
-    pivot_longer(cols = -c("Sample"), names_to = "Cluster", values_to = "Proportion")
-  
-  nnls$Cluster <- factor(nnls$Cluster, levels = rev(c("CTVT", 
-                                                    "Myeloid", 
-                                                    "Bcells",
-                                                    "CAF.Endo",
-                                                    "Tcells",
-                                                    "Plasma")))
-  
-  # Step 3: Plot
-  nnlsPlot <- ggplot(nnls, aes(x = Sample, y = Proportion, fill = Cluster)) +
-    geom_bar(stat = "identity") +
-    scale_fill_manual(values = celltype_colors) +
-    theme_minimal() +
-    ylab("Estimated Proportion") +
-    xlab("Sample") +
-    theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
-    ggtitle(paste0("Tree - NNLS - ", tempName))
-  
-  pdf(paste0(plotDir, "/bar/", fprefix, "_nnls", tempName, "_manualTree.pdf"),
-      height=4, width=7)
-  print(nnlsPlot)
-  dev.off()
+  # 
+  # nnls <- resListTree[[i]]$Est.prop.allgene %>%
+  #   as.data.frame() %>%
+  #   rownames_to_column("Sample") %>%
+  #   pivot_longer(cols = -c("Sample"), names_to = "Cluster", values_to = "Proportion")
+  # 
+  # nnls$Cluster <- factor(nnls$Cluster, levels = rev(c("CTVT", 
+  #                                                   "Myeloid", 
+  #                                                   "Bcells",
+  #                                                   "CAF.Endo",
+  #                                                   "Tcells",
+  #                                                   "Plasma")))
+  # 
+  # # Step 3: Plot
+  # nnlsPlot <- ggplot(nnls, aes(x = Sample, y = Proportion, fill = Cluster)) +
+  #   geom_bar(stat = "identity") +
+  #   scale_fill_manual(values = celltype_colors) +
+  #   theme_minimal() +
+  #   ylab("Estimated Proportion") +
+  #   xlab("Sample") +
+  #   theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  #   ggtitle(paste0("Tree - NNLS - ", tempName))
+  # 
+  # pdf(paste0(plotDir, "/bar/", fprefix, "_nnls", tempName, "_manualTree.pdf"),
+  #     height=4, width=7)
+  # print(nnlsPlot)
+  # dev.off()
 
 }
 ```

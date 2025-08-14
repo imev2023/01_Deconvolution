@@ -45,6 +45,7 @@ gc()
 
 ## 1.2 Get genes of interest (goi)
 These are genes we are testing using information from Adrian's CTVT purity table. 
+### 1.2.1 All
 ```{r}
 goi <- c(### Host specific ### 
                       # B-cells
@@ -105,8 +106,9 @@ goi <- c(### Host specific ###
                       "MS4A2",
                       "KIT")
 
-masterMarkerGenes <- read.xlsx("~/gitClones/01_Deconvolution/03_Deconvolution_CTVT/033_Results/03_Deconvolution_CTVT_geneCorrelations/03_Deconvolution_CTVT_geneCorrelations_masterMarkerGenes.xlsx")
 
+masterMarkerGenes <- read.xlsx("~/gitClones/01_Deconvolution/03_Deconvolution_CTVT/033_Results/03_Deconvolution_CTVT_geneCorrelations/03_Deconvolution_CTVT_geneCorrelations_masterMarkerGenes.xlsx")
+  
 geneDict <- masterMarkerGenes %>%
   select(Symbol, GeneID) %>%
   # Take distinct as marker genes may overlap clusters.
@@ -117,34 +119,225 @@ uniqueGeneDict <- masterMarkerGenes %>%
   select(Symbol, GeneID) %>%
   # Take distinct as marker genes may overlap clusters.
   distinct()
+
+cibersortMin50Genes2to10 <- read_table("~/gitClones/01_Deconvolution/03_Deconvolution_CTVT/033_Results/03_Deconvolution_CTVT_cibersort/snCountsFinalq1q4/sigMatrix_minExpr50_minGenes2to10/CIBERSORTx_Job46_03_Deconvolution_CTVT_cibersort_snCountsFinal_snAnno_inferred_phenoclasses.CIBERSORTx_Job46_03_Deconvolution_CTVT_cibersort_snCountsFinal_snAnno_inferred_refsample.bm.K999.txt")
+
+cibersortDictMin50 <- masterMarkerGenes %>%
+  filter(Symbol %in% cibersortMin50Genes2to10$NAME) %>%
+  select(Symbol, GeneID) %>%
+  # Take distinct as marker genes may overlap clusters.
+  distinct()
+
+# prop <- masterMarkerGenes %>%
+#   filter(Symbol %in% cibersortMin50Genes2to10$NAME)
+# table(prop$cluster)
+#   Bcells CAF.Endo     CTVT  Myeloid   Plasma   Tcells 
+#        5       11        7       12        7        5 
+
+cibersortUniqueDictMin50 <- masterMarkerGenes %>%
+  filter(Symbol %in% cibersortMin50Genes2to10$NAME & Unique == "Unique") %>%
+  select(Symbol, GeneID) %>%
+  # Take distinct as marker genes may overlap clusters.
+  distinct()
+
+# prop <- masterMarkerGenes %>%
+#   filter(Symbol %in% cibersortMin50Genes2to10$NAME & Unique == "Unique")
+#   Bcells CAF.Endo     CTVT  Myeloid   Plasma   Tcells 
+#        4       11        7       10        6        5 
+
+cibersortMin10Genes2to10 <- read_table("~/gitClones/01_Deconvolution/03_Deconvolution_CTVT/033_Results/03_Deconvolution_CTVT_cibersort/snCountsFinalq1q4/sigMatrix_minExpr10_minGenes2to10/CIBERSORTx_Job42_03_Deconvolution_CTVT_cibersort_snCountsFinal_snAnno_inferred_phenoclasses.CIBERSORTx_Job42_03_Deconvolution_CTVT_cibersort_snCountsFinal_snAnno_inferred_refsample.bm.K999.txt")
+
+cibersortDictMin10 <- masterMarkerGenes %>%
+  filter(Symbol %in% cibersortMin10Genes2to10$NAME) %>%
+  select(Symbol, GeneID) %>%
+  # Take distinct as marker genes may overlap clusters.
+  distinct()
+
+prop <- masterMarkerGenes %>%
+  filter(Symbol %in% cibersortMin10Genes2to10$NAME)
+# table(prop$cluster)
+#   Bcells CAF.Endo     CTVT  Myeloid   Plasma   Tcells 
+#        3       23        5       10        4        4 
+
+cibersortUniqueDictMin10 <- masterMarkerGenes %>%
+  filter(Symbol %in% cibersortMin10Genes2to10$NAME & Unique == "Unique") %>%
+  select(Symbol, GeneID) %>%
+  # Take distinct as marker genes may overlap clusters.
+  distinct()
+
+prop <- masterMarkerGenes %>%
+  filter(Symbol %in% cibersortMin10Genes2to10$NAME & Unique == "Unique")
+# table(prop$cluster)
+# > prop <- masterMarkerGenes %>%
+# +   filter(Symbol %in% cibersortMin10Genes2to10$NAME & Unique == "Unique")
+# > table(prop$cluster)
+# 
+#   Bcells CAF.Endo     CTVT  Myeloid   Plasma   Tcells 
+#        2       22        5        8        4        4 
+
 ```
 
+### 1.2.2 Curated Marker Genes
+Using DEGs
+```{r}
+resTypeMatched <- read.xlsx(paste0( "~/gitClones/01_Deconvolution/03_Deconvolution_CTVT/033_Results/03_Deconvolution_CTVT_DESEQ/03_Deconvolution_CTVT_DESEQ_resTypeMatched.xlsx"))
 
+resTypeMatchedDegs <- resTypeMatched %>%
+  as.data.frame() %>%
+  filter(abs(log2FoldChange) >= 2.0 & padj < 0.05) 
+
+curatedMarkers <- masterMarkerGenes %>%
+  filter(GeneID != intersect(resTypeMatchedDegs$GeneID, masterMarkerGenes$GeneID))
+
+curatedMarkersUnique <- masterMarkerGenes %>%
+  filter(GeneID != intersect(resTypeMatchedDegs$GeneID, masterMarkerGenes$GeneID))
+  
+# intersect(resTypeMatchedDegs$GeneID, cibersortDictMin10$GeneID) --> 0
+# [1] "ENSCAFG00000032358"
+
+# curatedCib10 <- cibersortDictMin10 
+# 
+# curatedCib10Unique <- cibersortUniqueDictMin10
+# 
+# intersect(resTypeMatchedDegs$GeneID, cibersortDictMin50$GeneID)
+
+curatedCib50 <- cibersortDictMin50 %>%
+  filter(GeneID != intersect(resTypeMatchedDegs$GeneID, cibersortDictMin50$GeneID))
+
+curatedCib50Unique <- cibersortUniqueDictMin50 %>%
+  filter(GeneID != intersect(resTypeMatchedDegs$GeneID, cibersortUniqueDictMin50$GeneID))
+```
 ## 1.3 Map genes of interest to ENSCAF ID's
 Create "rownames" column to merge with counts matrix from single-nuc sequencing. 
-### 1.3.1 Overlapping
+### 1.3.1 Marker genes
+#### 1.3.1.1 All
 ```{r}
-rowDataObj <- rowData(obj) %>%
+rowDataObj <- rowData(objNoBad) %>%
   as.data.frame()
 
-setdiff(goi, rowDataObj$Symbol) # 0, so all goi have a corresponding ENSCAF ID!
+# setdiff(goi, rowDataObj$Symbol) # 0, so all goi have a corresponding ENSCAF ID!
 
 rowDataObjMapped <- rowDataObj %>%
   filter(Symbol %in% geneDict$Symbol) %>%
   rownames_to_column("rownames") 
 ```
-### 1.3.2 Unique
+#### 1.3.1.2 Unique
 ```{r}
-rowDataObj <- rowData(obj) %>%
-  as.data.frame()
+# rowDataObj <- rowData(objNoBad) %>%
+#   as.data.frame()
 
-setdiff(goi, rowDataObj$Symbol) # 0, so all goi have a corresponding ENSCAF ID!
+# setdiff(goi, rowDataObj$Symbol) # 0, so all goi have a corresponding ENSCAF ID!
 
 rowDataObjMappedUnique <- rowDataObj %>%
   filter(Symbol %in% uniqueGeneDict$Symbol) %>%
   rownames_to_column("rownames") 
 
 ```
+
+### 1.3.2 Cib 10
+#### 1.3.2.1 All
+```{r}
+# rowDataObj <- rowData(objNoBad) %>%
+#   as.data.frame()
+
+# setdiff(goi, rowDataObj$Symbol) # 0, so all goi have a corresponding ENSCAF ID!
+
+rowDataObjCib10 <- rowDataObj %>%
+  filter(Symbol %in% cibersortDictMin10$Symbol) %>%
+  rownames_to_column("rownames") 
+```
+
+#### 1.3.2.2 Unique
+```{r}
+# rowDataObj <- rowData(obj) %>%
+#   as.data.frame()
+
+# setdiff(goi, rowDataObj$Symbol) # 0, so all goi have a corresponding ENSCAF ID!
+
+rowDataObjCib10Unique <- rowDataObj %>%
+  filter(Symbol %in% cibersortUniqueDictMin10$Symbol) %>%
+  rownames_to_column("rownames") 
+
+```
+
+### 1.3.3 Cib 50
+#### 1.3.3.1 All
+```{r}
+# rowDataObj <- rowData(objNoBad) %>%
+#   as.data.frame()
+
+# setdiff(goi, rowDataObj$Symbol) # 0, so all goi have a corresponding ENSCAF ID!
+
+rowDataObjCib50 <- rowDataObj %>%
+  filter(Symbol %in% cibersortDictMin50$Symbol) %>%
+  rownames_to_column("rownames") 
+```
+
+#### 1.3.3.2 Unique
+```{r}
+# rowDataObj <- rowData(obj) %>%
+#   as.data.frame()
+
+# setdiff(goi, rowDataObj$Symbol) # 0, so all goi have a corresponding ENSCAF ID!
+
+rowDataObjCib50Unique <- rowDataObj %>%
+  filter(Symbol %in% cibersortUniqueDictMin50$Symbol) %>%
+  rownames_to_column("rownames") 
+
+```
+
+
+### 1.3.4 Curated
+#### 1.3.4.1 All
+```{r}
+# rowDataObj <- rowData(objNoBad) %>%
+#   as.data.frame()
+
+# setdiff(goi, rowDataObj$Symbol) # 0, so all goi have a corresponding ENSCAF ID!
+
+rowDataObjCurated <- rowDataObj %>%
+  filter(Symbol %in% curatedMarkers$Symbol) %>%
+  rownames_to_column("rownames") 
+```
+
+#### 1.3.4.2 Unique
+```{r}
+# rowDataObj <- rowData(obj) %>%
+#   as.data.frame()
+
+# setdiff(goi, rowDataObj$Symbol) # 0, so all goi have a corresponding ENSCAF ID!
+
+rowDataObjCuratedUnique <- rowDataObj %>%
+  filter(Symbol %in% curatedMarkersUnique$Symbol) %>%
+  rownames_to_column("rownames") 
+```
+
+### 1.3.5 Curated Cib 50
+#### 1.3.5.1 All
+```{r}
+# rowDataObj <- rowData(objNoBad) %>%
+#   as.data.frame()
+
+# setdiff(goi, rowDataObj$Symbol) # 0, so all goi have a corresponding ENSCAF ID!
+
+rowDataObjCuratedCib50 <- rowDataObj %>%
+  filter(Symbol %in% curatedCib50$Symbol) %>%
+  rownames_to_column("rownames") 
+```
+
+#### 1.3.5.2 Unique
+```{r}
+# rowDataObj <- rowData(obj) %>%
+#   as.data.frame()
+
+# setdiff(goi, rowDataObj$Symbol) # 0, so all goi have a corresponding ENSCAF ID!
+
+rowDataObjCuratedCib50Unique <- rowDataObj %>%
+  filter(Symbol %in% curatedCib50Unique$Symbol) %>%
+  rownames_to_column("rownames") 
+```
+
+
 # 2 Export snRNAseq counts
 Scaden requires a .h5ad file. 
 Reading in SCE object, but subsetting genes to those defined by Maurine. 
@@ -242,9 +435,14 @@ write.table(
 ```
 
 ### 2.1.2 Without "bad" cluster
-#### 2.1.2.1 Mapped
 ```{r}
-snCountsFinalNoBad <- assay(objNoBad, "counts") %>%
+assay <- assay(objNoBad, "counts") 
+```
+
+#### 2.1.2.1 Marker genes
+##### 2.1.2.1.1 All
+```{r}
+snCountsFinalNoBad <- assay %>%
   as.data.frame() %>%
   rownames_to_column("rownames") %>%
   left_join(rowDataObjMapped) %>% 
@@ -261,7 +459,7 @@ snAnnoFinalNoBad <- data.frame("Celltype" = colData(objNoBad)$manual.log.anot.fi
 snSamplesFinalNoBad <- data.frame("SampleID" = objNoBad$Sample)
 
 snCountsColdataNoBad <- colData(objNoBad)
-rm(objNoBad)
+# rm(objNoBad)
 gc()
 
 # Create the cell count matrix: rows = cell types, columns = samples
@@ -282,7 +480,7 @@ colSums(snCellPropNoBad) # Should all be 1.
 write.table(
   snCountsFinalNoBad, 
   file = paste0(resDir, 
-                "/0_scadenInput/snCountsNoBadq1q4/snCountsNoBadq1q4_counts.txt"), 
+                "/0_scadenInput/snCountsMarkerGenes/snCountsMarkerGenes_counts.txt"), 
   sep = "\t", 
   quote = FALSE, 
   row.names = c(seq(from=0, to=nrow(snCountsFinalNoBad)-1, by=1)),
@@ -292,7 +490,7 @@ write.table(
 write.table(
   snAnnoFinalNoBad, 
   file = paste0(resDir,
-                "/0_scadenInput/snCountsNoBadq1q4/snCountsNoBadq1q4_celltypes.txt"), 
+                "/0_scadenInput/snCountsMarkerGenes/snCountsMarkerGenes_celltypes.txt"), 
   sep = "\t", 
   quote = FALSE,
   col.names = T,  # Ensures first column (gene names) gets no name, 
@@ -302,7 +500,7 @@ write.table(
 write.table(
   snSamplesFinalNoBad, 
   file = paste0(resDir,
-                "/0_scadenInput/snCountsNoBadq1q4/snCountsNoBadq1q4_samples.txt"), 
+                "/0_scadenInput/snCountsMarkerGenes/snCountsMarkerGenes_samples.txt"), 
   sep = "\t", 
   quote = FALSE,
   col.names = T,  # Ensures first column (gene names) gets no name, 
@@ -310,12 +508,12 @@ write.table(
 )
 ```
 
-#### 2.1.2.2 Mapped unique
+##### 2.1.2.1.2 Unique
 ```{r}
-snCountsFinalNoBad <- assay(objNoBad, "counts") %>%
+snCountsFinalNoBad <- assay %>%
   as.data.frame() %>%
   rownames_to_column("rownames") %>%
-  left_join(rowDataObjMapped) %>% 
+  left_join(rowDataObjMappedUnique) %>% 
   drop_na("ID") %>% 
   column_to_rownames("ID") %>%
   select(-c("rownames",
@@ -329,7 +527,7 @@ snAnnoFinalNoBad <- data.frame("Celltype" = colData(objNoBad)$manual.log.anot.fi
 snSamplesFinalNoBad <- data.frame("SampleID" = objNoBad$Sample)
 
 snCountsColdataNoBad <- colData(objNoBad)
-rm(objNoBad)
+# rm(objNoBad)
 gc()
 
 # Create the cell count matrix: rows = cell types, columns = samples
@@ -350,7 +548,7 @@ colSums(snCellPropNoBad) # Should all be 1.
 write.table(
   snCountsFinalNoBad, 
   file = paste0(resDir, 
-                "/0_scadenInput/snCountsNoBadq1q4Unique/snCountsNoBadq1q4Unique_counts.txt"), 
+                "/0_scadenInput/snCountsMarkerGenesUnique/snCountsMarkerGenesUnique_counts.txt"), 
   sep = "\t", 
   quote = FALSE, 
   row.names = c(seq(from=0, to=nrow(snCountsFinalNoBad)-1, by=1)),
@@ -360,7 +558,7 @@ write.table(
 write.table(
   snAnnoFinalNoBad, 
   file = paste0(resDir,
-                "/0_scadenInput/snCountsNoBadq1q4Unique/snCountsNoBadq1q4Unique_celltypes.txt"), 
+                "/0_scadenInput/snCountsMarkerGenesUnique/snCountsMarkerGenesUnique_celltypes.txt"), 
   sep = "\t", 
   quote = FALSE,
   col.names = T,  # Ensures first column (gene names) gets no name, 
@@ -370,13 +568,575 @@ write.table(
 write.table(
   snSamplesFinalNoBad, 
   file = paste0(resDir,
-                "/0_scadenInput/snCountsNoBadq1q4Unique/snCountsNoBadq1q4Unique_samples.txt"), 
+                "/0_scadenInput/snCountsMarkerGenesUnique/snCountsMarkerGenesUnique_samples.txt"), 
   sep = "\t", 
   quote = FALSE,
   col.names = T,  # Ensures first column (gene names) gets no name, 
   row.names = F
 )
 ```
+
+#### 2.1.2.2 Cib 10
+##### 2.1.2.2.1 All
+```{r}
+snCountsFinalNoBad <- assay %>%
+  as.data.frame() %>%
+  rownames_to_column("rownames") %>%
+  left_join(rowDataObjCib10) %>% 
+  drop_na("ID") %>% 
+  column_to_rownames("ID") %>%
+  select(-c("rownames",
+            "Symbol",
+            "Type",
+            "Chromosome",
+            "hvgs" )) %>%
+  t()
+
+snAnnoFinalNoBad <- data.frame("Celltype" = colData(objNoBad)$manual.log.anot.fine)
+snSamplesFinalNoBad <- data.frame("SampleID" = objNoBad$Sample)
+
+snCountsColdataNoBad <- colData(objNoBad)
+# rm(objNoBad)
+gc()
+
+# Create the cell count matrix: rows = cell types, columns = samples
+snCellCountsNoBad <- snCountsColdataNoBad %>%
+  as.data.frame() %>%
+  group_by(manual.log.anot.fine,
+           Sample) %>%
+  summarise(cellCount = n()) %>%
+  pivot_wider(names_from = Sample,
+              values_from = cellCount,
+              values_fill = 0) %>%
+  column_to_rownames("manual.log.anot.fine")
+
+snCellPropNoBad <- apply(snCellCountsNoBad, 2, function(x) x/sum(x))
+
+colSums(snCellPropNoBad) # Should all be 1.
+
+write.table(
+  snCountsFinalNoBad, 
+  file = paste0(resDir, 
+                "/0_scadenInput/snCountsCib10/snCountsCib10_counts.txt"), 
+  sep = "\t", 
+  quote = FALSE, 
+  row.names = c(seq(from=0, to=nrow(snCountsFinalNoBad)-1, by=1)),
+  col.names = NA  # Ensures first column (cell id's names) gets no name
+)
+
+write.table(
+  snAnnoFinalNoBad, 
+  file = paste0(resDir,
+                "/0_scadenInput/snCountsCib10/snCountsCib10_celltypes.txt"), 
+  sep = "\t", 
+  quote = FALSE,
+  col.names = T,  # Ensures first column (gene names) gets no name, 
+  row.names = F
+)
+
+write.table(
+  snSamplesFinalNoBad, 
+  file = paste0(resDir,
+                "/0_scadenInput/snCountsCib10/snCountsCib10_samples.txt"), 
+  sep = "\t", 
+  quote = FALSE,
+  col.names = T,  # Ensures first column (gene names) gets no name, 
+  row.names = F
+)
+```
+
+##### 2.1.2.2.2 Unique
+```{r}
+snCountsFinalNoBad <- assay %>%
+  as.data.frame() %>%
+  rownames_to_column("rownames") %>%
+  left_join(rowDataObjCib10Unique) %>% 
+  drop_na("ID") %>% 
+  column_to_rownames("ID") %>%
+  select(-c("rownames",
+            "Symbol",
+            "Type",
+            "Chromosome",
+            "hvgs" )) %>%
+  t()
+
+snAnnoFinalNoBad <- data.frame("Celltype" = colData(objNoBad)$manual.log.anot.fine)
+snSamplesFinalNoBad <- data.frame("SampleID" = objNoBad$Sample)
+
+snCountsColdataNoBad <- colData(objNoBad)
+# rm(objNoBad)
+gc()
+
+# Create the cell count matrix: rows = cell types, columns = samples
+snCellCountsNoBad <- snCountsColdataNoBad %>%
+  as.data.frame() %>%
+  group_by(manual.log.anot.fine,
+           Sample) %>%
+  summarise(cellCount = n()) %>%
+  pivot_wider(names_from = Sample,
+              values_from = cellCount,
+              values_fill = 0) %>%
+  column_to_rownames("manual.log.anot.fine")
+
+snCellPropNoBad <- apply(snCellCountsNoBad, 2, function(x) x/sum(x))
+
+colSums(snCellPropNoBad) # Should all be 1.
+
+write.table(
+  snCountsFinalNoBad, 
+  file = paste0(resDir, 
+                "/0_scadenInput/snCountsCib10Unique/snCountsCib10Unique_counts.txt"), 
+  sep = "\t", 
+  quote = FALSE, 
+  row.names = c(seq(from=0, to=nrow(snCountsFinalNoBad)-1, by=1)),
+  col.names = NA  # Ensures first column (cell id's names) gets no name
+)
+
+write.table(
+  snAnnoFinalNoBad, 
+  file = paste0(resDir,
+                "/0_scadenInput/snCountsCib10Unique/snCountsCib10Unique_celltypes.txt"), 
+  sep = "\t", 
+  quote = FALSE,
+  col.names = T,  # Ensures first column (gene names) gets no name, 
+  row.names = F
+)
+
+write.table(
+  snSamplesFinalNoBad, 
+  file = paste0(resDir,
+                "/0_scadenInput/snCountsCib10Unique/snCountsCib10Unique_samples.txt"), 
+  sep = "\t", 
+  quote = FALSE,
+  col.names = T,  # Ensures first column (gene names) gets no name, 
+  row.names = F
+)
+```
+
+
+
+
+
+
+#### 2.1.2.3 Cib 50
+##### 2.1.2.3.1 All
+```{r}
+snCountsFinalNoBad <- assay %>%
+  as.data.frame() %>%
+  rownames_to_column("rownames") %>%
+  left_join(rowDataObjCib50) %>% 
+  drop_na("ID") %>% 
+  column_to_rownames("ID") %>%
+  select(-c("rownames",
+            "Symbol",
+            "Type",
+            "Chromosome",
+            "hvgs" )) %>%
+  t()
+
+snAnnoFinalNoBad <- data.frame("Celltype" = colData(objNoBad)$manual.log.anot.fine)
+snSamplesFinalNoBad <- data.frame("SampleID" = objNoBad$Sample)
+
+snCountsColdataNoBad <- colData(objNoBad)
+# rm(objNoBad)
+gc()
+
+# Create the cell count matrix: rows = cell types, columns = samples
+snCellCountsNoBad <- snCountsColdataNoBad %>%
+  as.data.frame() %>%
+  group_by(manual.log.anot.fine,
+           Sample) %>%
+  summarise(cellCount = n()) %>%
+  pivot_wider(names_from = Sample,
+              values_from = cellCount,
+              values_fill = 0) %>%
+  column_to_rownames("manual.log.anot.fine")
+
+snCellPropNoBad <- apply(snCellCountsNoBad, 2, function(x) x/sum(x))
+
+colSums(snCellPropNoBad) # Should all be 1.
+
+write.table(
+  snCountsFinalNoBad, 
+  file = paste0(resDir, 
+                "/0_scadenInput/snCountsCib50/snCountsCib50_counts.txt"), 
+  sep = "\t", 
+  quote = FALSE, 
+  row.names = c(seq(from=0, to=nrow(snCountsFinalNoBad)-1, by=1)),
+  col.names = NA  # Ensures first column (cell id's names) gets no name
+)
+
+write.table(
+  snAnnoFinalNoBad, 
+  file = paste0(resDir,
+                "/0_scadenInput/snCountsCib50/snCountsCib50_celltypes.txt"), 
+  sep = "\t", 
+  quote = FALSE,
+  col.names = T,  # Ensures first column (gene names) gets no name, 
+  row.names = F
+)
+
+write.table(
+  snSamplesFinalNoBad, 
+  file = paste0(resDir,
+                "/0_scadenInput/snCountsCib50/snCountsCib50_samples.txt"), 
+  sep = "\t", 
+  quote = FALSE,
+  col.names = T,  # Ensures first column (gene names) gets no name, 
+  row.names = F
+)
+```
+
+##### 2.1.2.3.2 Unique
+```{r}
+snCountsFinalNoBad <- assay %>%
+  as.data.frame() %>%
+  rownames_to_column("rownames") %>%
+  left_join(rowDataObjCib50Unique) %>% 
+  drop_na("ID") %>% 
+  column_to_rownames("ID") %>%
+  select(-c("rownames",
+            "Symbol",
+            "Type",
+            "Chromosome",
+            "hvgs" )) %>%
+  t()
+
+snAnnoFinalNoBad <- data.frame("Celltype" = colData(objNoBad)$manual.log.anot.fine)
+snSamplesFinalNoBad <- data.frame("SampleID" = objNoBad$Sample)
+
+snCountsColdataNoBad <- colData(objNoBad)
+# rm(objNoBad)
+gc()
+
+# Create the cell count matrix: rows = cell types, columns = samples
+snCellCountsNoBad <- snCountsColdataNoBad %>%
+  as.data.frame() %>%
+  group_by(manual.log.anot.fine,
+           Sample) %>%
+  summarise(cellCount = n()) %>%
+  pivot_wider(names_from = Sample,
+              values_from = cellCount,
+              values_fill = 0) %>%
+  column_to_rownames("manual.log.anot.fine")
+
+snCellPropNoBad <- apply(snCellCountsNoBad, 2, function(x) x/sum(x))
+
+colSums(snCellPropNoBad) # Should all be 1.
+
+write.table(
+  snCountsFinalNoBad, 
+  file = paste0(resDir, 
+                "/0_scadenInput/snCountsCib50Unique/snCountsCib50Unique_counts.txt"), 
+  sep = "\t", 
+  quote = FALSE, 
+  row.names = c(seq(from=0, to=nrow(snCountsFinalNoBad)-1, by=1)),
+  col.names = NA  # Ensures first column (cell id's names) gets no name
+)
+
+write.table(
+  snAnnoFinalNoBad, 
+  file = paste0(resDir,
+                "/0_scadenInput/snCountsCib50Unique/snCountsCib50Unique_celltypes.txt"), 
+  sep = "\t", 
+  quote = FALSE,
+  col.names = T,  # Ensures first column (gene names) gets no name, 
+  row.names = F
+)
+
+write.table(
+  snSamplesFinalNoBad, 
+  file = paste0(resDir,
+                "/0_scadenInput/snCountsCib50Unique/snCountsCib50Unique_samples.txt"), 
+  sep = "\t", 
+  quote = FALSE,
+  col.names = T,  # Ensures first column (gene names) gets no name, 
+  row.names = F
+)
+```
+
+
+
+
+
+
+
+#### 2.1.2.4 Curated
+##### 2.1.2.4.1 All
+```{r}
+snCountsFinalNoBad <- assay %>%
+  as.data.frame() %>%
+  rownames_to_column("rownames") %>%
+  left_join(rowDataObjCurated) %>% 
+  drop_na("ID") %>% 
+  column_to_rownames("ID") %>%
+  select(-c("rownames",
+            "Symbol",
+            "Type",
+            "Chromosome",
+            "hvgs" )) %>%
+  t()
+
+snAnnoFinalNoBad <- data.frame("Celltype" = colData(objNoBad)$manual.log.anot.fine)
+snSamplesFinalNoBad <- data.frame("SampleID" = objNoBad$Sample)
+
+snCountsColdataNoBad <- colData(objNoBad)
+# rm(objNoBad)
+gc()
+
+# Create the cell count matrix: rows = cell types, columns = samples
+snCellCountsNoBad <- snCountsColdataNoBad %>%
+  as.data.frame() %>%
+  group_by(manual.log.anot.fine,
+           Sample) %>%
+  summarise(cellCount = n()) %>%
+  pivot_wider(names_from = Sample,
+              values_from = cellCount,
+              values_fill = 0) %>%
+  column_to_rownames("manual.log.anot.fine")
+
+snCellPropNoBad <- apply(snCellCountsNoBad, 2, function(x) x/sum(x))
+
+colSums(snCellPropNoBad) # Should all be 1.
+
+write.table(
+  snCountsFinalNoBad, 
+  file = paste0(resDir, 
+                "/0_scadenInput/snCountsCurated/snCountsCurated_counts.txt"), 
+  sep = "\t", 
+  quote = FALSE, 
+  row.names = c(seq(from=0, to=nrow(snCountsFinalNoBad)-1, by=1)),
+  col.names = NA  # Ensures first column (cell id's names) gets no name
+)
+
+write.table(
+  snAnnoFinalNoBad, 
+  file = paste0(resDir,
+                "/0_scadenInput/snCountsCurated/snCountsCurated_celltypes.txt"), 
+  sep = "\t", 
+  quote = FALSE,
+  col.names = T,  # Ensures first column (gene names) gets no name, 
+  row.names = F
+)
+
+write.table(
+  snSamplesFinalNoBad, 
+  file = paste0(resDir,
+                "/0_scadenInput/snCountsCurated/snCountsCurated_samples.txt"), 
+  sep = "\t", 
+  quote = FALSE,
+  col.names = T,  # Ensures first column (gene names) gets no name, 
+  row.names = F
+)
+```
+
+##### 2.1.2.3.2 Unique
+```{r}
+snCountsFinalNoBad <- assay %>%
+  as.data.frame() %>%
+  rownames_to_column("rownames") %>%
+  left_join(rowDataObjCuratedUnique) %>% 
+  drop_na("ID") %>% 
+  column_to_rownames("ID") %>%
+  select(-c("rownames",
+            "Symbol",
+            "Type",
+            "Chromosome",
+            "hvgs" )) %>%
+  t()
+
+snAnnoFinalNoBad <- data.frame("Celltype" = colData(objNoBad)$manual.log.anot.fine)
+snSamplesFinalNoBad <- data.frame("SampleID" = objNoBad$Sample)
+
+snCountsColdataNoBad <- colData(objNoBad)
+# rm(objNoBad)
+gc()
+
+# Create the cell count matrix: rows = cell types, columns = samples
+snCellCountsNoBad <- snCountsColdataNoBad %>%
+  as.data.frame() %>%
+  group_by(manual.log.anot.fine,
+           Sample) %>%
+  summarise(cellCount = n()) %>%
+  pivot_wider(names_from = Sample,
+              values_from = cellCount,
+              values_fill = 0) %>%
+  column_to_rownames("manual.log.anot.fine")
+
+snCellPropNoBad <- apply(snCellCountsNoBad, 2, function(x) x/sum(x))
+
+colSums(snCellPropNoBad) # Should all be 1.
+
+write.table(
+  snCountsFinalNoBad, 
+  file = paste0(resDir, 
+                "/0_scadenInput/snCountsCuratedUnique/snCountsCuratedUnique_counts.txt"), 
+  sep = "\t", 
+  quote = FALSE, 
+  row.names = c(seq(from=0, to=nrow(snCountsFinalNoBad)-1, by=1)),
+  col.names = NA  # Ensures first column (cell id's names) gets no name
+)
+
+write.table(
+  snAnnoFinalNoBad, 
+  file = paste0(resDir,
+                "/0_scadenInput/snCountsCuratedUnique/snCountsCuratedUnique_celltypes.txt"), 
+  sep = "\t", 
+  quote = FALSE,
+  col.names = T,  # Ensures first column (gene names) gets no name, 
+  row.names = F
+)
+
+write.table(
+  snSamplesFinalNoBad, 
+  file = paste0(resDir,
+                "/0_scadenInput/snCountsCuratedUnique/snCountsCuratedUnique_samples.txt"), 
+  sep = "\t", 
+  quote = FALSE,
+  col.names = T,  # Ensures first column (gene names) gets no name, 
+  row.names = F
+)
+```
+
+
+#### 2.1.2.5 Cib50 Curated
+##### 2.1.2.5.1 All
+```{r}
+snCountsFinalNoBad <- assay %>%
+  as.data.frame() %>%
+  rownames_to_column("rownames") %>%
+  left_join(rowDataObjCuratedCib50) %>% 
+  drop_na("ID") %>% 
+  column_to_rownames("ID") %>%
+  select(-c("rownames",
+            "Symbol",
+            "Type",
+            "Chromosome",
+            "hvgs" )) %>%
+  t()
+
+snAnnoFinalNoBad <- data.frame("Celltype" = colData(objNoBad)$manual.log.anot.fine)
+snSamplesFinalNoBad <- data.frame("SampleID" = objNoBad$Sample)
+
+snCountsColdataNoBad <- colData(objNoBad)
+# rm(objNoBad)
+gc()
+
+# Create the cell count matrix: rows = cell types, columns = samples
+snCellCountsNoBad <- snCountsColdataNoBad %>%
+  as.data.frame() %>%
+  group_by(manual.log.anot.fine,
+           Sample) %>%
+  summarise(cellCount = n()) %>%
+  pivot_wider(names_from = Sample,
+              values_from = cellCount,
+              values_fill = 0) %>%
+  column_to_rownames("manual.log.anot.fine")
+
+snCellPropNoBad <- apply(snCellCountsNoBad, 2, function(x) x/sum(x))
+
+colSums(snCellPropNoBad) # Should all be 1.
+
+write.table(
+  snCountsFinalNoBad, 
+  file = paste0(resDir, 
+                "/0_scadenInput/snCountsCuratedCib50/snCountsCuratedCib50_counts.txt"), 
+  sep = "\t", 
+  quote = FALSE, 
+  row.names = c(seq(from=0, to=nrow(snCountsFinalNoBad)-1, by=1)),
+  col.names = NA  # Ensures first column (cell id's names) gets no name
+)
+
+write.table(
+  snAnnoFinalNoBad, 
+  file = paste0(resDir,
+                "/0_scadenInput/snCountsCuratedCib50/snCountsCuratedCib50_celltypes.txt"), 
+  sep = "\t", 
+  quote = FALSE,
+  col.names = T,  # Ensures first column (gene names) gets no name, 
+  row.names = F
+)
+
+write.table(
+  snSamplesFinalNoBad, 
+  file = paste0(resDir,
+                "/0_scadenInput/snCountsCuratedCib50/snCountsCuratedCib50_samples.txt"), 
+  sep = "\t", 
+  quote = FALSE,
+  col.names = T,  # Ensures first column (gene names) gets no name, 
+  row.names = F
+)
+```
+
+##### 2.1.2.3.2 Unique
+```{r}
+snCountsFinalNoBad <- assay %>%
+  as.data.frame() %>%
+  rownames_to_column("rownames") %>%
+  left_join(rowDataObjCuratedCib50Unique) %>% 
+  drop_na("ID") %>% 
+  column_to_rownames("ID") %>%
+  select(-c("rownames",
+            "Symbol",
+            "Type",
+            "Chromosome",
+            "hvgs" )) %>%
+  t()
+
+snAnnoFinalNoBad <- data.frame("Celltype" = colData(objNoBad)$manual.log.anot.fine)
+snSamplesFinalNoBad <- data.frame("SampleID" = objNoBad$Sample)
+
+snCountsColdataNoBad <- colData(objNoBad)
+# rm(objNoBad)
+gc()
+
+# Create the cell count matrix: rows = cell types, columns = samples
+snCellCountsNoBad <- snCountsColdataNoBad %>%
+  as.data.frame() %>%
+  group_by(manual.log.anot.fine,
+           Sample) %>%
+  summarise(cellCount = n()) %>%
+  pivot_wider(names_from = Sample,
+              values_from = cellCount,
+              values_fill = 0) %>%
+  column_to_rownames("manual.log.anot.fine")
+
+snCellPropNoBad <- apply(snCellCountsNoBad, 2, function(x) x/sum(x))
+
+colSums(snCellPropNoBad) # Should all be 1.
+
+write.table(
+  snCountsFinalNoBad, 
+  file = paste0(resDir, 
+                "/0_scadenInput/snCountsCuratedCib50Unique/snCountsCuratedCib50Unique_counts.txt"), 
+  sep = "\t", 
+  quote = FALSE, 
+  row.names = c(seq(from=0, to=nrow(snCountsFinalNoBad)-1, by=1)),
+  col.names = NA  # Ensures first column (cell id's names) gets no name
+)
+
+write.table(
+  snAnnoFinalNoBad, 
+  file = paste0(resDir,
+                "/0_scadenInput/snCountsCuratedCib50Unique/snCountsCuratedCib50Unique_celltypes.txt"), 
+  sep = "\t", 
+  quote = FALSE,
+  col.names = T,  # Ensures first column (gene names) gets no name, 
+  row.names = F
+)
+
+write.table(
+  snSamplesFinalNoBad, 
+  file = paste0(resDir,
+                "/0_scadenInput/snCountsCuratedCib50Unique/snCountsCuratedCib50Unique_samples.txt"), 
+  sep = "\t", 
+  quote = FALSE,
+  col.names = T,  # Ensures first column (gene names) gets no name, 
+  row.names = F
+)
+```
+
+
 # 3 Export bulk counts
 Samples in column, genes in column names (but no header name.)
 
@@ -386,7 +1146,7 @@ Export as tsv.
 bulkCountsFinal <- readRDS(paste0(dataDir, "01_Deconvolution_matchedBulkMatrixCTVT_bulkCountsFinal.rds"))
 
 bulkCountsFinal_metadata <- read.xlsx(paste0(dataDir,
-                                             "01_Deconvolution_matchedBulkMatrixCTVT_bulkCountsFinal_metadata.xlsx"))
+                                          "01_Deconvolution_matchedBulkMatrixCTVT_bulkCountsFinal_metadata.xlsx"))
 ```
 
 ## 3.2 Subset on genes of interest (goi)
@@ -401,42 +1161,50 @@ write.table(
   quote = FALSE, 
   col.names = NA  # Ensures first column (gene names) gets no name
 )
+
+
+write.table(
+  bulkCountsFinal, 
+  file = paste0(resDir, "/0_scadenInput/", fprefix, "_bulkCountsFinal.txt"), 
+  sep = "\t", 
+  quote = FALSE, 
+  col.names = NA  # Ensures first column (gene names) gets no name
+)
 ```
 
 ### 3.2.2 With purity (snPurity only)
 - Do we filter out non-purity rows?
 - Of note, manually adding "3203T1A2b", techically should have same purity as "3203T1A2c"
-#### 3.2.2.1 All cell types purity 
+#### 3.2.2.1 All cell types purity !! DO NOT RUN
 ```{r}
-snCellPropPurity <- snCellProp["CTVT",] %>%
-  # t() %>%
-  as.data.frame() %>%
-  rownames_to_column("Sample") %>%
-  rename("."="CTVT") 
-
-
-bulkCountsGoiPurity <- bulkCountsFinal[enscaf,] %>%
-  t() %>%
-  as.data.frame() %>%
-  rownames_to_column("ID") %>%
-  mutate("Sample"=str_replace(ID, "_[np2]$", "")) %>%
-  # mutate("Sample"=str_replace(Sample, "[abc]$", "")) %>%
-  left_join(snCellPropPurity) %>%
-  select(-c(Sample)) %>%
-  rename("CTVT"="purity") %>%
-  drop_na() %>%
-  column_to_rownames("ID") %>%
-  as.matrix() %>%
-  t()
-
-write.table(
-  bulkCountsGoiPurity, 
-  file = paste0(resDir, "/0_scadenInput/", fprefix, "_bulkCountsGoiPurity.txt"), 
-  sep = "\t", 
-  quote = FALSE, 
-  col.names = NA  # Ensures first column (gene names) gets no name
-)
-
+# snCellPropPurity <- snCellProp["CTVT",] %>%
+#   # t() %>%
+#   as.data.frame() %>%
+#   rownames_to_column("Sample") %>%
+#   rename("."="CTVT") 
+# 
+# 
+# bulkCountsGoiPurity <- bulkCountsFinal[enscaf,] %>%
+#   t() %>%
+#   as.data.frame() %>%
+#   rownames_to_column("ID") %>%
+#   mutate("Sample"=str_replace(ID, "_[np2]$", "")) %>%
+#   # mutate("Sample"=str_replace(Sample, "[abc]$", "")) %>%
+#   left_join(snCellPropPurity) %>%
+#   select(-c(Sample)) %>%
+#   rename("CTVT"="purity") %>%
+#   drop_na() %>%
+#   column_to_rownames("ID") %>%
+#   as.matrix() %>%
+#   t()
+# 
+# write.table(
+#   bulkCountsGoiPurity, 
+#   file = paste0(resDir, "/0_scadenInput/", fprefix, "_bulkCountsGoiPurity.txt"), 
+#   sep = "\t", 
+#   quote = FALSE, 
+#   col.names = NA  # Ensures first column (gene names) gets no name
+# )
 ```
 
 #### 3.2.2.2 No bad cell types purity
@@ -447,7 +1215,7 @@ snCellPropNoBadPurity <- snCellPropNoBad["CTVT", ] %>%
   rownames_to_column("Sample") %>%
   rename("."="CTVT")
 
-bulkCountsGoiPurityNoBad <- bulkCountsFinal[enscaf,] %>%
+bulkCountsPurityNoBad <- bulkCountsFinal %>%
   t() %>%
   as.data.frame() %>%
   rownames_to_column("ID") %>%
@@ -462,8 +1230,8 @@ bulkCountsGoiPurityNoBad <- bulkCountsFinal[enscaf,] %>%
   t()
 
 write.table(
-  bulkCountsGoiPurityNoBad, 
-  file = paste0(resDir, "/0_scadenInput/", fprefix, "_bulkCountsGoiPurityNoBad.txt"), 
+  bulkCountsPurityNoBad, 
+  file = paste0(resDir, "/0_scadenInput/", fprefix, "_bulkCountsPurityNoBad.txt"), 
   sep = "\t", 
   quote = FALSE, 
   col.names = NA  # Ensures first column (gene names) gets no name
@@ -484,6 +1252,9 @@ setdiff(colnames(bulkCountsFinal), adrianSupp2$Sample) # None are in Adrian's ta
 andy <- read.csv(paste0(tempDataDir, "2025-05-26_4425_samples_mitochondrial_tree(4425 samples tree).csv")) 
 
 setdiff(colnames(bulkCountsFinal), andy$Label)
+intersect(colnames(bulkCountsFinal), andy$Label)
+# > intersect(colnames(bulkCountsFinal), andy$Label)
+#  [1] "3752T" "3759T" "3760T" "3761T" "3764T" "3770T" "3772T" "3774T" "3775T" "3776T"
 
 andyPurity <- andy %>%
   filter(Label %in% colnames(bulkCountsFinal)) %>%
@@ -492,6 +1263,13 @@ andyPurity <- andy %>%
          "Purity"="CTVT")
 
 write.xlsx(andyPurity, paste0(resDir, fprefix, "_bulkCountsFinal_andyPurities.xlsx"))
+
+andyPurityForMaurine <- andy %>%
+  filter(Label %in% colnames(bulkCountsFinal)) %>%
+  # select(Label, Purity) %>%
+  rename("Label"="Sample", 
+         "Purity"="CTVT")
+write.xlsx(andyPurityForMaurine, paste0(resDir, fprefix, "_bulkCountsFinal_andyPuritiesForMaurine.xlsx"))
 ```
 
 #### 3.2.2.2 All cell types purity 
@@ -509,7 +1287,7 @@ snCellPropPurityAndy <- rbind(snCellPropPurity,
                               andyPurity)
   
 
-bulkCountsGoiPurityAndy <- bulkCountsFinal[enscaf,] %>%
+bulkCountsGoiPurityAndy <- bulkCountsFinal %>%
   t() %>%
   as.data.frame() %>%
   rownames_to_column("ID") %>%
@@ -546,7 +1324,7 @@ snCellPropNoBadPurity[nrow(snCellPropNoBadPurity)+1,] <- c("3203T1A2b",
 snCellPropNoBadPurityAndy <- rbind(snCellPropNoBadPurity, 
                                    andyPurity)
 
-bulkCountsGoiPurityNoBadAndy <- bulkCountsFinal[enscaf,] %>%
+bulkCountsGoiPurityNoBadAndy <- bulkCountsFinal %>%
   t() %>%
   as.data.frame() %>%
   rownames_to_column("ID") %>%
@@ -581,6 +1359,7 @@ devtools::install_github("keshavmot2/scanalysis")
 library(scanalysis)
 ```
 
+# 5 Visualizations
 
 
 

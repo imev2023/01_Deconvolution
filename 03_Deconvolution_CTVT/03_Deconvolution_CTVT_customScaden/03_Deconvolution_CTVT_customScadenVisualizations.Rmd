@@ -20,6 +20,7 @@ library(tidyverse)
 library(openxlsx)
 library(SingleCellExperiment)
 setClassUnion("ExpData", c("matrix", "SummarizedExperiment"))
+library(ggpattern)
 ```
 
 ## 0.2 Paths
@@ -712,4 +713,384 @@ draw(
 
 
 dev.off()
+```
+
+# 7 Bar plots
+```{r}
+# Step 2: Define a color mapping
+celltype_colors <- c(
+  "CTVT" = "#BCD0C7",
+  "CAF.Endo" = "#FDDFA4FF",
+  "Myeloid" = "#F5FDC6",
+  "Plasma" = "#B4B9E0FF",
+  "Tcells" = "#D56AA0",
+  "Bcells" = "#A8D5E2"
+)
+```
+
+## 7.1 Ground truth
+```{r}
+obj <- readRDS(paste0(dataDir, "SCE_concat_CTVT_includingAllGenes_logCorrecDone_vstCorrecDone_ClustDone2_ManAnot.rds"))
+
+objNoBad <- obj[,obj$manual.log.anot.fine!="bad"]
+
+rm(obj)
+gc()
+
+colData <- colData(objNoBad)
+# rm(objNoBad)
+gc()
+
+# Create the cell count matrix: rows = cell types, columns = samples
+snCellCountsNoBad <- colData(objNoBad) %>%
+  as.data.frame() %>%
+  group_by(manual.log.anot.fine,
+           Sample) %>%
+  summarise(cellCount = n()) %>%
+  pivot_wider(names_from = Sample,
+              values_from = cellCount,
+              values_fill = 0) %>%
+  column_to_rownames("manual.log.anot.fine")
+
+snCellPropNoBad <- apply(snCellCountsNoBad, 2, function(x) x/sum(x))
+
+colSums(snCellPropNoBad) # Should all be 1.
+
+
+
+
+groundTruth <- snCellPropNoBad %>%
+  t() %>%
+  as.data.frame() %>%
+  rownames_to_column("Sample") %>%
+  pivot_longer(cols = -c("Sample"), names_to = "Cluster", values_to = "Proportion") %>%
+  mutate(
+         Sample = paste0(Sample, " - GT"))
+
+
+
+```
+
+## 7.2 Loop through results
+### 7.2.1 snCountsCib10
+```{r}
+dirs <- list.dirs(paste0(resDir, "snCountsCib10/4_predict/"), full.names = T, recursive = F)
+names <- list.dirs(paste0(resDir, "snCountsCib10/4_predict/"), full.names = F, recursive = F)
+
+res <- list.files(path="~/gitClones/01_Deconvolution/03_Deconvolution_CTVT/032_Scripts/03_Deconvolution_CTVT_reDeconv/Results_4_deconvolution/", pattern = "ReDeconv_results", full.names = T)
+
+names <- str_replace(list.files(path="~/gitClones/01_Deconvolution/03_Deconvolution_CTVT/032_Scripts/03_Deconvolution_CTVT_reDeconv/Results_4_deconvolution/", pattern = "ReDeconv_results", full.names = F),
+                     "_markerGenes",
+                     "")
+
+for (d in 1:length(dirs)){
+  
+  tempDir <- dirs[d]
+  tempName <- names[d]
+  
+  res <- list.files(tempDir, full.names = T)
+  resNames <- str_replace(list.files(tempDir, full.names = F),
+                     "_markerGenes",
+                     "")
+  
+  
+  for (r in 1:length(res)){
+    
+    tempRes <- read_tsv(res[r]) %>%
+        as.data.frame() %>%
+        rename("...1"="Sample") %>%
+      pivot_longer(cols = -c("Sample"),
+                   values_to = "Proportion",
+                   names_to = "Cluster") %>%
+      rbind(groundTruth) %>%
+      mutate(Type = ifelse(grepl("- GT$", Sample), 
+                           "Ground truth",
+                           "Estimated"))
+  
+    tempName <- str_replace(resNames[r], ".txt", "")
+    
+    tempRes$Cluster <- factor(tempRes$Cluster, levels = rev(c("CTVT", 
+                                                    "Myeloid", 
+                                                    "Bcells",
+                                                    "CAF.Endo",
+                                                    "Tcells",
+                                                    "Plasma")))
+
+  # Step 3: Plot
+  plot <- ggplot(
+    tempRes,
+    aes(
+      x = Sample,
+      y = Proportion,
+      fill = Cluster,
+      pattern = Type  # TRUE/FALSE
+    )
+  ) +
+  geom_bar_pattern(
+    stat = "identity",
+    pattern_fill = "whitesmoke",           # color of stripes
+    pattern_angle = 45,               # diagonal stripes
+    pattern_density = 0.01,            # small + widely spaced
+    pattern_spacing = 0.01,           # space between stripes
+    pattern_key_scale_factor = 0.5, 
+    pattern_alpha = 0.4 # smaller legend pattern
+  ) +
+  scale_pattern_manual(values = c("Estimated" = "none", "Ground truth" = "stripe")) +
+  scale_fill_manual(values = celltype_colors) +
+  theme_minimal() +
+  ylab("Estimated Proportion") +
+  xlab("Sample") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))+
+    ggtitle(paste0(tempName))+
+    theme(title = element_text(size=6))
+  
+  
+   pdf(paste0(plotDir, "/bar/snCountsCib10/", fprefix, "_", tempName, ".pdf"),
+      height=4, width=7)
+  print(plot)
+  dev.off()
+    }
+}
+```
+
+### 7.2.2 snCountsCuratedCib50
+```{r}
+dirs <- list.dirs(paste0(resDir, "snCountsCuratedCib50/4_predict/"), full.names = T, recursive = F)
+names <- list.dirs(paste0(resDir, "snCountsCuratedCib50/4_predict/"), full.names = F, recursive = F)
+
+res <- list.files(path="~/gitClones/01_Deconvolution/03_Deconvolution_CTVT/032_Scripts/03_Deconvolution_CTVT_reDeconv/Results_4_deconvolution/", pattern = "ReDeconv_results", full.names = T)
+
+names <- str_replace(list.files(path="~/gitClones/01_Deconvolution/03_Deconvolution_CTVT/032_Scripts/03_Deconvolution_CTVT_reDeconv/Results_4_deconvolution/", pattern = "ReDeconv_results", full.names = F),
+                     "_markerGenes",
+                     "")
+
+for (d in 1:length(dirs)){
+  
+  tempDir <- dirs[d]
+  tempName <- names[d]
+  
+  res <- list.files(tempDir, full.names = T)
+  resNames <- str_replace(list.files(tempDir, full.names = F),
+                     "_markerGenes",
+                     "")
+  
+  
+  for (r in 1:length(res)){
+    
+    tempRes <- read_tsv(res[r]) %>%
+        as.data.frame() %>%
+        rename("...1"="Sample") %>%
+      pivot_longer(cols = -c("Sample"),
+                   values_to = "Proportion",
+                   names_to = "Cluster") %>%
+      rbind(groundTruth) %>%
+      mutate(Type = ifelse(grepl("- GT$", Sample), 
+                           "Ground truth",
+                           "Estimated"))
+  
+    tempName <- str_replace(resNames[r], ".txt", "")
+    
+    tempRes$Cluster <- factor(tempRes$Cluster, levels = rev(c("CTVT", 
+                                                    "Myeloid", 
+                                                    "Bcells",
+                                                    "CAF.Endo",
+                                                    "Tcells",
+                                                    "Plasma")))
+
+  # Step 3: Plot
+  plot <- ggplot(
+    tempRes,
+    aes(
+      x = Sample,
+      y = Proportion,
+      fill = Cluster,
+      pattern = Type  # TRUE/FALSE
+    )
+  ) +
+  geom_bar_pattern(
+    stat = "identity",
+    pattern_fill = "whitesmoke",           # color of stripes
+    pattern_angle = 45,               # diagonal stripes
+    pattern_density = 0.01,            # small + widely spaced
+    pattern_spacing = 0.01,           # space between stripes
+    pattern_key_scale_factor = 0.5, 
+    pattern_alpha = 0.4 # smaller legend pattern
+  ) +
+  scale_pattern_manual(values = c("Estimated" = "none", "Ground truth" = "stripe")) +
+  scale_fill_manual(values = celltype_colors) +
+  theme_minimal() +
+  ylab("Estimated Proportion") +
+  xlab("Sample") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))+
+    ggtitle(paste0(tempName))+
+    theme(title = element_text(size=6))
+  
+  
+   pdf(paste0(plotDir, "/bar/snCountsCuratedCib50/", fprefix, "_", tempName, ".pdf"),
+      height=4, width=7)
+  print(plot)
+  dev.off()
+    }
+}
+```
+
+### 7.2.3 snCountsCib50
+```{r}
+dirs <- list.dirs(paste0(resDir, "snCountsCib50/4_predict/"), full.names = T, recursive = F)
+names <- list.dirs(paste0(resDir, "snCountsCib50/4_predict/"), full.names = F, recursive = F)
+
+res <- list.files(path="~/gitClones/01_Deconvolution/03_Deconvolution_CTVT/032_Scripts/03_Deconvolution_CTVT_reDeconv/Results_4_deconvolution/", pattern = "ReDeconv_results", full.names = T)
+
+names <- str_replace(list.files(path="~/gitClones/01_Deconvolution/03_Deconvolution_CTVT/032_Scripts/03_Deconvolution_CTVT_reDeconv/Results_4_deconvolution/", pattern = "ReDeconv_results", full.names = F),
+                     "_markerGenes",
+                     "")
+
+for (d in 1:length(dirs)){
+  
+  tempDir <- dirs[d]
+  tempName <- names[d]
+  
+  res <- list.files(tempDir, full.names = T)
+  resNames <- str_replace(list.files(tempDir, full.names = F),
+                     "_markerGenes",
+                     "")
+  
+  
+  for (r in 1:length(res)){
+    
+    tempRes <- read_tsv(res[r]) %>%
+        as.data.frame() %>%
+        rename("...1"="Sample") %>%
+      pivot_longer(cols = -c("Sample"),
+                   values_to = "Proportion",
+                   names_to = "Cluster") %>%
+      rbind(groundTruth) %>%
+      mutate(Type = ifelse(grepl("- GT$", Sample), 
+                           "Ground truth",
+                           "Estimated"))
+  
+    tempName <- str_replace(resNames[r], ".txt", "")
+    
+    tempRes$Cluster <- factor(tempRes$Cluster, levels = rev(c("CTVT", 
+                                                    "Myeloid", 
+                                                    "Bcells",
+                                                    "CAF.Endo",
+                                                    "Tcells",
+                                                    "Plasma")))
+
+  # Step 3: Plot
+  plot <- ggplot(
+    tempRes,
+    aes(
+      x = Sample,
+      y = Proportion,
+      fill = Cluster,
+      pattern = Type  # TRUE/FALSE
+    )
+  ) +
+  geom_bar_pattern(
+    stat = "identity",
+    pattern_fill = "whitesmoke",           # color of stripes
+    pattern_angle = 45,               # diagonal stripes
+    pattern_density = 0.01,            # small + widely spaced
+    pattern_spacing = 0.01,           # space between stripes
+    pattern_key_scale_factor = 0.5, 
+    pattern_alpha = 0.4 # smaller legend pattern
+  ) +
+  scale_pattern_manual(values = c("Estimated" = "none", "Ground truth" = "stripe")) +
+  scale_fill_manual(values = celltype_colors) +
+  theme_minimal() +
+  ylab("Estimated Proportion") +
+  xlab("Sample") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))+
+    ggtitle(paste0(tempName))+
+    theme(title = element_text(size=6))
+  
+  
+   pdf(paste0(plotDir, "/bar/snCountsCib50/", fprefix, "_", tempName, ".pdf"),
+      height=4, width=7)
+  print(plot)
+  dev.off()
+    }
+}
+```
+### 7.2.4 snCountsCurated
+```{r}
+dirs <- list.dirs(paste0(resDir, "snCountsCurated/4_predict/"), full.names = T, recursive = F)
+names <- list.dirs(paste0(resDir, "snCountsCurated/4_predict/"), full.names = F, recursive = F)
+
+res <- list.files(path="~/gitClones/01_Deconvolution/03_Deconvolution_CTVT/032_Scripts/03_Deconvolution_CTVT_reDeconv/Results_4_deconvolution/", pattern = "ReDeconv_results", full.names = T)
+
+names <- str_replace(list.files(path="~/gitClones/01_Deconvolution/03_Deconvolution_CTVT/032_Scripts/03_Deconvolution_CTVT_reDeconv/Results_4_deconvolution/", pattern = "ReDeconv_results", full.names = F),
+                     "_markerGenes",
+                     "")
+
+for (d in 1:length(dirs)){
+  
+  tempDir <- dirs[d]
+  tempName <- names[d]
+  
+  res <- list.files(tempDir, full.names = T)
+  resNames <- str_replace(list.files(tempDir, full.names = F),
+                     "_markerGenes",
+                     "")
+  
+  
+  for (r in 1:length(res)){
+    
+    tempRes <- read_tsv(res[r]) %>%
+        as.data.frame() %>%
+        rename("...1"="Sample") %>%
+      pivot_longer(cols = -c("Sample"),
+                   values_to = "Proportion",
+                   names_to = "Cluster") %>%
+      rbind(groundTruth) %>%
+      mutate(Type = ifelse(grepl("- GT$", Sample), 
+                           "Ground truth",
+                           "Estimated"))
+  
+    tempName <- str_replace(resNames[r], ".txt", "")
+    
+    tempRes$Cluster <- factor(tempRes$Cluster, levels = rev(c("CTVT", 
+                                                    "Myeloid", 
+                                                    "Bcells",
+                                                    "CAF.Endo",
+                                                    "Tcells",
+                                                    "Plasma")))
+
+  # Step 3: Plot
+  plot <- ggplot(
+    tempRes,
+    aes(
+      x = Sample,
+      y = Proportion,
+      fill = Cluster,
+      pattern = Type  # TRUE/FALSE
+    )
+  ) +
+  geom_bar_pattern(
+    stat = "identity",
+    pattern_fill = "whitesmoke",           # color of stripes
+    pattern_angle = 45,               # diagonal stripes
+    pattern_density = 0.01,            # small + widely spaced
+    pattern_spacing = 0.01,           # space between stripes
+    pattern_key_scale_factor = 0.5, 
+    pattern_alpha = 0.4 # smaller legend pattern
+  ) +
+  scale_pattern_manual(values = c("Estimated" = "none", "Ground truth" = "stripe")) +
+  scale_fill_manual(values = celltype_colors) +
+  theme_minimal() +
+  ylab("Estimated Proportion") +
+  xlab("Sample") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))+
+    ggtitle(paste0(tempName))+
+    theme(title = element_text(size=6))
+  
+  
+   pdf(paste0(plotDir, "/bar/snCountsCurated/", fprefix, "_", tempName, ".pdf"),
+      height=4, width=7)
+  print(plot)
+  dev.off()
+    }
+}
 ```

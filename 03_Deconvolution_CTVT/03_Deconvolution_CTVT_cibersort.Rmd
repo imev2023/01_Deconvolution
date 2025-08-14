@@ -83,6 +83,22 @@ snCountsFinalDfUnique <- snCountsFinal[unique(uniqueGeneDict$Symbol),] %>%
 
 rm(snCountsFinal, snCountsFinalUnique)
 gc()
+
+
+# Create the cell count matrix: rows = cell types, columns = samples
+snCellCountsNoBad <- colData(objNoBad) %>%
+  as.data.frame() %>%
+  group_by(manual.log.anot.fine,
+           Sample) %>%
+  summarise(cellCount = n()) %>%
+  pivot_wider(names_from = Sample,
+              values_from = cellCount,
+              values_fill = 0) %>%
+  column_to_rownames("manual.log.anot.fine")
+
+snCellPropNoBad <- apply(snCellCountsNoBad, 2, function(x) x/sum(x))
+
+colSums(snCellPropNoBad) # Should all be 1.
 ```
 
 
@@ -196,11 +212,33 @@ write.table(snCountsUniqueExport,
           row.names = F,
           sep = "\t")
 
-test <- read.table(paste0(resDir, "/old/", fprefix, "_snCountsFinal_snAnno.txt"), 
-                          sep = "\t")
+snCountsExportCurated <- snCountsFinalDf %>%
+           t() %>%
+            as.data.frame() %>%
+            # Not actually GeneSymbol, but for matching format. 
+            rownames_to_column("geneSymbol") %>%
+            t() %>%
+            as.data.frame()
 
-test2 <- read.table(paste0(resDir, fprefix, "_snCountsFinalUnique_snAnno.txt"), 
-                          sep = "\t")
+snCountsExportCurated[1,] <- snAnno$.
+
+
+snCountsExportCurated <-snCountsExportCurated%>%
+  rownames_to_column("geneSymbol") %>%
+  filter(geneSymbol %in% curatedMarkers$Symbol)
+
+rownames(snCountsExportCurated) <- NULL
+colnames(snCountsExportCurated) <- NULL
+
+write.table(snCountsExportCurated,
+          paste0(resDir, fprefix, "_snCountsFinalCurated_snAnno.txt"),
+          quote=F,
+          col.names = F,
+          row.names = F,
+          sep = "\t")
+
+
+
 
 
 bulkCountsFinalExport <- bulkCpm %>%
@@ -694,56 +732,64 @@ write.table(bulkCountsFinalq1q4Export ,
 ### 5.1.1 snRNAseq
 ```{r}
 # Step 2: Define a color mapping
+# Step 2: Define a color mapping
 celltype_colors <- c(
-  "CTVT" = "seagreen",
+  "CTVT" = "#BCD0C7",
   "CAF.Endo" = "#FDDFA4FF",
-  "Myeloid" = "lightpink",
+  "Myeloid" = "#F5FDC6",
   "Plasma" = "#B4B9E0FF",
-  "Tcells" = "#C2697FFF",
-  "Bcells" = "darkblue"
+  "Tcells" = "#D56AA0",
+  "Bcells" = "#A8D5E2"
+  
 )
 
-
-
-matchedSamples <- unique(objNoBad$Sample)
-
-snCountsFinal_colData <- colData(objNoBad)
-
-# Create the cell count matrix: rows = cell types, columns = samples
-snCellCounts <- snCountsFinal_colData %>%
-  as.data.frame() %>%
-  dplyr::group_by(manual.log.anot.fine, 
-           Sample) %>%
-  summarise(cellCount = n()) %>%
-  pivot_wider(names_from = Sample, 
-              values_from = cellCount, 
-              values_fill = 0) %>%
-  column_to_rownames("manual.log.anot.fine") %>%
-  as.matrix()
-
-snCellProp <- prop.table(snCellCounts,2) %>%
-  as.data.frame()
-
-truePurities <- snCellProp  
-
-truePurities$`3145T11a_n` <- truePurities[,"3145T11a"]
-
-truePurities$`3145T1c_n` <- truePurities[,"3145T1c"]
-truePurities$`3145T1c_p` <- truePurities[,"3145T1c"]
-
-truePurities$`3203T1A2c_2` <- truePurities[,"3203T1A2c"]
-truePurities$`3203T1A2c_n` <- truePurities[,"3203T1A2c"]
-
-truePurities$`3302T1b_n` <- truePurities[,"3302T1b"]
-truePurities$`3302T1b_p` <- truePurities[,"3302T1b"]
-
-truePurities$`3621T_n` <- truePurities[,"3621T"]
-
-truePuritiesPlot <- truePurities %>%
+groundTruth <- snCellPropNoBad %>%
   t() %>%
   as.data.frame() %>%
   rownames_to_column("Sample") %>%
-  pivot_longer(cols = -c("Sample"), names_to = "Cluster", values_to = "Proportion")
+  pivot_longer(cols = -c("Sample"), names_to = "Cluster", values_to = "Proportion") %>%
+  mutate(
+         Sample = paste0(Sample, " - GT"))
+
+# matchedSamples <- unique(objNoBad$Sample)
+
+# snCountsFinal_colData <- colData(objNoBad)
+# 
+# # Create the cell count matrix: rows = cell types, columns = samples
+# snCellCounts <- snCountsFinal_colData %>%
+#   as.data.frame() %>%
+#   dplyr::group_by(manual.log.anot.fine, 
+#            Sample) %>%
+#   summarise(cellCount = n()) %>%
+#   pivot_wider(names_from = Sample, 
+#               values_from = cellCount, 
+#               values_fill = 0) %>%
+#   column_to_rownames("manual.log.anot.fine") %>%
+#   as.matrix()
+# 
+# snCellProp <- prop.table(snCellCounts,2) %>%
+#   as.data.frame()
+
+# truePurities <- snCellProp  
+# 
+# truePurities$`3145T11a_n` <- truePurities[,"3145T11a"]
+# 
+# truePurities$`3145T1c_n` <- truePurities[,"3145T1c"]
+# truePurities$`3145T1c_p` <- truePurities[,"3145T1c"]
+# 
+# truePurities$`3203T1A2c_2` <- truePurities[,"3203T1A2c"]
+# truePurities$`3203T1A2c_n` <- truePurities[,"3203T1A2c"]
+# 
+# truePurities$`3302T1b_n` <- truePurities[,"3302T1b"]
+# truePurities$`3302T1b_p` <- truePurities[,"3302T1b"]
+# 
+# truePurities$`3621T_n` <- truePurities[,"3621T"]
+# 
+# truePuritiesPlot <- truePurities %>%
+#   t() %>%
+#   as.data.frame() %>%
+#   rownames_to_column("Sample") %>%
+#   pivot_longer(cols = -c("Sample"), names_to = "Cluster", values_to = "Proportion")
 
 ```
 ### 5.1.2 Bulk
@@ -761,9 +807,17 @@ cibersort <- read_csv(paste0(resDir, "/snCountsFinalq1q4/sigMatrix_minExpr0_minG
   select(-c("P-value", "Correlation", "RMSE")) %>%
   as.data.frame() %>%
   rownames_to_column("Sample") %>%
-  pivot_longer(cols = -c("Sample"), names_to = "Cluster", values_to = "Proportion")
+  pivot_longer(cols = -c("Sample"), names_to = "Cluster", values_to = "Proportion") %>%
+  rbind(groundTruth) %>%
+    mutate(Type = ifelse(grepl("- GT$", Sample), 
+                         "Ground truth",
+                         "Estimated"))
 
-cibersort$Cluster <- factor(music$Cluster, levels = rev(c("CTVT", 
+cibersort$Cluster <- str_replace(cibersort$Cluster,
+                                 "CAF$",
+                                 "CAF.Endo")
+
+cibersort$Cluster <- factor(cibersort$Cluster, levels = rev(c("CTVT", 
                                                   "Myeloid", 
                                                   "Bcells",
                                                   "CAF.Endo",
@@ -771,8 +825,25 @@ cibersort$Cluster <- factor(music$Cluster, levels = rev(c("CTVT",
                                                   "Plasma")))
 
 # Step 3: Plot
-cibersortPlot <- ggplot(cibersort, aes(x = Sample, y = Proportion, fill = Cluster)) +
-  geom_bar(stat = "identity") +
+cibersortPlot <- ggplot(
+    cibersort,
+    aes(
+      x = Sample,
+      y = Proportion,
+      fill = Cluster,
+      pattern = Type  # TRUE/FALSE
+    )
+  ) +
+  geom_bar_pattern(
+    stat = "identity",
+    pattern_fill = "whitesmoke",           # color of stripes
+    pattern_angle = 45,               # diagonal stripes
+    pattern_density = 0.01,            # small + widely spaced
+    pattern_spacing = 0.01,           # space between stripes
+    pattern_key_scale_factor = 0.5, 
+    pattern_alpha = 0.4 # smaller legend pattern
+  ) +
+  scale_pattern_manual(values = c("Estimated" = "none", "Ground truth" = "stripe")) +
   scale_fill_manual(values = celltype_colors) +
   theme_minimal() +
   ylab("Estimated Proportion") +
@@ -784,49 +855,7 @@ pdf(paste0(plotDir, "/bar/", fprefix, "_cibersortRes_minExpr0_minGenes1.pdf"),
     height=4, width=7)
 print(cibersortPlot)
 dev.off()
-
-# Apply correction
-matched <- cibersort %>%
-  filter(Sample %in% unique(truePuritiesPlot$Sample)) %>%
-  inner_join(truePuritiesPlot %>% rename("Proportion"="True" ),
-             by = c("Sample", "Cluster")) %>%
-  # Add prefix and shape
-  mutate(Prefix = str_extract(Sample, "^[^T]+"),
-         Shape = if_else(str_detect(Sample, "_n$"), "Nuc", "Cell"))
-
-
-# Scatter plot
-matchedPlot <- ggplot(matched, aes(x = True, y = Proportion)) +
-  geom_point(aes(color = Prefix, shape = Shape), size = 2, alpha = 0.8) +
-  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "gray") +
-  facet_wrap(~Cluster, nrow = 1) +
-  coord_fixed(xlim = c(0, 1), ylim = c(0, 1)) +
-  scale_shape_manual(values = c(Cell = 16, Nuc = 17)) + # 16 = circle, 17 = triangle
-  scale_color_brewer(palette="Set1")+
-  labs(
-       x = "True Proportion",
-       y = "Estimated Proportion") +
-  theme_minimal() +
-  theme(
-    strip.text = element_text(size = 10),
-    axis.text.x = element_blank(),
-    axis.text.y =  element_blank()
-  )+
-  ggtitle("minExpr0_minGenes1") 
-
-
-pdf(paste0(plotDir, "/scatter/", fprefix, "_cibersortRes_minExpr0_minGenes1_matched.pdf"),
-    height=4, width=7)
-print(matchedPlot)
-dev.off()
 ```
-
-#### 5.1.1.2 Bulk expression
-```{r}
-
-```
-
-
 ### 5.1.2 Unique
 ```{r}
 cibersort <- read_csv(paste0(resDir, "/snCountsFinalq1q4/sigMatrix_minExpr0_minGenes1_unique/CIBERSORTx_Job54_Results.csv")) %>%
@@ -834,9 +863,17 @@ cibersort <- read_csv(paste0(resDir, "/snCountsFinalq1q4/sigMatrix_minExpr0_minG
   select(-c("P-value", "Correlation", "RMSE")) %>%
   as.data.frame() %>%
   rownames_to_column("Sample") %>%
-  pivot_longer(cols = -c("Sample"), names_to = "Cluster", values_to = "Proportion")
+  pivot_longer(cols = -c("Sample"), names_to = "Cluster", values_to = "Proportion")%>%
+  rbind(groundTruth) %>%
+    mutate(Type = ifelse(grepl("- GT$", Sample), 
+                         "Ground truth",
+                         "Estimated"))
 
-cibersort$Cluster <- factor(music$Cluster, levels = rev(c("CTVT", 
+cibersort$Cluster <- str_replace(cibersort$Cluster,
+                                 "CAF$",
+                                 "CAF.Endo")
+
+cibersort$Cluster <- factor(cibersort$Cluster, levels = rev(c("CTVT", 
                                                   "Myeloid", 
                                                   "Bcells",
                                                   "CAF.Endo",
@@ -844,8 +881,25 @@ cibersort$Cluster <- factor(music$Cluster, levels = rev(c("CTVT",
                                                   "Plasma")))
 
 # Step 3: Plot
-cibersortPlot <- ggplot(cibersort, aes(x = Sample, y = Proportion, fill = Cluster)) +
-  geom_bar(stat = "identity") +
+cibersortPlot <- ggplot(
+    cibersort,
+    aes(
+      x = Sample,
+      y = Proportion,
+      fill = Cluster,
+      pattern = Type  # TRUE/FALSE
+    )
+  ) +
+  geom_bar_pattern(
+    stat = "identity",
+    pattern_fill = "whitesmoke",           # color of stripes
+    pattern_angle = 45,               # diagonal stripes
+    pattern_density = 0.01,            # small + widely spaced
+    pattern_spacing = 0.01,           # space between stripes
+    pattern_key_scale_factor = 0.5, 
+    pattern_alpha = 0.4 # smaller legend pattern
+  ) +
+  scale_pattern_manual(values = c("Estimated" = "none", "Ground truth" = "stripe")) +
   scale_fill_manual(values = celltype_colors) +
   theme_minimal() +
   ylab("Estimated Proportion") +
@@ -853,53 +907,13 @@ cibersortPlot <- ggplot(cibersort, aes(x = Sample, y = Proportion, fill = Cluste
   theme(axis.text.x = element_text(angle = 45, hjust = 1))+
   ggtitle("Unique_minExpr0_minGenes1")
 
+
 pdf(paste0(plotDir, "/bar/", fprefix, "_cibersortResUnique_minExpr0_minGenes1.pdf"),
     height=4, width=7)
 print(cibersortPlot)
 dev.off()
 
-
-
-# Apply correction
-matched <- cibersort %>%
-  filter(Sample %in% unique(truePuritiesPlot$Sample)) %>%
-  inner_join(truePuritiesPlot %>% rename("Proportion"="True" ),
-             by = c("Sample", "Cluster")) %>%
-  # Add prefix and shape
-  mutate(Prefix = str_extract(Sample, "^[^T]+"),
-         Shape = if_else(str_detect(Sample, "_n$"), "Nuc", "Cell"))
-
-
-# Scatter plot
-matchedPlot <- ggplot(matched, aes(x = True, y = Proportion)) +
-  geom_point(aes(color = Prefix, shape = Shape), size = 2, alpha = 0.8) +
-  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "gray") +
-  facet_wrap(~Cluster, nrow = 1) +
-  coord_fixed(xlim = c(0, 1), ylim = c(0, 1)) +
-  scale_shape_manual(values = c(Cell = 16, Nuc = 17)) + # 16 = circle, 17 = triangle
-  scale_color_brewer(palette="Set1")+
-  labs(
-       x = "True Proportion",
-       y = "Estimated Proportion") +
-  theme_minimal() +
-  theme(
-    strip.text = element_text(size = 10),
-    axis.text.x = element_blank(),
-    axis.text.y =  element_blank()
-  )+
-  ggtitle("Unique_minExpr0_minGenes1")
-
-
-pdf(paste0(plotDir, "/scatter/", fprefix, "_cibersortResUnique_minExpr0_minGenes1_matched.pdf"),
-    height=4, width=7)
-print(matchedPlot)
-dev.off()
 ```
-
-
-
-
-
 
 
 ## 5.2 Min Expr 10, Min Genes 2 to 10
@@ -910,9 +924,17 @@ cibersort <- read_csv(paste0(resDir, "/snCountsFinalq1q4/sigMatrix_minExpr10_min
   select(-c("P-value", "Correlation", "RMSE")) %>%
   as.data.frame() %>%
   rownames_to_column("Sample") %>%
-  pivot_longer(cols = -c("Sample"), names_to = "Cluster", values_to = "Proportion")
+  pivot_longer(cols = -c("Sample"), names_to = "Cluster", values_to = "Proportion")%>%
+  rbind(groundTruth) %>%
+    mutate(Type = ifelse(grepl("- GT$", Sample), 
+                         "Ground truth",
+                         "Estimated"))
 
-cibersort$Cluster <- factor(music$Cluster, levels = rev(c("CTVT", 
+cibersort$Cluster <- str_replace(cibersort$Cluster,
+                                 "CAF$",
+                                 "CAF.Endo")
+
+cibersort$Cluster <- factor(cibersort$Cluster, levels = rev(c("CTVT", 
                                                   "Myeloid", 
                                                   "Bcells",
                                                   "CAF.Endo",
@@ -920,8 +942,25 @@ cibersort$Cluster <- factor(music$Cluster, levels = rev(c("CTVT",
                                                   "Plasma")))
 
 # Step 3: Plot
-cibersortPlot <- ggplot(cibersort, aes(x = Sample, y = Proportion, fill = Cluster)) +
-  geom_bar(stat = "identity") +
+cibersortPlot <- ggplot(
+    cibersort,
+    aes(
+      x = Sample,
+      y = Proportion,
+      fill = Cluster,
+      pattern = Type  # TRUE/FALSE
+    )
+  ) +
+  geom_bar_pattern(
+    stat = "identity",
+    pattern_fill = "whitesmoke",           # color of stripes
+    pattern_angle = 45,               # diagonal stripes
+    pattern_density = 0.01,            # small + widely spaced
+    pattern_spacing = 0.01,           # space between stripes
+    pattern_key_scale_factor = 0.5, 
+    pattern_alpha = 0.4 # smaller legend pattern
+  ) +
+  scale_pattern_manual(values = c("Estimated" = "none", "Ground truth" = "stripe")) +
   scale_fill_manual(values = celltype_colors) +
   theme_minimal() +
   ylab("Estimated Proportion") +
@@ -933,43 +972,6 @@ pdf(paste0(plotDir, "/bar/", fprefix, "_cibersortRes_minExpr10_minGenes2to10.pdf
     height=4, width=7)
 print(cibersortPlot)
 dev.off()
-
-
-
-# Apply correction
-matched <- cibersort %>%
-  filter(Sample %in% unique(truePuritiesPlot$Sample)) %>%
-  inner_join(truePuritiesPlot %>% rename("Proportion"="True" ),
-             by = c("Sample", "Cluster")) %>%
-  # Add prefix and shape
-  mutate(Prefix = str_extract(Sample, "^[^T]+"),
-         Shape = if_else(str_detect(Sample, "_n$"), "Nuc", "Cell"))
-
-
-# Scatter plot
-matchedPlot <- ggplot(matched, aes(x = True, y = Proportion)) +
-  geom_point(aes(color = Prefix, shape = Shape), size = 2, alpha = 0.8) +
-  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "gray") +
-  facet_wrap(~Cluster, nrow = 1) +
-  coord_fixed(xlim = c(0, 1), ylim = c(0, 1)) +
-  scale_shape_manual(values = c(Cell = 16, Nuc = 17)) + # 16 = circle, 17 = triangle
-  scale_color_brewer(palette="Set1")+
-  labs(
-       x = "True Proportion",
-       y = "Estimated Proportion") +
-  theme_minimal() +
-  theme(
-    strip.text = element_text(size = 10),
-    axis.text.x = element_blank(),
-    axis.text.y =  element_blank()
-  )+
- ggtitle("minExpr10 minGenes2to10")
-
-
-pdf(paste0(plotDir, "/scatter/", fprefix, "_cibersortRes_minExpr10_minGenes2to10_matched.pdf"),
-    height=4, width=7)
-print(matchedPlot)
-dev.off()
 ```
 
 ## 5.3 Min Expr 10, Min Genes 4 to 6
@@ -980,9 +982,17 @@ cibersort <- read_csv(paste0(resDir, "/snCountsFinalq1q4/sigMatrix_minExpr10_min
   select(-c("P-value", "Correlation", "RMSE")) %>%
   as.data.frame() %>%
   rownames_to_column("Sample") %>%
-  pivot_longer(cols = -c("Sample"), names_to = "Cluster", values_to = "Proportion")
+  pivot_longer(cols = -c("Sample"), names_to = "Cluster", values_to = "Proportion")%>%
+  rbind(groundTruth) %>%
+    mutate(Type = ifelse(grepl("- GT$", Sample), 
+                         "Ground truth",
+                         "Estimated"))
 
-cibersort$Cluster <- factor(music$Cluster, levels = rev(c("CTVT", 
+cibersort$Cluster <- str_replace(cibersort$Cluster,
+                                 "CAF$",
+                                 "CAF.Endo")
+
+cibersort$Cluster <- factor(cibersort$Cluster, levels = rev(c("CTVT", 
                                                   "Myeloid", 
                                                   "Bcells",
                                                   "CAF.Endo",
@@ -990,8 +1000,25 @@ cibersort$Cluster <- factor(music$Cluster, levels = rev(c("CTVT",
                                                   "Plasma")))
 
 # Step 3: Plot
-cibersortPlot <- ggplot(cibersort, aes(x = Sample, y = Proportion, fill = Cluster)) +
-  geom_bar(stat = "identity") +
+cibersortPlot <- ggplot(
+    cibersort,
+    aes(
+      x = Sample,
+      y = Proportion,
+      fill = Cluster,
+      pattern = Type  # TRUE/FALSE
+    )
+  ) +
+  geom_bar_pattern(
+    stat = "identity",
+    pattern_fill = "whitesmoke",           # color of stripes
+    pattern_angle = 45,               # diagonal stripes
+    pattern_density = 0.01,            # small + widely spaced
+    pattern_spacing = 0.01,           # space between stripes
+    pattern_key_scale_factor = 0.5, 
+    pattern_alpha = 0.4 # smaller legend pattern
+  ) +
+  scale_pattern_manual(values = c("Estimated" = "none", "Ground truth" = "stripe")) +
   scale_fill_manual(values = celltype_colors) +
   theme_minimal() +
   ylab("Estimated Proportion") +
@@ -1002,43 +1029,6 @@ cibersortPlot <- ggplot(cibersort, aes(x = Sample, y = Proportion, fill = Cluste
 pdf(paste0(plotDir, "/bar/", fprefix, "_cibersortRes_minExpr10_minGenes4to6.pdf"),
     height=4, width=7)
 print(cibersortPlot)
-dev.off()
-
-
-
-# Apply correction
-matched <- cibersort %>%
-  filter(Sample %in% unique(truePuritiesPlot$Sample)) %>%
-  inner_join(truePuritiesPlot %>% rename("Proportion"="True" ),
-             by = c("Sample", "Cluster")) %>%
-  # Add prefix and shape
-  mutate(Prefix = str_extract(Sample, "^[^T]+"),
-         Shape = if_else(str_detect(Sample, "_n$"), "Nuc", "Cell"))
-
-
-# Scatter plot
-matchedPlot <- ggplot(matched, aes(x = True, y = Proportion)) +
-  geom_point(aes(color = Prefix, shape = Shape), size = 2, alpha = 0.8) +
-  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "gray") +
-  facet_wrap(~Cluster, nrow = 1) +
-  coord_fixed(xlim = c(0, 1), ylim = c(0, 1)) +
-  scale_shape_manual(values = c(Cell = 16, Nuc = 17)) + # 16 = circle, 17 = triangle
-  scale_color_brewer(palette="Set1")+
-  labs(
-       x = "True Proportion",
-       y = "Estimated Proportion") +
-  theme_minimal() +
-  theme(
-    strip.text = element_text(size = 10),
-    axis.text.x = element_blank(),
-    axis.text.y =  element_blank()
-  )+
- ggtitle("minExpr10 minGenes4to6")
-
-
-pdf(paste0(plotDir, "/scatter/", fprefix, "_cibersortRes_minExpr10_minGenes4to6_matched.pdf"),
-    height=4, width=7)
-print(matchedPlot)
 dev.off()
 ```
 
@@ -1052,9 +1042,17 @@ cibersort <- read_csv(paste0(resDir, "/snCountsFinalq1q4/sigMatrix_minExpr50_min
   select(-c("P-value", "Correlation", "RMSE")) %>%
   as.data.frame() %>%
   rownames_to_column("Sample") %>%
-  pivot_longer(cols = -c("Sample"), names_to = "Cluster", values_to = "Proportion")
+  pivot_longer(cols = -c("Sample"), names_to = "Cluster", values_to = "Proportion")%>%
+  rbind(groundTruth) %>%
+    mutate(Type = ifelse(grepl("- GT$", Sample), 
+                         "Ground truth",
+                         "Estimated"))
 
-cibersort$Cluster <- factor(music$Cluster, levels = rev(c("CTVT", 
+cibersort$Cluster <- str_replace(cibersort$Cluster,
+                                 "CAF$",
+                                 "CAF.Endo")
+
+cibersort$Cluster <- factor(cibersort$Cluster, levels = rev(c("CTVT", 
                                                   "Myeloid", 
                                                   "Bcells",
                                                   "CAF.Endo",
@@ -1062,8 +1060,25 @@ cibersort$Cluster <- factor(music$Cluster, levels = rev(c("CTVT",
                                                   "Plasma")))
 
 # Step 3: Plot
-cibersortPlot <- ggplot(cibersort, aes(x = Sample, y = Proportion, fill = Cluster)) +
-  geom_bar(stat = "identity") +
+cibersortPlot <- ggplot(
+    cibersort,
+    aes(
+      x = Sample,
+      y = Proportion,
+      fill = Cluster,
+      pattern = Type  # TRUE/FALSE
+    )
+  ) +
+  geom_bar_pattern(
+    stat = "identity",
+    pattern_fill = "whitesmoke",           # color of stripes
+    pattern_angle = 45,               # diagonal stripes
+    pattern_density = 0.01,            # small + widely spaced
+    pattern_spacing = 0.01,           # space between stripes
+    pattern_key_scale_factor = 0.5, 
+    pattern_alpha = 0.4 # smaller legend pattern
+  ) +
+  scale_pattern_manual(values = c("Estimated" = "none", "Ground truth" = "stripe")) +
   scale_fill_manual(values = celltype_colors) +
   theme_minimal() +
   ylab("Estimated Proportion") +
@@ -1076,41 +1091,6 @@ pdf(paste0(plotDir, "/bar/", fprefix, "_cibersortRes_minExpr50_minGenes2to10.pdf
 print(cibersortPlot)
 dev.off()
 
-
-# Apply correction
-matched <- cibersort %>%
-  filter(Sample %in% unique(truePuritiesPlot$Sample)) %>%
-  inner_join(truePuritiesPlot %>% rename("Proportion"="True" ),
-             by = c("Sample", "Cluster")) %>%
-  # Add prefix and shape
-  mutate(Prefix = str_extract(Sample, "^[^T]+"),
-         Shape = if_else(str_detect(Sample, "_n$"), "Nuc", "Cell"))
-
-
-# Scatter plot
-matchedPlot <- ggplot(matched, aes(x = True, y = Proportion)) +
-  geom_point(aes(color = Prefix, shape = Shape), size = 2, alpha = 0.8) +
-  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "gray") +
-  facet_wrap(~Cluster, nrow = 1) +
-  coord_fixed(xlim = c(0, 1), ylim = c(0, 1)) +
-  scale_shape_manual(values = c(Cell = 16, Nuc = 17)) + # 16 = circle, 17 = triangle
-  scale_color_brewer(palette="Set1")+
-  labs(
-       x = "True Proportion",
-       y = "Estimated Proportion") +
-  theme_minimal() +
-  theme(
-    strip.text = element_text(size = 10),
-    axis.text.x = element_blank(),
-    axis.text.y =  element_blank()
-  )+
- ggtitle("minExpr50 minGenes2to10")
-
-
-pdf(paste0(plotDir, "/scatter/", fprefix, "_cibersortRes_minExpr50_minGenes2to10_matched.pdf"),
-    height=4, width=7)
-print(matchedPlot)
-dev.off()
 ```
 
 ## 5.6 Feature plots with sig. genes

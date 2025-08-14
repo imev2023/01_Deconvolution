@@ -17,13 +17,13 @@ import os, shutil, gc
 def get_batch_id(batch):
     subDir, bal, thr, ran, var, sam, cel, _, lr, steps, cran = batch[0]
     name = os.path.basename(subDir.rstrip("/"))
-    return f"{name}_bal{bal}_thresh{thr}_ran{ran}_var{var}_samp{sam}_cells{cel}_lr{lr}_steps{steps}_cran{cran}_noBad"
+    return f"{name}_bal{bal}_thresh{thr}_ran{ran}_var{var}_samp{sam}_cells{cel}_lr{lr}_steps{steps}_cran{cran}_markerGenes"
 
 
 def simulate_one(args):
     subDir, bal, thr, ran, var, sam, cel, seed, lr, steps, cran = args
-    pfix = f"{os.path.basename(subDir.rstrip('/'))}_bal{bal}_thresh{thr}_ran{ran}_var{var}_samp{sam}_cells{cel}_seed{seed}_lr{lr}_steps{steps}_cran{cran}_noBad"
-    simDir = f"/Users/nv4/gitClones/01_Deconvolution/03_Deconvolution_CTVT/033_Results/03_Deconvolution_CTVT_customScaden/1_simulate/{pfix}/"
+    pfix = f"{os.path.basename(subDir.rstrip('/'))}_bal{bal}_thresh{thr}_ran{ran}_var{var}_samp{sam}_cells{cel}_seed{seed}_lr{lr}_steps{steps}_cran{cran}_markerGenes"
+    simDir = f"/Users/nv4/gitClones/01_Deconvolution/03_Deconvolution_CTVT/033_Results/03_Deconvolution_CTVT_customScaden/snCountsMarkerGenes/1_simulate/{pfix}/"
     
     os.makedirs(simDir, exist_ok=True)
     simulation(
@@ -47,9 +47,9 @@ def simulate_one(args):
 
 def process_one(args, purity_col= "purity"):
     subDir, bal, thr, ran, var, sam, cel, seed, lr, steps, cran = args
-    pfix = f"{os.path.basename(subDir.rstrip('/'))}_bal{bal}_thresh{thr}_ran{ran}_var{var}_samp{sam}_cells{cel}_seed{seed}_lr{lr}_steps{steps}_cran{cran}_noBad"
-    simDir = f"/Users/nv4/gitClones/01_Deconvolution/03_Deconvolution_CTVT/033_Results/03_Deconvolution_CTVT_customScaden/1_simulate/{pfix}/"
-    procDir = f"/Users/nv4/gitClones/01_Deconvolution/03_Deconvolution_CTVT/033_Results/03_Deconvolution_CTVT_customScaden/2_process/{pfix}/"
+    pfix = f"{os.path.basename(subDir.rstrip('/'))}_bal{bal}_thresh{thr}_ran{ran}_var{var}_samp{sam}_cells{cel}_seed{seed}_lr{lr}_steps{steps}_cran{cran}_markerGenes"
+    simDir = f"/Users/nv4/gitClones/01_Deconvolution/03_Deconvolution_CTVT/033_Results/03_Deconvolution_CTVT_customScaden/snCountsMarkerGenes/1_simulate/{pfix}/"
+    procDir = f"/Users/nv4/gitClones/01_Deconvolution/03_Deconvolution_CTVT/033_Results/03_Deconvolution_CTVT_customScaden/snCountsMarkerGenes/2_process/{pfix}/"
     os.makedirs(procDir, exist_ok=True)
 
     training_data = os.path.join(simDir, pfix + ".h5ad")
@@ -70,9 +70,9 @@ def process_one(args, purity_col= "purity"):
 
 def train_one(args, processed_path, purity_col = "purity"):
     subDir, bal, thr, ran, var, sam, cel, seed, lr, steps, cran = args
-    pfix = f"{os.path.basename(subDir.rstrip('/'))}_bal{bal}_thresh{thr}_ran{ran}_var{var}_samp{sam}_cells{cel}_seed{seed}_lr{lr}_steps{steps}_cran{cran}_noBad"
-    modDir = f"/Users/nv4/gitClones/01_Deconvolution/03_Deconvolution_CTVT/033_Results/03_Deconvolution_CTVT_customScaden/3_train/{pfix}/"
-    metDir = f"/Users/nv4/gitClones/01_Deconvolution/03_Deconvolution_CTVT/033_Results/03_Deconvolution_CTVT_customScaden/3_metrics/{pfix}/"
+    pfix = f"{os.path.basename(subDir.rstrip('/'))}_bal{bal}_thresh{thr}_ran{ran}_var{var}_samp{sam}_cells{cel}_seed{seed}_lr{lr}_steps{steps}_cran{cran}_markerGenes"
+    modDir = f"/Users/nv4/gitClones/01_Deconvolution/03_Deconvolution_CTVT/033_Results/03_Deconvolution_CTVT_customScaden/snCountsMarkerGenes/3_train/{pfix}/"
+    metDir = f"/Users/nv4/gitClones/01_Deconvolution/03_Deconvolution_CTVT/033_Results/03_Deconvolution_CTVT_customScaden/snCountsMarkerGenes/3_metrics/{pfix}/"
     os.makedirs(modDir, exist_ok=True)
     os.makedirs(metDir, exist_ok=True)
 
@@ -91,9 +91,9 @@ def train_one(args, processed_path, purity_col = "purity"):
 
 def predict_one(args, purity_col = "purity"):
     subDir, bal, thr, ran, var, sam, cel, seed, lr, steps, cran = args
-    pfix = f"{os.path.basename(subDir.rstrip('/'))}_bal{bal}_thresh{thr}_ran{ran}_var{var}_samp{sam}_cells{cel}_seed{seed}_lr{lr}_steps{steps}_cran{cran}_noBad"
-    modDir = f"/Users/nv4/gitClones/01_Deconvolution/03_Deconvolution_CTVT/033_Results/03_Deconvolution_CTVT_customScaden/3_train/{pfix}/"
-    predDir = f"/Users/nv4/gitClones/01_Deconvolution/03_Deconvolution_CTVT/033_Results/03_Deconvolution_CTVT_customScaden/4_predict/{pfix}/"
+    pfix = f"{os.path.basename(subDir.rstrip('/'))}_bal{bal}_thresh{thr}_ran{ran}_var{var}_samp{sam}_cells{cel}_seed{seed}_lr{lr}_steps{steps}_cran{cran}_markerGenes"
+    modDir = f"/Users/nv4/gitClones/01_Deconvolution/03_Deconvolution_CTVT/033_Results/03_Deconvolution_CTVT_customScaden/snCountsMarkerGenes/3_train/{pfix}/"
+    predDir = f"/Users/nv4/gitClones/01_Deconvolution/03_Deconvolution_CTVT/033_Results/03_Deconvolution_CTVT_customScaden/snCountsMarkerGenes/4_predict/{pfix}/"
     os.makedirs(predDir, exist_ok=True)
 
     prediction(
