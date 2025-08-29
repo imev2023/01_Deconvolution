@@ -18,6 +18,7 @@ library(SingleCellExperiment)
 library(openxlsx)
 library(dplyr)
 library(Seurat)
+# BiocManager::install("orthogene")
 ```
 
 ## 0.2 Paths
@@ -53,6 +54,20 @@ uniqueGeneDict <- masterMarkerGenes %>%
   # Take distinct as marker genes may overlap clusters.
   distinct()
 
+adrianMerged <- read.xlsx(paste0("~/gitClones/01_Deconvolution/03_Deconvolution_CTVT/033_Results/03_Deconvolution_CTVT_geneCorrelations/03_Deconvolution_CTVT_geneCorrelations_deltaEtEh.xlsx")) %>%
+  rename("GeneID"="ID")
+
+# lmm24
+host <- adrianMerged %>%
+  filter(deltaEtEh < 100 & purity_correlation < 0)
+
+# 79 --> either treat all as CTVT specific OR remove and add in marker genes from Adrian's table?
+tumor <- adrianMerged %>%
+  filter(deltaEtEh > 100 & purity_correlation > 0)
+
+candidateAdrian <- c(host$Symbol, tumor$Symbol)
+
+candidateId <- c(host$Symbol, tumor$Symbol)
 ```
 
 
@@ -67,6 +82,27 @@ objNoBad <- obj[,obj$manual.log.anot.fine!="bad"]
 rm(obj)
 gc()
 
+rowData <- rowData(objNoBad) %>%
+  as.data.frame() %>%
+  left_join(adrianMerged) %>%
+  drop_na(sampleCount) # not in Adrian's table. 
+
+write.xlsx(rowData, paste0(dataDir, "03_Deconvolution_CTVT_seuratObjNoBad_rowData.xlsx"))
+
+# nrow(rowData) # 14,000. 
+
+# nrow(rowData %>%
+#        filter(purity_correlation > 0 & deltaEtEh > 0))
+
+tumor <- rowData %>%
+       filter(purity_correlation > 0 & deltaEtEh > 100)
+
+# nrow(tumor) # All 746 --> from which we can filter the snCounts matrix
+
+host <- rowData %>%
+       filter(purity_correlation < 0 & deltaEtEh < -100)
+
+# nrow(host) # 332 --> from which we can filter the snCounts matrix. 6 are missing from host that would have otherwise been coming from Adrian's table. 
 
 # snLogCountsFinal <- as.matrix(assay(objNoBad, "logcounts"))
 
@@ -84,6 +120,11 @@ snCountsFinalDfUnique <- snCountsFinal[unique(uniqueGeneDict$Symbol),] %>%
 rm(snCountsFinal, snCountsFinalUnique)
 gc()
 
+snCountsAdrianDf <- snCountsFinal %>%
+  as.data.frame() %>%
+  rownames_to_column("Symbol") %>%
+  filter(Symbol %in% tumor$Symbol | Symbol %in% host$Symbol) %>%
+  column_to_rownames("Symbol")
 
 # Create the cell count matrix: rows = cell types, columns = samples
 snCellCountsNoBad <- colData(objNoBad) %>%
@@ -116,7 +157,6 @@ print(sort(table(snAnno)))
 
 write_tsv(snAnno, 
           paste0(resDir, fprefix, "_snAnno.tsv"))
-
 
 rowDataHvgs <- rowData(objNoBad) %>%
   as.data.frame() %>%
@@ -238,7 +278,29 @@ write.table(snCountsExportCurated,
           sep = "\t")
 
 
+snCountsExportAdrian <- snCountsAdrianDf %>%
+           t() %>%
+            as.data.frame() %>%
+            # Not actually GeneSymbol, but for matching format. 
+            rownames_to_column("geneSymbol") %>%
+            t() %>%
+            as.data.frame()
 
+snCountsExportAdrian[1,] <- snAnno$.
+
+
+snCountsExportAdrian <-snCountsExportAdrian%>%
+  rownames_to_column("geneSymbol") 
+
+rownames(snCountsExportAdrian) <- NULL
+colnames(snCountsExportAdrian) <- NULL
+
+write.table(snCountsExportAdrian,
+          paste0(resDir, fprefix, "_snCountsFinalAdrian_snAnno.txt"),
+          quote=F,
+          col.names = F,
+          row.names = F,
+          sep = "\t")
 
 
 bulkCountsFinalExport <- bulkCpm %>%
@@ -355,6 +417,8 @@ bulkCountsFinal <- readRDS(paste0(dataDir,
   column_to_rownames("Symbol") %>%
   select(-GeneID)
 
+
+
 bulkCpm <- DGEobj.utils::convertCounts(readRDS(paste0(dataDir,
                                   "01_Deconvolution_matchedBulkMatrixCTVT_bulkCountsFinal.rds")), 
                                        unit = "CPM")%>%
@@ -375,6 +439,20 @@ bulkCpmUnique <- DGEobj.utils::convertCounts(readRDS(paste0(dataDir,
   left_join(geneDict) %>%
   column_to_rownames("Symbol") %>%
   select(-GeneID)
+
+gtf <- rtracklayer::import('~/gitClones/02_polyARibo/021_Data/Canis_lupus_familiaris.CanFam3.1.104.gtf') %>%
+  as.data.frame() %>%
+  mutate(geneLength = end-start) %>%
+  filter(gene_id %in% rownames(bulkTpm))
+
+bulkTpm <- readRDS(paste0(dataDir,
+                       "01_Deconvolution_matchedBulkMatrixCTVT_bulkCountsFinal.rds"))
+
+DGEobj.utils::convertCounts(readRDS(paste0(dataDir,
+                                  "01_Deconvolution_matchedBulkMatrixCTVT_bulkCountsFinal.rds")), 
+                                       unit = "TPM",
+                                  geneLength = gtf$geneLength)%>%
+  as.data.frame()
 ```
 ### 2.3.2 Metadata
 ```{r}
@@ -1122,5 +1200,132 @@ for(n in sigGenes$NAME){
   dev.off()
   
 }
+```
+
+
+# 6 LMM 22
+## 6.1 Read signature matrix
+TPM?
+Would need to convert HLA --> DLA, and potentially other dog genes?
+```{r}
+lmm22 <- read_csv(paste0(dataDir, "LM22.csv")) 
+lmm22$`Gene symbol` <- str_replace(lmm22$`Gene symbol`, "HLA-", "DLA-")
+```
+
+## 6.2 Cross-reference with Adrian's table
+### 6.2.1 Read in table
+The problem with LM22 is that it is PBMCs --> so no stromal cells.  
+Potentially add these as well?
+```{r}
+adrianMerged <- read.xlsx(paste0("~/gitClones/01_Deconvolution/03_Deconvolution_CTVT/033_Results/03_Deconvolution_CTVT_geneCorrelations/03_Deconvolution_CTVT_geneCorrelations_deltaEtEh.xlsx"))
+
+# 188 genes of 547 in the sig matrix. 
+host <- adrianMerged %>%
+  filter(deltaEtEh < 0 & purity_correlation < 0) %>%
+  filter(Symbol %in% lmm22$`Gene symbol`)
+
+# 79 genes --> either treat all as CTVT specific and remove from other cell types OR remove and add in marker genes from Adrian's table? Useful to know what these are most similar to. 
+tumor <- adrianMerged %>%
+  filter(deltaEtEh > 0 & purity_correlation > 0) %>%
+  filter(Symbol %in% lmm22$`Gene symbol`)
+```
+
+### 6.2.2 Map orthologs from Adrian's table to human genes
+Ex. HLA --> DLA?
+```{r}
+# library(biomaRt)
+# mart = useMart("ensembl")
+# listDatasets(mart)
+# dog <- useMart("ENSEMBL_MART_ENSEMBL", dataset = "clfamiliaris_gene_ensembl", host = "https://dec2021.archive.ensembl.org/")
+# dog <- useEnsembl(biomart = "ensembl", dataset = "clfamiliaris_gene_ensembl", mirror = "useast")
+# 
+# human <- useMart("ENSEMBL_MART_ENSEMBL", dataset = "hsapiens_gene_ensembl", host = "https://dec2021.archive.ensembl.org/")
+# human <- useEnsembl(biomart = "ensembl", dataset = "hsapiens_gene_ensembl", mirror = "useast")
+# 
+# # Mapping dog gene IDs to human orthologs
+# # genesV2 = getLDS(attributes = c("hgnc_symbol"), filters = "hgnc_symbol", values = x , mart = human, attributesL = c("mgi_symbol"), martL = mouse, uniqueRows=T)
+# 
+# 
+# mapping <- getLDS(attributes = c("ensembl_gene_id", "external_gene_name"),
+#                   filters = "ensembl_gene_id",
+#                   # values = c("ENSCAFG00000012345", "ENSCAFG00000056789"),
+#                   mart = dog,
+#                   attributesL = c("ensembl_gene_id", "external_gene_name"),
+#                   martL = human)
+# 
+# adrianCheck <- adrianMerged %>% 
+#   
+# library(orthogene)
+# method <- "babelgene"  
+# gene_df <- orthogene::convert_orthologs(gene_df = adrianMerged,
+#                                         gene_input = "GeneID", 
+#                                         gene_output = "columns", 
+#                                         input_species = "dog",
+#                                         output_species = "human",
+#                                         non121_strategy = "drop_both_species",
+#                                         method = method) 
+
+dog <- readr::read_tsv("~/Downloads/human_dog_hcop_fifteen_column.txt") 
+
+length(intersect(dog$human_symbol, lmm22$`Gene symbol`)) # 493 / 457 in LMM22
+length(intersect(dog$human_symbol, adrianMerged$Symbol)) # 14415 / 17,243 in Adrian's table
+length(intersect(lmm22$`Gene symbol`, adrianMerged$Symbol)) # 384 overlapping, just not in q1 or q4 with thresholds???
+```
+
+### 6.2.3 Add CTVT column, using genes that intersect in tumor
+- What would the baseline expression need to be?
+- Could we use the eH from Adrian's table? --> I think this would make more sense. (maybe also in TPM)
+- We could also use Adrian's table to select genes we know are stromal genes? --> maybe that's a first idea. 
+#### 6.2.3.1 Binary using LM22
+For host cells types, make expression 0, for tumor genes, use expression from LM22?
+```{r}
+lm22Edit <- lm22 %>% 
+  mutate(CTVT = )
+
+```
+
+#### 6.2.3.2 Use eT and eH?
+For host genes, make expression 0, for tumor genes, use expression from Adrian's table.
+```{r}
+ctvt <- 
+
+```
+# 7 scAtomic Reference
+## 7.1 Data
+```{r}
+# scAtomic <- readRDS("~/Downloads/harmonized_results_matrix_and_metadata_all_patients_all_cells.RDS")
+# metaScAtomic <- colData(scAtomic)
+```
+
+# 8 Kassandra
+## 8.1 Data
+If it is not possible to use the snRNAseq ref, we need to use the bulk.
+- Simulate bulk expression?
+- Need to map genes to DLA as well?
+### 8.1.1 Lab expression
+```{r}
+samplesExpression <- read_tsv()
+labExpression <- read_tsv("~/Downloads/laboratory_data_expressions.tsv")
+labExpressionMeta <- read_tsv("~/Downloads/laboratory_data_annotation.tsv")
+
+labExpression$`Gene` <- str_replace(labExpression$Gene, "HLA-", "DLA-")
+
+# Would potentially want to remove these.
+# 293
+checkLabExpressionTumorExport <- labExpression %>%
+  filter(Gene %in% tumor$Symbol) %>%
+  column_to_rownames("Gene") 
+
+# 655
+checkLabExpressionHostExport <- labExpression %>%
+  filter(Gene %in% host$Symbol) %>%
+  column_to_rownames("Gene") 
+
+metaHost <- labExpressionMeta %>%
+  rename("...1" = "Sample",
+         "Cell_type"="cellType") %>%
+  filter(Sample %in% colnames(checkLabExpressionHostExport))
+
+metaHostTable <- table(metaHost$cellType)
 ```
 

@@ -1,0 +1,3131 @@
+---
+title: "03_Deconvolution_CTVT_sNuConvExportCounts"
+output: html_document
+---
+
+# 0 Environment
+## 0.1 Packages
+### 0.1.1 Installs
+### 0.1.1 Library
+```{r echo=F, message=F, warning=FALSE}
+set.seed(123)
+library(tidyverse)
+library(openxlsx)
+library(SingleCellExperiment)
+setClassUnion("ExpData", c("matrix", "SummarizedExperiment"))
+library(DGEobj.utils)
+library(optparse)
+library(dplyr)
+library(Biobase)
+library(ggpattern)
+library(ggnewscale)
+```
+
+## 0.2 Paths
+```{r echo=F, message=FALSE, warning=FALSE}
+wDir <- paste0("~/gitClones/01_Deconvolution/03_Deconvolution_CTVT/")
+fprefix <- "03_Deconvolution_CTVT_sNuConv"
+dataDir <- paste0(wDir, "/031_Data/")
+resDir <- paste0(wDir, "/033_Results/", fprefix, "/")
+plotDir <- paste0(wDir, "/034_Plots/", fprefix, "/")
+
+dir.create(resDir)
+dir.create(plotDir)
+```
+
+# 1 Data
+## 1.1 Read in counts matrix
+Need to see rowData to match to GeneIDs or Symbols in Adrian's table below. 
+```{r}
+obj <- readRDS(paste0(dataDir, "SCE_concat_CTVT_includingAllGenes_logCorrecDone_vstCorrecDone_ClustDone2_ManAnot.rds"))
+
+objNoBad <- obj[,obj$manual.log.anot.fine!="bad"]
+
+
+rm(obj)
+gc()
+```
+
+## 1.2 Get genes of interest (goi)
+These are genes we are testing using information from Adrian's CTVT purity table. 
+### 1.2.1 Tumor and host-specific genes (eT threshold = 100 and eH threshold = -100). 
+These are just arbitrary, trying to be more conservative with CTVT than host. 
+Aim: Understand, from Adrian's table, what genes are well correlated between bulk RNAseq and snRNAseq. 
+```{r}
+adrianMerged <- read.xlsx(paste0("~/gitClones/01_Deconvolution/03_Deconvolution_CTVT/033_Results/03_Deconvolution_CTVT_geneCorrelations/03_Deconvolution_CTVT_geneCorrelations_deltaEtEh.xlsx"))
+
+# 338
+host <- adrianMerged %>%
+  filter(deltaEtEh < -100 & purity_correlation < 0) 
+
+# 763
+tumor <- adrianMerged %>%
+  filter(deltaEtEh > 100 & purity_correlation > 0) 
+
+goi <- c(host$Symbol, tumor$Symbol)
+goiEnscaf <- c(host$GeneID, tumor$GeneID)
+
+
+famDegs <- read.xlsx("~/gitClones/01_Deconvolution/03_Deconvolution_CTVT/033_Results/03_Deconvolution_CTVT_geneCorrelations/findAllMarkers/03_Deconvolution_CTVT_geneCorrelations_seuratObjNoBad_famWilcox.xlsx") %>%
+  filter(p_val_adj < 0.05 & avg_log2FC > 2.5) %>%
+  rename("gene"="Symbol")
+
+
+```
+
+## 1.3 Map genes of interest to ENSCAF ID's
+Create "rownames" column to merge with counts matrix from single-nuc sequencing. 
+### 1.3.1 Tumor and host-specific genes (eT threshold = 100 and eH threshold = -10). 
+### 1.3.1.1 Row data 
+```{r}
+rowDataObj <- rowData(objNoBad) %>%
+  as.data.frame()
+
+# setdiff(goi, rowDataObj$Symbol) # Why do not all goi have a corresponding symbol or id?
+# setdiff(goiEnscaf, rowDataObj$ID)
+
+rowDataObjJoined <- rowDataObj %>%
+  left_join(host)
+
+rowDataObjMapped <- rowDataObj %>%
+  filter(Symbol %in% goi) %>%
+  rownames_to_column("rownames") 
+```
+
+#### 1.3.1.2 Duplicates 
+Need to check this because otherwise we can't subset sn counts with unique ID's to match bulk data. 
+```{r}
+# > length(unique(rowDataObjMapped$rownames))
+# [1] 1081
+# > length(unique(rowDataObjMapped$ID))
+# [1] 1079
+dupId <- data.frame(table(rowDataObjMapped$ID))
+dupIdDf <- rowDataObjMapped[rowDataObjMapped$ID %in% dupId$Var1[dupId$Freq > 1],]
+# > length(unique(rowDataObjMapped$Symbol))
+# [1] 1078 
+dupSym <- data.frame(table(rowDataObjMapped$Symbol))
+dupSymDf <- rowDataObjMapped[rowDataObjMapped$Symbol %in% dupSym$Var1[dupSym$Freq > 1],]
+
+# > dupSymDf
+#                          rownames                 ID Symbol            Type Chromosome  hvgs
+# 345       FTH1_ENSCAFG00000030465 ENSCAFG00000030465   FTH1 Gene Expression         11 FALSE
+# 757       FTH1_ENSCAFG00000015901 ENSCAFG00000015901   FTH1 Gene Expression         18  TRUE
+# 1078 FTH1_FTH1_ENSCAFG00000030465 ENSCAFG00000030465   FTH1 Gene Expression         11 FALSE
+# 1080 FTH1_FTH1_ENSCAFG00000015901 ENSCAFG00000015901   FTH1 Gene Expression         18  TRUE
+
+### For now, will only keep FTH1 matching Adrian's table. --> strong host gene. 
+# > adrianMerged %>% filter(Symbol == "FTH1")
+#               GeneID Symbol sampleCount medianEh medianEt medianEtEdit purity_correlation deltaEtEh medianEhLog medianEtLog medianEtEditLog labelTH
+# 1 ENSCAFG00000015901   FTH1           7 4033.108 1606.205     1606.205         -0.2556688 -2426.903     8.30254    7.382252        3.205801    FTH1
+#   labelNeither labelH labelT
+# 1         <NA>   <NA>   <NA>
+
+# Because the other FTH1 is not in Adrian's table, only merging this one. 
+fth1_15901 <- assay(objNoBad, "counts")  %>%
+  as.data.frame() %>%
+  rownames_to_column("rownames") %>%
+  filter(rownames %in% c("FTH1_ENSCAFG00000015901", "FTH1_ENSCAFG00000015901")) %>%
+  column_to_rownames("rownames")
+
+# all.equal(fth1["FTH1_ENSCAFG00000015901",], fth1["FTH1_FTH1_ENSCAFG00000015901
+# ",]) # 
+# max(fth1["FTH1_ENSCAFG00000015901",]) # 21
+# max(fth1["FTH1_FTH1_ENSCAFG00000015901",]) # 114
+
+# AIM: Check if counts overlap, or whether counts are either in one annotation or the other (in which case we could merge the counts to one gene).
+# Are there any cells that have counts for both genes?
+fth1Count <- fth1_15901 %>%
+  t() %>%
+  as.data.frame() %>%
+  mutate("FTH1_ENSCAFG00000015901_yes"= ifelse(FTH1_ENSCAFG00000015901 > 0, 
+                                               1, 
+                                               0),
+         "FTH1_FTH1_ENSCAFG00000015901_yes"= ifelse(FTH1_FTH1_ENSCAFG00000015901 > 0, 
+                                               1, 
+                                               0), 
+         "yes_yes"=FTH1_ENSCAFG00000015901_yes+FTH1_FTH1_ENSCAFG00000015901_yes, 
+         "ENSCAFG00000015901"=FTH1_ENSCAFG00000015901+FTH1_FTH1_ENSCAFG00000015901) %>%
+  t() %>%
+  as.data.frame()
+
+max(fth1Count["yes_yes",]) 
+# [1] 1
+
+customFth1 <- fth1Count["ENSCAFG00000015901",] %>%
+  t()
+
+rowDataObjMappedEdit <- rowDataObjMapped %>%
+  filter(Symbol != "FTH1")
+```
+
+# 2 Export snRNAseq counts
+Scaden requires a .h5ad file. 
+Reading in SCE object, but subsetting genes to those defined by goi (above.)
+
+Ideas
+  - a) No additional information. 
+  - b) Give each gene a cell type annotation?
+  - c) Add purity. 
+  - d) b+c
+  - Investigate "bad" cells input. 
+  - Feature importance
+
+## 2.1 Extract counts
+Get counts from SCE. The rownames of the counts are a mix of symbols and IDs. Left join ID's from rowData above (filtered for goi). Then add rownames back before dropping additional columns from rowData. 
+
+Should this be CPM??
+
+counts.txt needs to be cells x genes. 
+celltype.txt is a list of length(cells), with the column name, "Celltype". 
+```{r}
+assay <- assay(objNoBad, "counts") 
+```
+
+#### 2.1.1 Tumor and host-specific genes (eT threshold = 100 and eH threshold = -100). 
+NB Because not all rownames have a unique ID, I want to filter out the rownames that have non-unique ID's. 
+We need to be able to map the IDs to the bulk data. 
+```{r}
+dir.create(paste0(resDir, "etEh100/0_scadenInput/"), recursive = T)
+
+snCountsFinalNoBad <- assay %>%
+  as.data.frame() %>%
+  rownames_to_column("rownames") %>%
+  # rowDataObjMappedEdit no longer contains duplicate Id's. 
+  left_join(rowDataObjMappedEdit) %>% 
+  drop_na("ID") %>% 
+  column_to_rownames("ID") %>%
+  select(-c("rownames",
+            "Symbol",
+            "Type",
+            "Chromosome",
+            "hvgs" )) %>%
+  t()
+
+snCountsFinalNoBad <- cbind(snCountsFinalNoBad, customFth1)
+snAnnoFinalNoBad <- data.frame("Celltype" = objNoBad$manual.log.anot.fine)
+snSamplesFinalNoBad <- data.frame("SampleID" = objNoBad$Sample)
+
+snCountsColdataNoBad <- colData(objNoBad)
+
+gc()
+
+# Create the cell count matrix: rows = cell types, columns = samples
+snCellCountsNoBad <- snCountsColdataNoBad %>%
+  as.data.frame() %>%
+  group_by(manual.log.anot.fine,
+           Sample) %>%
+  summarise(cellCount = n()) %>%
+  pivot_wider(names_from = Sample,
+              values_from = cellCount,
+              values_fill = 0) %>%
+  column_to_rownames("manual.log.anot.fine")
+
+snCellPropNoBad <- apply(snCellCountsNoBad, 2, function(x) x/sum(x))
+
+colSums(snCellPropNoBad) # Should all be 1.
+
+write.table(
+  snCountsFinalNoBad, 
+  file = paste0(resDir, 
+                "etEh100/0_scadenInput/etEh100_counts.txt"), 
+  sep = "\t", 
+  quote = FALSE, 
+  row.names = c(seq(from=0, to=nrow(snCountsFinalNoBad)-1, by=1)),
+  col.names = NA  # Ensures first column (cell id's names) gets no name
+)
+
+write.table(
+  snAnnoFinalNoBad, 
+  file = paste0(resDir,
+                "etEh100//0_scadenInput/etEh100_celltypes.txt"), 
+  sep = "\t", 
+  quote = FALSE,
+  col.names = T,  # Ensures first column (gene names) gets no name, 
+  row.names = F
+)
+
+write.table(
+  snSamplesFinalNoBad, 
+  file = paste0(resDir,
+                "etEh100//0_scadenInput/etEh100_samples.txt"), 
+  sep = "\t", 
+  quote = FALSE,
+  col.names = T,  # Ensures first column (gene names) gets no name, 
+  row.names = F
+)
+
+# From CreateMatrices.R
+# writeLog(paste("Calculating true cell-type proportions..."))
+# pData = snuc_eset@phenoData@data[,c(opt$snuc_ident_col, opt$snuc_celltype_col)]
+# props = pData %>% group_by(opt$snuc_ident_col) %>% table %>% prop.table(margin=1) --> snuc_ident_col = sample name. 
+# truep = as.matrix.data.frame(props)
+# rownames(truep) = make.names(rownames(props))
+# colnames(truep) = make.names(colnames(props))
+# write.table(truep, file=paste(opt$outDir,'snuc_truep.txt',sep=''), sep='\t')
+# system(paste("sed -i '1s/^/\t/' ", paste(opt$outDir,'snuc_truep.txt',sep=''),sep = '') , intern = F)
+
+pData <- colData(objNoBad)[, c("Sample", "manual.log.anot.fine")] %>%
+  as.data.frame()
+props <- pData %>% group_by("Sample") %>% table %>% prop.table(margin=1)
+truep <- as.matrix.data.frame(props)
+rownames(truep) = str_replace(make.names(rownames(props)), 
+                              "X",
+                              "")
+
+colnames(truep) = make.names(colnames(props))
+write.table(truep, 
+            file=paste(paste0(resDir, 
+                              "etEh100//0_scadenInput/etEh100_truep.txt"),
+                              sep=''), 
+            sep='\t')
+```
+
+# 3 Export bulk counts
+Samples in a signle column, genes in column names (but no header name.)
+
+## 3.1 Read in counts files
+Export as tsv.
+In CreateMatrices.R exports as CPM but snCounts as raw counts.
+```{r}
+bulkCountsFinal <- readRDS(paste0(dataDir, "01_Deconvolution_matchedBulkMatrixCTVT_bulkCountsFinal.rds"))
+
+bulkCpmFinal <-  convertCounts(readRDS(paste0(dataDir,
+                                  "01_Deconvolution_matchedBulkMatrixCTVT_bulkCountsFinal.rds")), 
+                                       unit = "CPM")
+
+bulkCountsFinal_metadata <- read.xlsx(paste0(dataDir,
+                                          "01_Deconvolution_matchedBulkMatrixCTVT_bulkCountsFinal_metadata.xlsx"))
+```
+
+## 3.2 Subset on genes of interest 
+### 3.2.1 Tumor and host-specific genes (eT threshold = 100 and eH threshold = -100). 
+#### 3.2.1.1 Matched bulk cell samples only! 
+```{r}
+intersect(rownames(truep), 
+          colnames(bulkCountsFinal))
+setdiff(rownames(truep), 
+          colnames(bulkCountsFinal)) # [1] "3145T1c"   "3203T1A2c" --> need to be renamed in bulkCountsFinal. 
+
+bulkCountsEtEh100 <- bulkCountsFinal %>%
+  as.data.frame() %>%
+  dplyr::rename("3145T1c"="3145T1c_p",
+                "3203T1A2c"="3203T1A2c_2") %>% # --> should we filter this out for corrective step, because this is poly A. 
+  # Filter samples of interest
+  select(rownames(props)) %>%
+  rownames_to_column("rownames") %>%
+  # Filter genes of interest
+  filter(rownames %in% colnames(snCountsFinalNoBad)) %>%
+  column_to_rownames("rownames") %>%
+  as.matrix()
+
+write.table(
+  bulkCountsEtEh100, 
+    file = paste0(resDir,
+                "etEh100//0_scadenInput/etEh100_bulkDataMatched.txt"), 
+  sep = "\t", 
+  quote = FALSE, 
+  col.names = NA  # Ensures first column (gene names) gets no name
+)
+
+
+bulkCpmEtEh100 <- bulkCpmFinal %>%
+  as.data.frame() %>%
+  dplyr::rename("3145T1c"="3145T1c_p",
+                "3203T1A2c"="3203T1A2c_2") %>% # --> should we filter this out for corrective step, because this is poly A. 
+  # Filter samples of interest
+  select(rownames(props)) %>%
+  rownames_to_column("rownames") %>%
+  # Filter genes of interest
+  filter(rownames %in% colnames(snCountsFinalNoBad)) %>%
+  column_to_rownames("rownames") %>%
+  as.matrix()
+
+write.table(
+  bulkCpmEtEh100, 
+    file = paste0(resDir,
+                "etEh100//0_scadenInput/etEh100_bulkCpmMatched.txt"), 
+  sep = "\t", 
+  quote = FALSE, 
+  col.names = NA  # Ensures first column (gene names) gets no name
+)
+
+```
+#### 3.2.1.2 All bulk samples
+```{r}
+bulkCountsEtEh100 <- bulkCountsFinal %>%
+  as.data.frame() %>%
+  rownames_to_column("rownames") %>%
+  # Filter genes of interest
+  filter(rownames %in% colnames(snCountsFinalNoBad)) %>%
+  column_to_rownames("rownames") %>%
+  as.matrix()
+
+write.table(
+  bulkCountsEtEh100, 
+    file = paste0(resDir,
+                "etEh100//0_scadenInput/etEh100_bulkDataNonMatched.txt"), 
+  sep = "\t", 
+  quote = FALSE, 
+  col.names = NA  # Ensures first column (gene names) gets no name
+)
+
+
+bulkCpmEtEh100 <- bulkCpmFinal %>%
+  as.data.frame() %>%
+  # Filter samples of interest
+  rownames_to_column("rownames") %>%
+  # Filter genes of interest
+  filter(rownames %in% colnames(snCountsFinalNoBad)) %>%
+  column_to_rownames("rownames") %>%
+  as.matrix()
+
+write.table(
+  bulkCpmEtEh100, 
+    file = paste0(resDir,
+                "etEh100//0_scadenInput/etEh100_bulkCpmNonMatched.txt"), 
+  sep = "\t", 
+  quote = FALSE, 
+  col.names = NA  # Ensures first column (gene names) gets no name
+)
+
+```
+# 4 Run from terminal
+TODO Create python script to run through everything. 
+Load sNuConvEnvX86 conda environment from terminal. 
+## 4.1 Scaden simulate
+### 4.1.1 Tumor and host-specific genes (eT threshold = 100 and eH threshold = -100). 
+Default parameters for now. 
+This generates etEh100_trainingData.h5ad.
+TODO: Use custom functions to create simulated data using known sample id's + cell type proportions (+ purity).
+```{bash}
+cd "/Users/nv4/gitClones/01_Deconvolution/03_Deconvolution_CTVT/033_Results/03_Deconvolution_CTVT_sNuConv"
+scaden simulate \
+	-n 1000 \
+	-c 1000 \
+	-p "etEh100_trainingData" \
+	--pattern "*_counts.txt" \
+	-d "./etEh100/0_scadenInput/" \
+	-o "./etEh100/1_simulate/"
+```
+
+## 4.2 Per-gene correlations
+### 4.2.1 Simulate pseudobulk
+Simulate pseudobulk RNA seq from the snRNAseq dataset.
+Average gene expression for 10,000 randomly sampled cells 30 times (default).
+Keeps proportions true (using matched samples from bulk and snRNAseq).
+Normalize counts in pseudobulk to CPM. (requires true matched bulk to also be normalized to CPM) and save as correlations_simulation_data.csv.
+
+
+The specific combination of paired true bulk RNA-seq (also normalized to CPM) and simulated pseudo-bulk samples having true proportions enabled us to look for genes that behave in a correlated manner. 
+```{bash}
+python "/Users/nv4/gitClones/sNuConv/scripts/simulate_correlations_data.py" \
+  "./etEh100/0_scadenInput/etEh100_counts.txt" \
+  "./etEh100/0_scadenInput/etEh100_celltypes.txt" \
+  "./etEh100/0_scadenInput/etEh100_truep.txt" \
+	10000 \
+	30 \
+	"./etEh100/1_simulateCorrelations/"
+```
+
+### 4.2.2 Calculate correlations
+Read in CPM bulk counts + pseudobulk counts from previous chunk. Subset on intersecting genes AND sample names only. 
+Per gene, calculate correlation using cor() spearman and the slope via lm(true ~ pseudo)
+Keeps genes with a corr > --corr_cutoff. Default is 0.6 but in manuscript 0.8 was used. 
+#### 4.2.2.1 Corr cutoff 0.6
+```{bash}
+Rscript "/Users/nv4/gitClones/sNuConv/scripts/Correlations.R" \
+	--corr_cutoff 0.6 \
+	--method spearman \
+	--bulk_counts "./etEh100/0_scadenInput/etEh100_bulkCpmMatched.txt" \
+	--pseudo_counts "./etEh100/1_simulateCorrelations/correlations_simulation_data.csv" \
+	--outDir "./etEh100/2_calculateCorrelations6/"
+	
+	Rscript "/Users/nv4/gitClones/sNuConv/scripts/Correlations.R" \
+	--corr_cutoff 0.8 \
+	--method spearman \
+	--bulk_counts "./etEh100/0_scadenInput/etEh100_bulkCpmMatched.txt" \
+	--pseudo_counts "./etEh100/1_simulateCorrelations/correlations_simulation_data.csv" \
+	--outDir "./etEh100/2_calculateCorrelations8/"
+```
+
+```{r}
+corCutoff <- 0.6
+meth <- "spearman"
+bulkCounts <- paste0(resDir, "./etEh100/0_scadenInput/etEh100_bulkCpmMatched.txt")
+pseudoCounts <- paste0(resDir, "./etEh100/1_simulateCorrelations/correlations_simulation_data.csv")
+outDir <- paste0(resDir,"./etEh100/2_calculateCorrelations6")
+
+# logfile = paste(outDir,'logs.txt',sep='')
+# cat(paste('[',Sys.time(),']: Correlations',sep=''), file=logfile, sep='\n')
+# writeLog <- function(msg) { cat(paste('(',strftime(Sys.time(), format = "%H:%M:%S"),'): ',msg,sep=''),file=logfile,append=TRUE,sep='\n') }
+# 
+# print("Input var:",quote = F)
+# print.data.frame(as.data.frame(x = unlist(opt),row.names = names(opt)),right = F,quote = F)
+
+# ---- Import data ----
+bulk_counts = as.matrix(read.table(bulkCounts, row.names = 1, header = TRUE, sep = '\t'))
+pseudo_counts = as.matrix(read.csv(pseudoCounts, row.names = 1, header = TRUE))
+
+# ---- Prepare data ----
+common_genes <- intersect(rownames(bulk_counts),rownames(pseudo_counts))
+# writeLog(paste("Found ",length(common_genes)," shared genes between Bulk & Pseudo datasets",sep=''))
+bulk_counts = as.matrix(bulk_counts[common_genes,order(colnames(bulk_counts))])
+pseudo_counts = as.matrix(pseudo_counts[common_genes,order(colnames(pseudo_counts))])
+if (!(all(colnames(bulk_counts)==colnames(pseudo_counts)))) {
+  print(paste("ERROR: The sample names are different in Bulk & Pseudo counts datasets"))
+  # stop()
+}else{
+  print("Sample names match Bulk & Pseudo counts datasets")
+}
+
+# ---- Correlations ----
+# writeLog(paste("Calculating correlations..."))
+df_corr = data.frame()
+for (gene in rownames(bulk_counts)) {
+  true_vec = bulk_counts[gene,] %>% as.vector()
+  pseudo_vec = pseudo_counts[gene,] %>% as.vector()
+  gene_cor = cor(true_vec, pseudo_vec, method = meth)
+  gene_lm = lm(true_vec ~ pseudo_vec)
+  new_gene_df = data.frame('Gene'=gene, 'Correlation'=gene_cor, 'abs_cor'=abs(gene_cor), 
+                           'Slope'=gene_lm$coefficients[2], 'Intercept'=gene_lm$coefficients[1])
+  df_corr = rbind(df_corr, new_gene_df)
+}
+
+rownames(df_corr) = df_corr[,'Gene']
+df_corr <- df_corr[!is.na(df_corr$abs_cor),]
+genes_to_correct = df_corr$Gene[df_corr$abs_cor>=corCutoff]
+print(paste("Found ",length(genes_to_correct)," genes with absolute correlation above ",corCutoff,sep='')) # [1] "Found 352 genes with absolute correlation above 0.6"
+df_corr_6 = df_corr[genes_to_correct,]
+
+# ---- End of run ----
+# writeLog(paste("Saving results..."))
+write.table(df_corr_6, paste(outDir,'/df_corr',sep=''), sep = '\t', quote = FALSE, row.names = FALSE)
+# writeLog(paste("Finished"))
+
+
+# ---- Distribution of selected genes and Adrian's table ----
+dfCorr6Merged <- df_corr_6 %>%
+  rename("Gene"="GeneID") %>%
+  left_join(adrianMerged)
+
+# 260
+dfCorr6MergedTumor <- dfCorr6Merged  %>%
+ filter(purity_correlation > 0)
+
+# 92
+dfCorr6MergedHost <-  dfCorr6Merged  %>%
+ filter(purity_correlation < 0)
+
+```
+104#### 4.2.2.2 Corr cutoff 0.8
+```{r}
+corCutoff <- 0.8
+meth <- "spearman"
+bulkCounts <- paste0(resDir, "./etEh100/0_scadenInput/etEh100_bulkCpmMatched.txt")
+pseudoCounts <- paste0(resDir, "./etEh100/1_simulateCorrelations/correlations_simulation_data.csv")
+outDir <- paste0(resDir,"./etEh100/2_calculateCorrelations8")
+
+# logfile = paste(outDir,'logs.txt',sep='')
+# cat(paste('[',Sys.time(),']: Correlations',sep=''), file=logfile, sep='\n')
+# writeLog <- function(msg) { cat(paste('(',strftime(Sys.time(), format = "%H:%M:%S"),'): ',msg,sep=''),file=logfile,append=TRUE,sep='\n') }
+# 
+# print("Input var:",quote = F)
+# print.data.frame(as.data.frame(x = unlist(opt),row.names = names(opt)),right = F,quote = F)
+
+# ---- Import data ----
+bulk_counts = as.matrix(read.table(bulkCounts, row.names = 1, header = TRUE, sep = '\t'))
+pseudo_counts = as.matrix(read.csv(pseudoCounts, row.names = 1, header = TRUE))
+
+# ---- Prepare data ----
+common_genes <- intersect(rownames(bulk_counts),rownames(pseudo_counts))
+# writeLog(paste("Found ",length(common_genes)," shared genes between Bulk & Pseudo datasets",sep=''))
+bulk_counts = as.matrix(bulk_counts[common_genes,order(colnames(bulk_counts))])
+pseudo_counts = as.matrix(pseudo_counts[common_genes,order(colnames(pseudo_counts))])
+if (!(all(colnames(bulk_counts)==colnames(pseudo_counts)))) {
+  print(paste("ERROR: The sample names are different in Bulk & Pseudo counts datasets"))
+  # stop()
+}else{
+  print("Sample names match Bulk & Pseudo counts datasets")
+}
+
+# ---- Correlations ----
+# writeLog(paste("Calculating correlations..."))
+df_corr = data.frame()
+for (gene in rownames(bulk_counts)) {
+  true_vec = bulk_counts[gene,] %>% as.vector()
+  pseudo_vec = pseudo_counts[gene,] %>% as.vector()
+  gene_cor = cor(true_vec, pseudo_vec, method = meth)
+  gene_lm = lm(true_vec ~ pseudo_vec)
+  new_gene_df = data.frame('Gene'=gene, 'Correlation'=gene_cor, 'abs_cor'=abs(gene_cor), 
+                           'Slope'=gene_lm$coefficients[2], 'Intercept'=gene_lm$coefficients[1])
+  df_corr = rbind(df_corr, new_gene_df)
+}
+
+rownames(df_corr) = df_corr[,'Gene']
+df_corr <- df_corr[!is.na(df_corr$abs_cor),]
+genes_to_correct = df_corr$Gene[df_corr$abs_cor>=corCutoff]
+print(paste("Found ",length(genes_to_correct)," genes with absolute correlation above ",corCutoff,sep='')) # [1] "Found 152 genes with absolute correlation above 0.8"
+df_corr_8 = df_corr[genes_to_correct,]
+
+# ---- End of run ----
+# writeLog(paste("Saving results..."))
+write.table(df_corr_8, paste(outDir,'/df_corr',sep=''), sep = '\t', quote = FALSE, row.names = FALSE)
+# writeLog(paste("Finished"))
+
+# ---- Distribution of selected genes and Adrian's table ----
+dfCorr8Merged <- df_corr_8 %>%
+  rename("Gene"="GeneID") %>%
+  left_join(adrianMerged)
+
+# 104
+dfCorr8MergedTumor <- dfCorr8Merged  %>%
+ filter(purity_correlation > 0)
+
+# 48
+dfCorr8MergedHost <-  dfCorr8Merged  %>%
+ filter(purity_correlation < 0)
+```
+
+### 4.2.3 Correct counts
+Convert simulated pseudobulk from "scaden simulate" to CPM. 
+For genes passing the corr threshold, multiply value in simulated bulk by slope and add intercept (i.e. y=mx+c) so that pseudobulk is corrected by bulk expression. Remove all other genes. 
+#### 4.2.3.1 Corr 0.6
+```{bash}
+python "/Users/nv4/gitClones/sNuConv/scripts/CorrectCounts.py" \
+	"./etEh100/2_calculateCorrelations6/df_corr" \
+	"./etEh100/1_simulate/etEh100.h5ad" \
+	"./etEh100/2_correctPseudoCounts6/"
+```
+
+#### 4.2.3.2 Corr 0.8
+```{bash}
+python "/Users/nv4/gitClones/sNuConv/scripts/CorrectCounts.py" \
+	"./etEh100/2_calculateCorrelations8/df_corr" \
+	"./etEh100/1_simulate/etEh100.h5ad" \
+	"./etEh100/2_correctPseudoCounts8/"
+```
+
+## 4.3 Scaden process
+### 4.3.1 Corr 0.6
+```{bash}
+# Corrected counts
+scaden process \
+	--var_cutoff 0 \
+	--processed_path "./etEh100/3_scadenProcess6/etEh100_6_processed.h5ad" \
+	"./etEh100/2_correctPseudoCounts6/training_data_corrected.h5ad" \
+	"./etEh100/0_scadenInput/etEh100_bulkCpmMatched.txt"
+	
+# Uncorrected counts
+scaden process \
+	--var_cutoff 0 \
+	--processed_path "./etEh100/3_scadenProcess6/etEh100_6_processed_uncorrected.h5ad" \
+	"./etEh100/1_simulate/etEh100.h5ad" \
+	"./etEh100/0_scadenInput/etEh100_bulkCpmMatched.txt"
+```
+### 4.3.2 Corr 0.8
+- Don't need uncorrected because it would be the same of 0.6 and 0.8
+```{bash}
+scaden process \
+	--var_cutoff 0 \
+	--processed_path "./etEh100/3_scadenProcess8/etEh100_8_processed.h5ad" \
+	"./etEh100/2_correctPseudoCounts8/training_data_corrected.h5ad" \
+	"./etEh100/0_scadenInput/etEh100_bulkCpmMatched.txt"
+```
+
+## 4.4 Scaden train
+### 4.4.1 Corr 0.6
+Corrected
+m256 Step: 4999, Loss: 0.0005
+m512 Step: 4999, Loss: 0.0013
+m1024 Step: 4999, Loss: 0.0011
+
+Uncorrected
+m256 Step: 4999, Loss: 0.0010
+m512 Step: 4999, Loss: 0.0012
+m1024 Step: 4999, Loss: 0.0014
+
+```{bash}
+scaden train \
+  --steps 5000 \
+  --model_dir "./etEh100/4_scadenTrain6/" \
+  "./etEh100/3_scadenProcess6/etEh100_6_processed.h5ad"
+  
+scaden train \
+  --steps 5000 \
+  --model_dir "./etEh100/4_scadenTrain6/uncorrected/" \
+  "./etEh100/3_scadenProcess6/etEh100_6_processed_uncorrected.h5ad"
+```
+### 4.4.2 Corr 0.8
+m256 Step: 4999, Loss: 0.0005
+m512 Step: 4999, Loss: 0.0009
+m1024 Step: 4999, Loss: 0.0015
+```{bash}
+scaden train \
+  --steps 5000 \
+  --model_dir "./etEh100/4_scadenTrain8/" \
+  "./etEh100/3_scadenProcess8/etEh100_8_processed.h5ad"
+```
+
+## 4.5 Predict on matched samples 
+Still a training step because on matched samples. 
+See how predictions compare to ground truth for those samples. 
+### 4.5.1 Corr 0.6
+```{bash}
+scaden predict \
+	--outname "./etEh100/5_scadenPredict6/etEh100_6_predictions.txt" \
+	--model_dir "./etEh100/4_scadenTrain6/" \
+	"./etEh100/0_scadenInput/etEh100_bulkCpmMatched.txt"
+	
+	
+scaden predict \
+	--outname "./etEh100/5_scadenPredict6/etEh100_6_predictions_nonMatched.txt" \
+	--model_dir "./etEh100/4_scadenTrain6/" \
+	"./etEh100/0_scadenInput/etEh100_bulkCpmNonMatched.txt"
+	
+scaden predict \
+	--outname "./etEh100/5_scadenPredict6/etEh100_6_predictions_nonMatched_uncorrected.txt" \
+	--model_dir "./etEh100/4_scadenTrain6/uncorrected/" \
+	"./etEh100/0_scadenInput/etEh100_bulkCpmNonMatched.txt"
+```
+
+### 4.5.2 Corr 0.8
+```{bash}
+scaden predict \
+	--outname "./etEh100/5_scadenPredict8/etEh100_8_predictions.txt" \
+	--model_dir "./etEh100/4_scadenTrain8/" \
+	"./etEh100/0_scadenInput/etEh100_bulkCpmMatched.txt"
+	
+scaden predict \
+	--outname "./etEh100/5_scadenPredict8/etEh100_8_predictions_nonMatched.txt" \
+	--model_dir "./etEh100/4_scadenTrain8/" \
+	"./etEh100/0_scadenInput/etEh100_bulkCpmNonMatched.txt"
+```
+
+## 4.6 Create cell-type regression model
+### 4.6.1 Corr 0.6
+```{r}
+Celltypes <- TRUE
+truep <- paste0(resDir, "/etEh100/0_scadenInput/etEh100_truep.txt")
+predictions <- paste0(resDir, "/etEh100/5_scadenPredict6/etEh100_6_predictions.txt")
+outDir <- paste0(resDir, "etEh100/6_createModel6/")
+
+
+# ---- Import data ----
+truep <- as.matrix(read.delim(truep, header = TRUE, row.names=1))
+preds <- as.matrix(read.delim(predictions, header = TRUE, row.names=1))
+samples = intersect(rownames(preds),rownames(truep))
+cts = intersect(colnames(preds),colnames(truep))
+truep <- truep[samples,cts]
+preds <- preds[samples,cts]
+truep <- truep[order(rownames(truep)),]
+truep <- truep[,order(colnames(truep))]
+preds <- preds[order(rownames(preds)),]
+preds <- preds[,order(colnames(preds))]
+samples = rownames(truep)
+cts = colnames(truep)
+
+# ---- Build linear models ----
+## Not really sure what Samples would do?
+## Loops through cell types, getting predicted and true proportions. 
+## Calculates correlation between these two values. 
+if (Celltypes) {
+  lms = data.frame()
+  for (ct in cts) {
+    true = truep[,ct] %>% as.vector()
+    pred = preds[,ct] %>% as.vector()
+    lm = lm(true ~ pred)
+    df = data.frame('Celltype'=ct, 'Slope'=lm$coefficients[2], 'Intercept'=lm$coefficients[1], 'Rsquare'=summary(lm)$r.squared)
+    lms = rbind(lms, df)
+  }
+} else if (opt$Samples) {
+  writeLog(logfile, paste("Building model using Samples...",sep=''))
+  lms = data.frame()
+  for (sample in samples) {
+    true = truep[sample,] %>% as.vector()
+    pred = preds[sample,] %>% as.vector()
+    lm = lm(true ~ pred)
+    df = data.frame('Sample'=sample, 'Slope'=lm$coefficients[2], 'Intercept'=lm$coefficients[1])
+    lms = rbind(lms, df)
+  }
+}
+
+write.table(lms, paste(outDir,'etEh100_6_Model.txt',sep=''), row.names=FALSE, sep='\t')
+
+
+## From results below, it looks like Plasma cells are being over estimated. B-cells are the best predicted. 
+# Cell types with a calculated R2 correlation coefficient above a certain cutoff (default: R2 > 0.8) were used to adjust (correct) the predicted proportions of our test bulk RNA-seq data. We chose to correct only for the highly correlated cell types, since they present a consistent error of the original Scaden-based model. This ensured that proportions of cell types with high confidence were estimated more accurately while minimizing the overall estimation error. --> Only B and plasma cells would be considered? 
+# > lms
+#       Celltype      Slope    Intercept    Rsquare
+# pred    Bcells  0.8408590 6.377343e-05 0.99636712
+# pred1 CAF.Endo -0.3180450 2.425612e-02 0.06408385
+# pred2     CTVT  0.5552201 3.679727e-01 0.92375542
+# pred3  Myeloid  0.4958634 4.104165e-02 0.57149033
+# pred4   Plasma  1.1510754 7.204462e-04 0.99679160
+# pred5   Tcells  0.4631369 7.773452e-03 0.67060500
+```
+
+### 4.6.2 Corr 0.8
+```{r}
+Celltypes <- TRUE
+truep <- paste0(resDir, "/etEh100/0_scadenInput/etEh100_truep.txt")
+predictions <- paste0(resDir, "/etEh100/5_scadenPredict8/etEh100_8_predictions.txt")
+outDir <- paste0(resDir, "etEh100/6_createModel8/")
+
+
+# ---- Import data ----
+truep <- as.matrix(read.delim(truep, header = TRUE, row.names=1))
+preds <- as.matrix(read.delim(predictions, header = TRUE, row.names=1))
+samples = intersect(rownames(preds),rownames(truep))
+cts = intersect(colnames(preds),colnames(truep))
+truep <- truep[samples,cts]
+preds <- preds[samples,cts]
+truep <- truep[order(rownames(truep)),]
+truep <- truep[,order(colnames(truep))]
+preds <- preds[order(rownames(preds)),]
+preds <- preds[,order(colnames(preds))]
+samples = rownames(truep)
+cts = colnames(truep)
+
+# ---- Build linear models ----
+## Not really sure what Samples would do?
+## Loops through cell types, getting predicted and true proportions. 
+## Calculates correlation between these two values. 
+if (Celltypes) {
+  lms = data.frame()
+  for (ct in cts) {
+    true = truep[,ct] %>% as.vector()
+    pred = preds[,ct] %>% as.vector()
+    lm = lm(true ~ pred)
+    df = data.frame('Celltype'=ct, 'Slope'=lm$coefficients[2], 'Intercept'=lm$coefficients[1], 'Rsquare'=summary(lm)$r.squared)
+    lms = rbind(lms, df)
+  }
+} else if (opt$Samples) {
+  writeLog(logfile, paste("Building model using Samples...",sep=''))
+  lms = data.frame()
+  for (sample in samples) {
+    true = truep[sample,] %>% as.vector()
+    pred = preds[sample,] %>% as.vector()
+    lm = lm(true ~ pred)
+    df = data.frame('Sample'=sample, 'Slope'=lm$coefficients[2], 'Intercept'=lm$coefficients[1])
+    lms = rbind(lms, df)
+  }
+}
+
+write.table(lms, paste(outDir,'etEh100_8_Model.txt',sep=''), row.names=FALSE, sep='\t')
+
+
+## Exact same result at 6???
+
+# > lms
+#       Celltype      Slope     Intercept    Rsquare
+# pred    Bcells 0.87686136  0.0009049717 0.99616922
+# pred1 CAF.Endo 0.29920522  0.0152118376 0.42644467
+# pred2     CTVT 0.35120496  0.5629235487 0.42178169
+# pred3  Myeloid 0.36979189  0.0420750856 0.59967383
+# pred4   Plasma 1.42188275 -0.0011998212 0.93209695
+# pred5   Tcells 0.06134146  0.0139216845 0.06725698
+```
+## 4.7 Correct predictions
+Uses y=mx+c to adjust estimated proportions of cell types (x) using true proportion (y)? 
+### 4.6.1 Corr 0.6
+#### 4.6.1.1 Matched samples
+```{r}
+model <- paste0(resDir, "etEh100/6_createModel6/etEh100_6_Model.txt")
+predictions <- paste0(resDir, "./etEh100/5_scadenPredict6/etEh100_6_predictions.txt")
+outDir <- paste0(resDir, "./etEh100/7_sNucPredict6/")
+rThresh <- 0.8
+
+# ---- Import data ----
+model <- read.delim(model,header = TRUE)
+model_source = colnames(model)[1]
+if (!(model_source %in% c('Celltype','Sample'))) {
+   paste("ERROR: The model (1st column name) should be based on either Celltype or Sample")
+}else{
+  paste0(model_source, " corrected model.")
+}
+
+preds <- read.delim(predictions,header = TRUE, row.names=1)
+
+# ---- Validating model and predictions ----
+if (model_source == 'Celltype') {
+  celltypes = model$Celltype
+  celltypes = celltypes[order(celltypes)]
+  preds = preds[,celltypes]
+  samples = rownames(preds)
+  if (length(samples)>1) {
+    samples = samples[order(samples)]
+	preds = preds[samples,]
+  }
+} else if (model_source == 'Sample') {
+  avg_slope = mean(model$Slope)
+  avg_intercept = mean(model$Intercept)
+}
+
+preds_corrected = data.frame(row.names=samples)
+cts_adjusted = c()
+
+# ---- Correct Proportions ----
+## Loop through cell types
+## If the correlation between bulk cell and predicted was good (Rsquare > 0.8), use y=mx+c to correct counts
+## Otherwise, take proportions estimated originally by Scaden. This means that only some cell types will be corrected, and so, proportions per sample do not sum to 1 anymore. 
+
+if (model_source == 'Celltype') {
+  for (ct in celltypes) {
+    Rsquare = model$Rsquare[model$Celltype==ct]
+	if (Rsquare >= rThresh) {
+	  cts_adjusted = c(cts_adjusted, ct)
+	  slope = model$Slope[model$Celltype==ct]
+	  intercept = model$Intercept[model$Celltype==ct]
+	  df = data.frame(preds[,ct] * slope + intercept)
+	} else {
+	  df = data.frame(preds[,ct])
+	}
+	rownames(df) = samples
+	colnames(df) = ct
+	preds_corrected = cbind(preds_corrected, df)
+  }
+} else if (model_source == 'Sample') {
+    preds_corrected = preds * avg_slope + avg_intercept
+}
+
+# ---- Normalize proportions to 1 ----
+## Any negative proportions change to 0
+## Per sample, take the new sum of proportions for corrected cell types with R > 0.8. Lock these proportions
+## For the remaining cell types, use ground truth proportions to correct their counts and still sum to remainder. 
+
+preds_corrected[preds_corrected<0] = 0
+
+for (nrow in 1:nrow(preds_corrected)) {
+  props = preds_corrected[nrow,] %>% as.numeric
+  names(props) = colnames(preds_corrected)
+  lock_props = sum(props[cts_adjusted])
+  unlocked_props = props[!(names(props) %in% cts_adjusted)]
+  unlocked_props = (props[!(names(props) %in% cts_adjusted)]/sum(unlocked_props))*(1-lock_props)
+  for (ct in names(props)) {
+    if (!(ct %in% cts_adjusted))
+	  props[ct] = unlocked_props[ct]
+  }
+  preds_corrected[nrow,] = props
+}
+
+# ---- Save updated predictions ----
+write.table(preds_corrected, paste(outDir,'etEh100_6_corrected_predictions.txt',sep=''), row.names=TRUE, quote=FALSE, sep='\t')
+```
+#### 4.6.1.2 All samples
+```{r}
+model <- paste0(resDir, "etEh100/6_createModel6/etEh100_6_Model.txt")
+predictions <- paste0(resDir, "./etEh100/5_scadenPredict6/etEh100_6_predictions_nonMatched.txt")
+outDir <- paste0(resDir, "./etEh100/7_sNucPredict6/")
+rThresh <- 0.8
+
+# ---- Import data ----
+model <- read.delim(model,header = TRUE)
+model_source = colnames(model)[1]
+if (!(model_source %in% c('Celltype','Sample'))) {
+   paste("ERROR: The model (1st column name) should be based on either Celltype or Sample")
+}else{
+  paste0(model_source, " corrected model.")
+}
+
+preds <- read.delim(predictions,header = TRUE, row.names=1)
+
+# ---- Validating model and predictions ----
+if (model_source == 'Celltype') {
+  celltypes = model$Celltype
+  celltypes = celltypes[order(celltypes)]
+  preds = preds[,celltypes]
+  samples = rownames(preds)
+  if (length(samples)>1) {
+    samples = samples[order(samples)]
+	preds = preds[samples,]
+  }
+} else if (model_source == 'Sample') {
+  avg_slope = mean(model$Slope)
+  avg_intercept = mean(model$Intercept)
+}
+
+preds_corrected = data.frame(row.names=samples)
+cts_adjusted = c()
+
+# ---- Correct Proportions ----
+## Loop through cell types
+## If the correlation between bulk cell and predicted was good (Rsquare > 0.8), use y=mx+c to correct counts
+## Otherwise, take proportions estimated originally by Scaden. This means that only some cell types will be corrected, and so, proportions per sample do not sum to 1 anymore. 
+
+if (model_source == 'Celltype') {
+  for (ct in celltypes) {
+    Rsquare = model$Rsquare[model$Celltype==ct]
+	if (Rsquare >= rThresh) {
+	  cts_adjusted = c(cts_adjusted, ct)
+	  slope = model$Slope[model$Celltype==ct]
+	  intercept = model$Intercept[model$Celltype==ct]
+	  df = data.frame(preds[,ct] * slope + intercept)
+	} else {
+	  df = data.frame(preds[,ct])
+	}
+	rownames(df) = samples
+	colnames(df) = ct
+	preds_corrected = cbind(preds_corrected, df)
+  }
+} else if (model_source == 'Sample') {
+    preds_corrected = preds * avg_slope + avg_intercept
+}
+
+# ---- Normalize proportions to 1 ----
+## Any negative proportions change to 0
+## Per sample, take the new sum of proportions for corrected cell types with R > 0.8. Lock these proportions
+## For the remaining cell types, use ground truth proportions to correct their counts and still sum to remainder. 
+
+preds_corrected[preds_corrected<0] = 0
+
+for (nrow in 1:nrow(preds_corrected)) {
+  props = preds_corrected[nrow,] %>% as.numeric
+  names(props) = colnames(preds_corrected)
+  lock_props = sum(props[cts_adjusted])
+  unlocked_props = props[!(names(props) %in% cts_adjusted)]
+  unlocked_props = (props[!(names(props) %in% cts_adjusted)]/sum(unlocked_props))*(1-lock_props)
+  for (ct in names(props)) {
+    if (!(ct %in% cts_adjusted))
+	  props[ct] = unlocked_props[ct]
+  }
+  preds_corrected[nrow,] = props
+}
+
+# ---- Save updated predictions ----
+write.table(preds_corrected, paste(outDir,'etEh100_6_corrected_predictions_allSamples.txt',sep=''), row.names=TRUE, quote=FALSE, sep='\t')
+```
+### 4.6.2 Corr 0.8
+#### 4.6.2.1 Matched samples
+```{r}
+model <- paste0(resDir, "etEh100/6_createModel8/etEh100_8_Model.txt")
+predictions <- paste0(resDir, "./etEh100/5_scadenPredict8/etEh100_8_predictions.txt")
+outDir <- paste0(resDir, "./etEh100/7_sNucPredict8/")
+rThresh <- 0.8
+
+# ---- Import data ----
+model <- read.delim(model,header = TRUE)
+model_source = colnames(model)[1]
+if (!(model_source %in% c('Celltype','Sample'))) {
+   paste("ERROR: The model (1st column name) should be based on either Celltype or Sample")
+}else{
+  paste0(model_source, " corrected model.")
+}
+
+preds <- read.delim(predictions,header = TRUE, row.names=1)
+
+# ---- Validating model and predictions ----
+if (model_source == 'Celltype') {
+  celltypes = model$Celltype
+  celltypes = celltypes[order(celltypes)]
+  preds = preds[,celltypes]
+  samples = rownames(preds)
+  if (length(samples)>1) {
+    samples = samples[order(samples)]
+	preds = preds[samples,]
+  }
+} else if (model_source == 'Sample') {
+  avg_slope = mean(model$Slope)
+  avg_intercept = mean(model$Intercept)
+}
+
+preds_corrected = data.frame(row.names=samples)
+cts_adjusted = c()
+
+# ---- Correct Proportions ----
+## Loop through cell types
+## If the correlation between bulk cell and predicted was good (Rsquare > 0.8), use y=mx+c to correct counts
+## Otherwise, take proportions estimated originally by Scaden. This means that only some cell types will be corrected, and so, proportions per sample do not sum to 1 anymore. 
+
+if (model_source == 'Celltype') {
+  for (ct in celltypes) {
+    Rsquare = model$Rsquare[model$Celltype==ct]
+	if (Rsquare >= rThresh) {
+	  cts_adjusted = c(cts_adjusted, ct)
+	  slope = model$Slope[model$Celltype==ct]
+	  intercept = model$Intercept[model$Celltype==ct]
+	  df = data.frame(preds[,ct] * slope + intercept)
+	} else {
+	  df = data.frame(preds[,ct])
+	}
+	rownames(df) = samples
+	colnames(df) = ct
+	preds_corrected = cbind(preds_corrected, df)
+  }
+} else if (model_source == 'Sample') {
+    preds_corrected = preds * avg_slope + avg_intercept
+}
+
+# ---- Normalize proportions to 1 ----
+## Any negative proportions change to 0
+## Per sample, take the new sum of proportions for corrected cell types with R > 0.8. Lock these proportions
+## For the remaining cell types, use ground truth proportions to correct their counts and still sum to remainder. 
+
+preds_corrected[preds_corrected<0] = 0
+
+for (nrow in 1:nrow(preds_corrected)) {
+  props = preds_corrected[nrow,] %>% as.numeric
+  names(props) = colnames(preds_corrected)
+  lock_props = sum(props[cts_adjusted])
+  unlocked_props = props[!(names(props) %in% cts_adjusted)]
+  unlocked_props = (props[!(names(props) %in% cts_adjusted)]/sum(unlocked_props))*(1-lock_props)
+  for (ct in names(props)) {
+    if (!(ct %in% cts_adjusted))
+	  props[ct] = unlocked_props[ct]
+  }
+  preds_corrected[nrow,] = props
+}
+
+# ---- Save updated predictions ----
+write.table(preds_corrected, paste(outDir,'etEh100_8_corrected_predictions.txt',sep=''), row.names=TRUE, quote=FALSE, sep='\t')
+```
+
+#### 4.6.2.2 All samples
+```{r}
+model <- paste0(resDir, "etEh100/6_createModel8/etEh100_8_Model.txt")
+predictions <- paste0(resDir, "./etEh100/5_scadenPredict8/etEh100_8_predictions_nonMatched.txt")
+outDir <- paste0(resDir, "./etEh100/7_sNucPredict8/")
+rThresh <- 0.8
+
+# ---- Import data ----
+model <- read.delim(model,header = TRUE)
+model_source = colnames(model)[1]
+if (!(model_source %in% c('Celltype','Sample'))) {
+   paste("ERROR: The model (1st column name) should be based on either Celltype or Sample")
+}else{
+  paste0(model_source, " corrected model.")
+}
+
+preds <- read.delim(predictions,header = TRUE, row.names=1)
+
+# ---- Validating model and predictions ----
+if (model_source == 'Celltype') {
+  celltypes = model$Celltype
+  celltypes = celltypes[order(celltypes)]
+  preds = preds[,celltypes]
+  samples = rownames(preds)
+  if (length(samples)>1) {
+    samples = samples[order(samples)]
+	preds = preds[samples,]
+  }
+} else if (model_source == 'Sample') {
+  avg_slope = mean(model$Slope)
+  avg_intercept = mean(model$Intercept)
+}
+
+preds_corrected = data.frame(row.names=samples)
+cts_adjusted = c()
+
+# ---- Correct Proportions ----
+## Loop through cell types
+## If the correlation between bulk cell and predicted was good (Rsquare > 0.8), use y=mx+c to correct counts
+## Otherwise, take proportions estimated originally by Scaden. This means that only some cell types will be corrected, and so, proportions per sample do not sum to 1 anymore. 
+
+if (model_source == 'Celltype') {
+  for (ct in celltypes) {
+    Rsquare = model$Rsquare[model$Celltype==ct]
+	if (Rsquare >= rThresh) {
+	  cts_adjusted = c(cts_adjusted, ct)
+	  slope = model$Slope[model$Celltype==ct]
+	  intercept = model$Intercept[model$Celltype==ct]
+	  df = data.frame(preds[,ct] * slope + intercept)
+	} else {
+	  df = data.frame(preds[,ct])
+	}
+	rownames(df) = samples
+	colnames(df) = ct
+	preds_corrected = cbind(preds_corrected, df)
+  }
+} else if (model_source == 'Sample') {
+    preds_corrected = preds * avg_slope + avg_intercept
+}
+
+# ---- Normalize proportions to 1 ----
+## Any negative proportions change to 0
+## Per sample, take the new sum of proportions for corrected cell types with R > 0.8. Lock these proportions
+## For the remaining cell types, use ground truth proportions to correct their counts and still sum to remainder. 
+
+preds_corrected[preds_corrected<0] = 0
+
+for (nrow in 1:nrow(preds_corrected)) {
+  props = preds_corrected[nrow,] %>% as.numeric
+  names(props) = colnames(preds_corrected)
+  lock_props = sum(props[cts_adjusted])
+  unlocked_props = props[!(names(props) %in% cts_adjusted)]
+  unlocked_props = (props[!(names(props) %in% cts_adjusted)]/sum(unlocked_props))*(1-lock_props)
+  for (ct in names(props)) {
+    if (!(ct %in% cts_adjusted))
+	  props[ct] = unlocked_props[ct]
+  }
+  preds_corrected[nrow,] = props
+}
+
+# ---- Save updated predictions ----
+write.table(preds_corrected, paste(outDir,'etEh100_8_corrected_predictions_allSamples.txt',sep=''), row.names=TRUE, quote=FALSE, sep='\t')
+```
+
+# 5 Visualizations
+## 5.1 Correlation bulk vs pseudobulk
+## 5.2 Cell-type regression plots
+### 5.2.1 Corr > 0.6
+```{r}
+Celltypes <- TRUE
+truep <- paste0(resDir, "/etEh100/0_scadenInput/etEh100_truep.txt")
+predictions <- paste0(resDir, "/etEh100/5_scadenPredict6/etEh100_6_predictions.txt")
+outDir <- paste0(resDir, "etEh100/6_createModel6/")
+
+
+# ---- Import data ----
+truep <- as.matrix(read.delim(truep, header = TRUE, row.names=1))
+preds <- as.matrix(read.delim(predictions, header = TRUE, row.names=1))
+samples = intersect(rownames(preds),rownames(truep))
+cts = intersect(colnames(preds),colnames(truep))
+truep <- truep[samples,cts]
+preds <- preds[samples,cts]
+truep <- truep[order(rownames(truep)),]
+truep <- truep[,order(colnames(truep))]
+preds <- preds[order(rownames(preds)),]
+preds <- preds[,order(colnames(preds))]
+samples = rownames(truep)
+cts = colnames(truep)
+
+# ---- Build linear models ----
+## Not really sure what Samples would do?
+## Loops through cell types, getting predicted and true proportions. 
+## Calculates correlation between these two values. 
+if (Celltypes) {
+  lms = data.frame()
+  for (ct in cts) {
+    true = truep[,ct] %>% as.vector()
+    pred = preds[,ct] %>% as.vector()
+    lm = lm(true ~ pred)
+    df = data.frame('Celltype'=ct, 'Slope'=lm$coefficients[2], 'Intercept'=lm$coefficients[1], 'Rsquare'=summary(lm)$r.squared)
+    lms = rbind(lms, df)
+  }
+} else if (opt$Samples) {
+  writeLog(logfile, paste("Building model using Samples...",sep=''))
+  lms = data.frame()
+  for (sample in samples) {
+    true = truep[sample,] %>% as.vector()
+    pred = preds[sample,] %>% as.vector()
+    lm = lm(true ~ pred)
+    df = data.frame('Sample'=sample, 'Slope'=lm$coefficients[2], 'Intercept'=lm$coefficients[1])
+    lms = rbind(lms, df)
+  }
+}
+
+df <- expand.grid(Sample = samples, Celltype = cts) %>%
+  mutate(
+    True  = as.vector(truep),
+    Pred  = as.vector(preds)
+  )
+
+p <- ggplot(df, aes(x = True, y = Pred, color = Sample)) +
+  geom_point(alpha = 0.7, size=2) +
+  geom_smooth(method = "lm", se = FALSE, color = "black", size=0.5) +
+  facet_wrap(~ Celltype, scales = "free", nrow=1) +
+  theme_minimal() +
+  xlab("Ground truth") +
+  ylab("sNuConv prediction |R|>0.6") +
+  ggtitle("")
+
+pdf(paste0(plotDir, "/scatter/", fprefix, "_etEh100_6_cellType.pdf"),
+    height=3, width=14)
+print(p)
+dev.off()
+
+```
+### 5.2.2 Corr > 0.8
+```{r}
+Celltypes <- TRUE
+truep <- paste0(resDir, "/etEh100/0_scadenInput/etEh100_truep.txt")
+predictions <- paste0(resDir, "/etEh100/5_scadenPredict8/etEh100_8_predictions.txt")
+outDir <- paste0(resDir, "etEh100/6_createModel8/")
+
+
+# ---- Import data ----
+truep <- as.matrix(read.delim(truep, header = TRUE, row.names=1))
+preds <- as.matrix(read.delim(predictions, header = TRUE, row.names=1))
+samples = intersect(rownames(preds),rownames(truep))
+cts = intersect(colnames(preds),colnames(truep))
+truep <- truep[samples,cts]
+preds <- preds[samples,cts]
+truep <- truep[order(rownames(truep)),]
+truep <- truep[,order(colnames(truep))]
+preds <- preds[order(rownames(preds)),]
+preds <- preds[,order(colnames(preds))]
+samples = rownames(truep)
+cts = colnames(truep)
+
+# ---- Build linear models ----
+## Not really sure what Samples would do?
+## Loops through cell types, getting predicted and true proportions. 
+## Calculates correlation between these two values. 
+if (Celltypes) {
+  lms = data.frame()
+  for (ct in cts) {
+    true = truep[,ct] %>% as.vector()
+    pred = preds[,ct] %>% as.vector()
+    lm = lm(true ~ pred)
+    df = data.frame('Celltype'=ct, 'Slope'=lm$coefficients[2], 'Intercept'=lm$coefficients[1], 'Rsquare'=summary(lm)$r.squared)
+    lms = rbind(lms, df)
+  }
+} else if (opt$Samples) {
+  writeLog(logfile, paste("Building model using Samples...",sep=''))
+  lms = data.frame()
+  for (sample in samples) {
+    true = truep[sample,] %>% as.vector()
+    pred = preds[sample,] %>% as.vector()
+    lm = lm(true ~ pred)
+    df = data.frame('Sample'=sample, 'Slope'=lm$coefficients[2], 'Intercept'=lm$coefficients[1])
+    lms = rbind(lms, df)
+  }
+}
+
+df <- expand.grid(Sample = samples, Celltype = cts) %>%
+  mutate(
+    True  = as.vector(truep),
+    Pred  = as.vector(preds)
+  )
+
+p <- ggplot(df, aes(x = True, y = Pred, color = Sample)) +
+  geom_point(alpha = 0.7, size=2) +
+  geom_smooth(method = "lm", se = FALSE, color = "black", size=0.5) +
+  facet_wrap(~ Celltype, scales = "free", nrow=1) +
+  theme_minimal() +
+  xlab("Ground truth") +
+  ylab("sNuConv prediction |R|>0.8") +
+  ggtitle("")
+
+pdf(paste0(plotDir, "/scatter/", fprefix, "_etEh100_8_cellType.pdf"),
+    height=3, width=14)
+print(p)
+dev.off()
+
+```
+
+## 5.2 deltaEtEh vs Purity
+Make size the R value and only label points with R > 0.6
+### 5.2.1 Corr > 0.6
+
+### 5.2.1.1 Data
+```{r}
+plotDf <- dfCorr6Merged %>%
+  rename("sampleCount"="variantCount")
+  
+# Max for scaling
+q1 <- subset(plotDf, purity_correlation > 0 & deltaEtEh > 0)
+maxq1 <- max(q1$deltaEtEh)
+
+q2 <- subset(plotDf, purity_correlation > 0 & deltaEtEh < 0)
+maxq2 <- min(q2$deltaEtEh)
+
+q3 <- subset(plotDf, purity_correlation < 0 & deltaEtEh > 0)
+maxq3 <- min(q3$deltaEtEh)
+
+q4 <- subset(plotDf, purity_correlation < 0 & deltaEtEh < 0)
+maxq4 <- min(q4$deltaEtEh)
+
+# Label points with a high correlation between snRNAseq pseudobulk AND bulk
+q1Label <- subset(q1, Correlation > 0.6)
+q4Label <- subset(q4, Correlation > 0.6)
+```
+### 5.2.1.2 Plot
+```{r}
+# Plot with labels
+medianPlot <- ggplot(plotDf, aes(x = purity_correlation, y = deltaEtEh)) +
+  # NEUTRAL points
+  geom_point(data = subset(plotDf, Correlation <= 0.6 ),
+             aes(size = variantCount), fill = "grey80", color = "black", shape = 21, stroke = 0.2) +
+
+  # Q1
+  new_scale_fill() +
+  geom_point(data = q1,
+             aes(fill = Correlation, size = variantCount), color = "black", shape = 21, stroke = 0.2) +
+  scale_fill_gradient(low = "blue", high = "maroon", limits = c(-1, 1), na.value = "grey90") +
+
+  # # Q2
+  # new_scale_fill() +
+  # geom_point(data = q2,
+  #            aes(fill = deltaEtEh, size = variantCount), color = "black", shape = 21, stroke = 0.2) +
+  # scale_fill_gradient(high = "#ffd580", low = "firebrick2", limits = c(maxq2, 0), na.value = "grey90") +
+  # 
+  # # Q3
+  # new_scale_fill() +
+  # geom_point(data = q3,
+  #            aes(fill = deltaEtEh, size = variantCount), color = "black", shape = 21, stroke = 0.2) +
+  # scale_fill_gradient(low = "#7ED6B7", high = "#1831F5", limits = c(0, 5000), na.value = "grey90") +
+
+  # Q4
+  new_scale_fill() +
+  geom_point(data = q4,
+             aes(fill = Correlation, size = variantCount), color = "black", shape = 21, stroke = 0.2) +
+  scale_fill_gradient(low = "#7E53E6", high = "green", limits = c(-1, 1), na.value = "grey90") +
+
+  # Labels for Q1 and Q4
+  geom_text(data = q1Label, aes(label = Symbol), size = 2, vjust = -1, check_overlap = TRUE) +
+  geom_text(data = q4Label, aes(label = Symbol), size = 2, vjust = -1, check_overlap = TRUE) +
+  scale_size(range = c(1,10)) +
+
+  theme_minimal() +
+  labs(x = "Purity Correlation", y = "Median eT - Median eH")
+
+pdf(paste0(plotDir, "/volcano/", fprefix, "_deltaEtEh_purity_labelled100PosCorr_8.pdf"), height=10, width=10)
+print(medianPlot)
+dev.off()
+```
+
+
+
+### 5.2.2 Corr > 0.8
+### 5.2.1.1 Data
+```{r}
+plotDf <- dfCorr8Merged %>%
+  rename("sampleCount"="variantCount")
+  
+# Max for scaling
+q1 <- subset(plotDf, purity_correlation > 0 & deltaEtEh > 0)
+maxq1 <- max(q1$deltaEtEh)
+
+q2 <- subset(plotDf, purity_correlation > 0 & deltaEtEh < 0)
+maxq2 <- min(q2$deltaEtEh)
+
+q3 <- subset(plotDf, purity_correlation < 0 & deltaEtEh > 0)
+maxq3 <- min(q3$deltaEtEh)
+
+q4 <- subset(plotDf, purity_correlation < 0 & deltaEtEh < 0)
+maxq4 <- min(q4$deltaEtEh)
+
+# Label points with a high correlation between snRNAseq pseudobulk AND bulk
+q1Label <- subset(q1, Correlation > 0.8)
+q4Label <- subset(q4, Correlation > 0.8)
+```
+### 5.2.1.2 Plot
+```{r}
+# Plot with labels
+medianPlot <- ggplot(plotDf, aes(x = purity_correlation, y = deltaEtEh)) +
+  # NEUTRAL points
+  geom_point(data = subset(plotDf, Correlation <= 0.6 ),
+             aes(size = variantCount), fill = "grey80", color = "black", shape = 21, stroke = 0.2) +
+
+  # Q1
+  new_scale_fill() +
+  geom_point(data = q1,
+             aes(fill = Correlation, size = variantCount), color = "black", shape = 21, stroke = 0.2) +
+  scale_fill_gradient(low = "blue", high = "maroon", limits = c(-1, 1), na.value = "grey90") +
+
+  # # Q2
+  # new_scale_fill() +
+  # geom_point(data = q2,
+  #            aes(fill = deltaEtEh, size = variantCount), color = "black", shape = 21, stroke = 0.2) +
+  # scale_fill_gradient(high = "#ffd580", low = "firebrick2", limits = c(maxq2, 0), na.value = "grey90") +
+  # 
+  # # Q3
+  # new_scale_fill() +
+  # geom_point(data = q3,
+  #            aes(fill = deltaEtEh, size = variantCount), color = "black", shape = 21, stroke = 0.2) +
+  # scale_fill_gradient(low = "#7ED6B7", high = "#1831F5", limits = c(0, 5000), na.value = "grey90") +
+
+  # Q4
+  new_scale_fill() +
+  geom_point(data = q4,
+             aes(fill = Correlation, size = variantCount), color = "black", shape = 21, stroke = 0.2) +
+  scale_fill_gradient(low = "#7E53E6", high = "green", limits = c(-1, 1), na.value = "grey90") +
+
+  # Labels for Q1 and Q4
+  geom_text(data = q1Label, aes(label = Symbol), size = 2, vjust = -1, check_overlap = TRUE) +
+  geom_text(data = q4Label, aes(label = Symbol), size = 2, vjust = -1, check_overlap = TRUE) +
+  scale_size(range = c(1,10)) +
+
+  theme_minimal() +
+  labs(x = "Purity Correlation", y = "Median eT - Median eH")
+
+pdf(paste0(plotDir, "/volcano/", fprefix, "_deltaEtEh_purity_labelled100PosCorr_8.pdf"), height=10, width=10)
+print(medianPlot)
+dev.off()
+```
+
+
+## 5.3 Predicted proportions 
+```{r}
+# Step 2: Define a color mapping
+celltype_colors <- c(
+  "CTVT" = "#BCD0C7",
+  "CAF.Endo" = "#FDDFA4FF",
+  "Myeloid" = "#F5FDC6",
+  "Plasma" = "#B4B9E0FF",
+  "Tcells" = "#D56AA0",
+  "Bcells" = "#A8D5E2"
+)
+
+
+colData <- colData(objNoBad)
+# rm(objNoBad)
+gc()
+
+# Create the cell count matrix: rows = cell types, columns = samples
+snCellCountsNoBad <- colData(objNoBad) %>%
+  as.data.frame() %>%
+  group_by(manual.log.anot.fine,
+           Sample) %>%
+  summarise(cellCount = n()) %>%
+  pivot_wider(names_from = Sample,
+              values_from = cellCount,
+              values_fill = 0) %>%
+  column_to_rownames("manual.log.anot.fine")
+
+snCellPropNoBad <- apply(snCellCountsNoBad, 2, function(x) x/sum(x))
+
+colSums(snCellPropNoBad) # Should all be 1.
+
+groundTruth <- snCellPropNoBad %>%
+  t() %>%
+  as.data.frame() %>%
+  rownames_to_column("Sample") %>%
+  pivot_longer(cols = -c("Sample"), names_to = "Cluster", values_to = "Proportion") %>%
+  mutate(
+         Sample = paste0(Sample, " - GT"))
+```
+
+### 5.3.1 Scaden
+#### 5.2.1.1 R > 0.6
+```{r}
+files <- list.files(paste0(resDir, "etEh100/5_scadenPredict6/"), full.names = T, recursive = F)
+names <- list.files(paste0(resDir, "etEh100/5_scadenPredict6/"), full.names = F, recursive = F)
+
+for (d in 1:length(files)){
+  
+  tempFile <- files[d]
+  tempName <- names[d]
+  
+  resName <- str_replace(tempName,
+                     ".txt",
+                     "")
+  
+  tempRes <- read_tsv(tempFile)%>%
+        as.data.frame() %>%
+        rename("...1"="Sample") %>%
+      pivot_longer(cols = -c("Sample"),
+                   values_to = "Proportion",
+                   names_to = "Cluster") %>%
+      rbind(groundTruth) %>%
+      mutate(Type = ifelse(grepl("- GT$", Sample), 
+                           "Ground truth",
+                           "Estimated"))
+    
+    tempRes$Cluster <- factor(tempRes$Cluster, levels = rev(c("CTVT", 
+                                                    "Myeloid", 
+                                                    "Bcells",
+                                                    "CAF.Endo",
+                                                    "Tcells",
+                                                    "Plasma")))
+
+  # Step 3: Plot
+  plot <- ggplot(
+    tempRes,
+    aes(
+      x = Sample,
+      y = Proportion,
+      fill = Cluster,
+      pattern = Type  # TRUE/FALSE
+    )
+  ) +
+  geom_bar_pattern(
+    stat = "identity",
+    pattern_fill = "whitesmoke",           # color of stripes
+    pattern_angle = 45,               # diagonal stripes
+    pattern_density = 0.01,            # small + widely spaced
+    pattern_spacing = 0.01,           # space between stripes
+    pattern_key_scale_factor = 0.5, 
+    pattern_alpha = 0.4 # smaller legend pattern
+  ) +
+  scale_pattern_manual(values = c("Estimated" = "none", "Ground truth" = "stripe")) +
+  scale_fill_manual(values = celltype_colors) +
+  theme_minimal() +
+  ylab("Estimated Proportion") +
+  xlab("Sample") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))+
+    ggtitle(paste0(resName))+
+    theme(title = element_text(size=6))
+  
+  
+   pdf(paste0(plotDir, "/bar/scaden/", fprefix, "_", tempName, ".pdf"),
+      height=4, width=7)
+  print(plot)
+  dev.off()
+}
+```
+
+#### 5.2.1.2 R > 0.8
+```{r}
+files <- list.files(paste0(resDir, "etEh100/5_scadenPredict8/"), full.names = T, recursive = F)
+names <- list.files(paste0(resDir, "etEh100/5_scadenPredict8/"), full.names = F, recursive = F)
+
+for (d in 1:length(files)){
+  
+  tempFile <- files[d]
+  tempName <- names[d]
+  
+  resName <- str_replace(tempName,
+                     ".txt",
+                     "")
+  
+  tempRes <- read_tsv(tempFile)%>%
+        as.data.frame() %>%
+        rename("...1"="Sample") %>%
+      pivot_longer(cols = -c("Sample"),
+                   values_to = "Proportion",
+                   names_to = "Cluster") %>%
+      rbind(groundTruth) %>%
+      mutate(Type = ifelse(grepl("- GT$", Sample), 
+                           "Ground truth",
+                           "Estimated"))
+    
+    tempRes$Cluster <- factor(tempRes$Cluster, levels = rev(c("CTVT", 
+                                                    "Myeloid", 
+                                                    "Bcells",
+                                                    "CAF.Endo",
+                                                    "Tcells",
+                                                    "Plasma")))
+
+  # Step 3: Plot
+  plot <- ggplot(
+    tempRes,
+    aes(
+      x = Sample,
+      y = Proportion,
+      fill = Cluster,
+      pattern = Type  # TRUE/FALSE
+    )
+  ) +
+  geom_bar_pattern(
+    stat = "identity",
+    pattern_fill = "whitesmoke",           # color of stripes
+    pattern_angle = 45,               # diagonal stripes
+    pattern_density = 0.01,            # small + widely spaced
+    pattern_spacing = 0.01,           # space between stripes
+    pattern_key_scale_factor = 0.5, 
+    pattern_alpha = 0.4 # smaller legend pattern
+  ) +
+  scale_pattern_manual(values = c("Estimated" = "none", "Ground truth" = "stripe")) +
+  scale_fill_manual(values = celltype_colors) +
+  theme_minimal() +
+  ylab("Estimated Proportion") +
+  xlab("Sample") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))+
+    ggtitle(paste0(resName))+
+    theme(title = element_text(size=6))
+  
+  
+   pdf(paste0(plotDir, "/bar/scaden/", fprefix, "_", tempName, ".pdf"),
+      height=4, width=7)
+  print(plot)
+  dev.off()
+}
+```
+### 5.3.2 sNuc corrected
+#### 5.2.2.1 R > 0.6
+```{r}
+files <- list.files(paste0(resDir, "etEh100/7_sNucPredict6/"), full.names = T, recursive = F)
+
+names <- list.files(paste0(resDir, "etEh100/7_sNucPredict6/"), full.names = F, recursive = F)
+
+for (d in 1:length(files)){
+  
+  tempFile <- files[d]
+  tempName <- names[d]
+  
+  resName <- str_replace(tempName,
+                     ".txt",
+                     "")
+  tempRes <- read_tsv(tempFile)
+  
+  tempRes <- read_tsv(tempFile, col_names = c("Sample", colnames(tempRes)), skip = 1) %>%
+        as.data.frame() %>%
+      pivot_longer(cols = -c("Sample"),
+                   values_to = "Proportion",
+                   names_to = "Cluster") %>%
+      rbind(groundTruth) %>%
+      mutate(Type = ifelse(grepl("- GT$", Sample), 
+                           "Ground truth",
+                           "Estimated"))
+    
+    tempRes$Cluster <- factor(tempRes$Cluster, levels = rev(c("CTVT", 
+                                                    "Myeloid", 
+                                                    "Bcells",
+                                                    "CAF.Endo",
+                                                    "Tcells",
+                                                    "Plasma")))
+
+  # Step 3: Plot
+  plot <- ggplot(
+    tempRes,
+    aes(
+      x = Sample,
+      y = Proportion,
+      fill = Cluster,
+      pattern = Type  # TRUE/FALSE
+    )
+  ) +
+  geom_bar_pattern(
+    stat = "identity",
+    pattern_fill = "whitesmoke",           # color of stripes
+    pattern_angle = 45,               # diagonal stripes
+    pattern_density = 0.01,            # small + widely spaced
+    pattern_spacing = 0.01,           # space between stripes
+    pattern_key_scale_factor = 0.5, 
+    pattern_alpha = 0.4 # smaller legend pattern
+  ) +
+  scale_pattern_manual(values = c("Estimated" = "none", "Ground truth" = "stripe")) +
+  scale_fill_manual(values = celltype_colors) +
+  theme_minimal() +
+  ylab("Estimated Proportion") +
+  xlab("Sample") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))+
+    ggtitle(paste0(resName))+
+    theme(title = element_text(size=6))
+  
+  
+   pdf(paste0(plotDir, "/bar/sNuConv/", fprefix, "_", tempName, ".pdf"),
+      height=4, width=7)
+  print(plot)
+  dev.off()
+}
+```
+#### 5.2.2.2 R > 0.8
+```{r}
+files <- list.files(paste0(resDir, "etEh100/7_sNucPredict8/"), full.names = T, recursive = F)
+
+names <- list.files(paste0(resDir, "etEh100/7_sNucPredict8/"), full.names = F, recursive = F)
+
+for (d in 1:length(files)){
+  
+  tempFile <- files[d]
+  tempName <- names[d]
+  
+  resName <- str_replace(tempName,
+                     ".txt",
+                     "")
+  tempRes <- read_tsv(tempFile)
+  
+  tempRes <- read_tsv(tempFile, col_names = c("Sample", colnames(tempRes)), skip = 1) %>%
+        as.data.frame() %>%
+      pivot_longer(cols = -c("Sample"),
+                   values_to = "Proportion",
+                   names_to = "Cluster") %>%
+      rbind(groundTruth) %>%
+      mutate(Type = ifelse(grepl("- GT$", Sample), 
+                           "Ground truth",
+                           "Estimated"))
+    
+    tempRes$Cluster <- factor(tempRes$Cluster, levels = rev(c("CTVT", 
+                                                    "Myeloid", 
+                                                    "Bcells",
+                                                    "CAF.Endo",
+                                                    "Tcells",
+                                                    "Plasma")))
+
+  # Step 3: Plot
+  plot <- ggplot(
+    tempRes,
+    aes(
+      x = Sample,
+      y = Proportion,
+      fill = Cluster,
+      pattern = Type  # TRUE/FALSE
+    )
+  ) +
+  geom_bar_pattern(
+    stat = "identity",
+    pattern_fill = "whitesmoke",           # color of stripes
+    pattern_angle = 45,               # diagonal stripes
+    pattern_density = 0.01,            # small + widely spaced
+    pattern_spacing = 0.01,           # space between stripes
+    pattern_key_scale_factor = 0.5, 
+    pattern_alpha = 0.4 # smaller legend pattern
+  ) +
+  scale_pattern_manual(values = c("Estimated" = "none", "Ground truth" = "stripe")) +
+  scale_fill_manual(values = celltype_colors) +
+  theme_minimal() +
+  ylab("Estimated Proportion") +
+  xlab("Sample") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))+
+    ggtitle(paste0(resName))+
+    theme(title = element_text(size=6))
+  
+  
+   pdf(paste0(plotDir, "/bar/sNuConv/", fprefix, "_", tempName, ".pdf"),
+      height=4, width=7)
+  print(plot)
+  dev.off()
+}
+```
+
+
+# 6 Run from terminal - positively correlated genes only. 
+TODO Create python script to run through everything. 
+Load sNuConvEnvX86 conda environment from terminal. 
+## 6.1 Scaden simulate
+### 6.1.1 Tumor and host-specific genes (eT threshold = 100 and eH threshold = -100). 
+Default parameters for now. 
+This generates etEh100_trainingData.h5ad.
+TODO: Use custom functions to create simulated data using known sample id's + cell type proportions (+ purity).
+```{bash}
+cd "/Users/nv4/gitClones/01_Deconvolution/03_Deconvolution_CTVT/033_Results/03_Deconvolution_CTVT_sNuConv"
+scaden simulate \
+	-n 1000 \
+	-c 1000 \
+	-p "etEh100_trainingData" \
+	--pattern "*_counts.txt" \
+	-d "./etEh100Pos/0_scadenInput/" \
+	-o "./etEh100Pos/1_simulate/"
+```
+
+## 6.2 Per-gene correlations
+### 6.2.1 Simulate pseudobulk
+Simulate pseudobulk RNA seq from the snRNAseq dataset.
+Average gene expression for 10,000 randomly sampled cells 30 times (default).
+Keeps proportions true (using matched samples from bulk and snRNAseq).
+Normalize counts in pseudobulk to CPM. (requires true matched bulk to also be normalized to CPM) and save as correlations_simulation_data.csv.
+
+
+The specific combination of paired true bulk RNA-seq (also normalized to CPM) and simulated pseudo-bulk samples having true proportions enabled us to look for genes that behave in a correlated manner. 
+```{bash}
+python "/Users/nv4/gitClones/sNuConv/scripts/simulate_correlations_data.py" \
+  "./etEh100Pos/0_scadenInput/etEh100_counts.txt" \
+  "./etEh100Pos/0_scadenInput/etEh100_celltypes.txt" \
+  "./etEh100Pos/0_scadenInput/etEh100_truep.txt" \
+	10000 \
+	30 \
+	"./etEh100Pos/1_simulateCorrelations/"
+```
+
+### 6.2.2 Calculate correlations
+Read in CPM bulk counts + pseudobulk counts from previous chunk. Subset on intersecting genes AND sample names only. 
+Per gene, calculate correlation using cor() spearman and the slope via lm(true ~ pseudo)
+Keeps genes with a corr > --corr_cutoff. Default is 0.6 but in manuscript 0.8 was used. 
+#### 6.2.2.1 Corr cutoff 0.6
+```{bash}
+Rscript "/Users/nv4/gitClones/sNuConv/scripts/Correlations.R" \
+	--corr_cutoff 0.6 \
+	--method spearman \
+	--bulk_counts "./etEh100Pos/0_scadenInput/etEh100_bulkCpmMatched.txt" \
+	--pseudo_counts "./etEh100Pos/1_simulateCorrelations/correlations_simulation_data.csv" \
+	--outDir "./etEh100Pos/2_calculateCorrelations6/"
+	
+	Rscript "/Users/nv4/gitClones/sNuConv/scripts/Correlations.R" \
+	--corr_cutoff 0.8 \
+	--method spearman \
+	--bulk_counts "./etEh100Pos/0_scadenInput/etEh100_bulkCpmMatched.txt" \
+	--pseudo_counts "./etEh100Pos/1_simulateCorrelations/correlations_simulation_data.csv" \
+	--outDir "./etEh100Pos/2_calculateCorrelations8/"
+```
+
+```{r}
+corCutoff <- 0.6
+meth <- "spearman"
+bulkCounts <- paste0(resDir, "./etEh100Pos/0_scadenInput/etEh100_bulkCpmMatched.txt")
+pseudoCounts <- paste0(resDir, "./etEh100Pos/1_simulateCorrelations/correlations_simulation_data.csv")
+outDir <- paste0(resDir,"./etEh100Pos/2_calculateCorrelations6")
+
+# logfile = paste(outDir,'logs.txt',sep='')
+# cat(paste('[',Sys.time(),']: Correlations',sep=''), file=logfile, sep='\n')
+# writeLog <- function(msg) { cat(paste('(',strftime(Sys.time(), format = "%H:%M:%S"),'): ',msg,sep=''),file=logfile,append=TRUE,sep='\n') }
+# 
+# print("Input var:",quote = F)
+# print.data.frame(as.data.frame(x = unlist(opt),row.names = names(opt)),right = F,quote = F)
+
+# ---- Import data ----
+bulk_counts = as.matrix(read.table(bulkCounts, row.names = 1, header = TRUE, sep = '\t'))
+pseudo_counts = as.matrix(read.csv(pseudoCounts, row.names = 1, header = TRUE))
+
+# ---- Prepare data ----
+common_genes <- intersect(rownames(bulk_counts),rownames(pseudo_counts))
+# writeLog(paste("Found ",length(common_genes)," shared genes between Bulk & Pseudo datasets",sep=''))
+bulk_counts = as.matrix(bulk_counts[common_genes,order(colnames(bulk_counts))])
+pseudo_counts = as.matrix(pseudo_counts[common_genes,order(colnames(pseudo_counts))])
+if (!(all(colnames(bulk_counts)==colnames(pseudo_counts)))) {
+  print(paste("ERROR: The sample names are different in Bulk & Pseudo counts datasets"))
+  # stop()
+}else{
+  print("Sample names match Bulk & Pseudo counts datasets")
+}
+
+# ---- Correlations ----
+# writeLog(paste("Calculating correlations..."))
+df_corr = data.frame()
+for (gene in rownames(bulk_counts)) {
+  true_vec = bulk_counts[gene,] %>% as.vector()
+  pseudo_vec = pseudo_counts[gene,] %>% as.vector()
+  gene_cor = cor(true_vec, pseudo_vec, method = meth)
+  gene_lm = lm(true_vec ~ pseudo_vec)
+  new_gene_df = data.frame('Gene'=gene, 'Correlation'=gene_cor, 'abs_cor'=abs(gene_cor), 
+                           'Slope'=gene_lm$coefficients[2], 'Intercept'=gene_lm$coefficients[1])
+  df_corr = rbind(df_corr, new_gene_df)
+}
+
+rownames(df_corr) = df_corr[,'Gene']
+df_corr <- df_corr[!is.na(df_corr$abs_cor),]
+genes_to_correct = df_corr$Gene[df_corr$Correlation>=corCutoff]
+print(paste("Found ",length(genes_to_correct)," genes with absolute correlation above ",corCutoff,sep='')) # [1] "Found 153 genes with absolute correlation above 0.6"
+df_corr_6 = df_corr[genes_to_correct,]
+
+# ---- End of run ----
+# writeLog(paste("Saving results..."))
+write.table(df_corr_6, paste(outDir,'/df_corr',sep=''), sep = '\t', quote = FALSE, row.names = FALSE)
+# writeLog(paste("Finished"))
+
+
+# ---- Distribution of selected genes and Adrian's table ----
+dfCorr6Merged <- df_corr_6 %>%
+  rename("Gene"="GeneID") %>%
+  left_join(adrianMerged) %>%
+  left_join(famDegs)
+
+write.xlsx(dfCorr6Merged, paste(outDir,'/df_corr_adrianMergedDegs.xlsx',sep=''))
+
+# 79
+dfCorr6MergedTumor <- dfCorr6Merged  %>%
+ filter(purity_correlation > 0)
+
+# 74
+dfCorr6MergedHost <-  dfCorr6Merged  %>%
+ filter(purity_correlation < 0)
+  
+
+```
+#### 6.2.2.2 Corr cutoff 0.8
+```{r}
+corCutoff <- 0.8
+meth <- "spearman"
+bulkCounts <- paste0(resDir, "./etEh100Pos/0_scadenInput/etEh100_bulkCpmMatched.txt")
+pseudoCounts <- paste0(resDir, "./etEh100Pos/1_simulateCorrelations/correlations_simulation_data.csv")
+outDir <- paste0(resDir,"./etEh100Pos/2_calculateCorrelations8")
+
+# logfile = paste(outDir,'logs.txt',sep='')
+# cat(paste('[',Sys.time(),']: Correlations',sep=''), file=logfile, sep='\n')
+# writeLog <- function(msg) { cat(paste('(',strftime(Sys.time(), format = "%H:%M:%S"),'): ',msg,sep=''),file=logfile,append=TRUE,sep='\n') }
+# 
+# print("Input var:",quote = F)
+# print.data.frame(as.data.frame(x = unlist(opt),row.names = names(opt)),right = F,quote = F)
+
+# ---- Import data ----
+bulk_counts = as.matrix(read.table(bulkCounts, row.names = 1, header = TRUE, sep = '\t'))
+pseudo_counts = as.matrix(read.csv(pseudoCounts, row.names = 1, header = TRUE))
+
+# ---- Prepare data ----
+common_genes <- intersect(rownames(bulk_counts),rownames(pseudo_counts))
+# writeLog(paste("Found ",length(common_genes)," shared genes between Bulk & Pseudo datasets",sep=''))
+bulk_counts = as.matrix(bulk_counts[common_genes,order(colnames(bulk_counts))])
+pseudo_counts = as.matrix(pseudo_counts[common_genes,order(colnames(pseudo_counts))])
+if (!(all(colnames(bulk_counts)==colnames(pseudo_counts)))) {
+  print(paste("ERROR: The sample names are different in Bulk & Pseudo counts datasets"))
+  # stop()
+}else{
+  print("Sample names match Bulk & Pseudo counts datasets")
+}
+
+# ---- Correlations ----
+# writeLog(paste("Calculating correlations..."))
+df_corr = data.frame()
+for (gene in rownames(bulk_counts)) {
+  true_vec = bulk_counts[gene,] %>% as.vector()
+  pseudo_vec = pseudo_counts[gene,] %>% as.vector()
+  gene_cor = cor(true_vec, pseudo_vec, method = meth)
+  gene_lm = lm(true_vec ~ pseudo_vec)
+  new_gene_df = data.frame('Gene'=gene, 'Correlation'=gene_cor, 'abs_cor'=abs(gene_cor), 
+                           'Slope'=gene_lm$coefficients[2], 'Intercept'=gene_lm$coefficients[1])
+  df_corr = rbind(df_corr, new_gene_df)
+}
+
+rownames(df_corr) = df_corr[,'Gene']
+df_corr <- df_corr[!is.na(df_corr$abs_cor),]
+genes_to_correct = df_corr$Gene[df_corr$Correlation>=corCutoff]
+print(paste("Found ",length(genes_to_correct)," genes with absolute correlation above ",corCutoff,sep='')) # [1] "Found 71 genes with absolute correlation above 0.8"
+df_corr_8 = df_corr[genes_to_correct,]
+
+# ---- End of run ----
+# writeLog(paste("Saving results..."))
+write.table(df_corr_8, paste(outDir,'/df_corr',sep=''), sep = '\t', quote = FALSE, row.names = FALSE)
+# writeLog(paste("Finished"))
+
+# ---- Distribution of selected genes and Adrian's table ----
+dfCorr8Merged <- df_corr_8 %>%
+  rename("Gene"="GeneID") %>%
+  left_join(adrianMerged)%>%
+  left_join(famDegs)
+
+write.xlsx(dfCorr8Merged, paste(outDir,'/df_corr_adrianMergedDegs.xlsx',sep=''))
+
+
+# 30
+dfCorr8MergedTumor <- dfCorr8Merged  %>%
+ filter(purity_correlation > 0)
+
+# 41
+dfCorr8MergedHost <-  dfCorr8Merged  %>%
+ filter(purity_correlation < 0)
+```
+
+### 6.2.3 Correct counts
+Convert simulated pseudobulk from "scaden simulate" to CPM. 
+For genes passing the corr threshold, multiply value in simulated bulk by slope and add intercept (i.e. y=mx+c) so that pseudobulk is corrected by bulk expression. Remove all other genes. 
+#### 6.2.3.1 Corr 0.6
+```{bash}
+python "/Users/nv4/gitClones/sNuConv/scripts/CorrectCounts.py" \
+	"./etEh100Pos/2_calculateCorrelations6/df_corr" \
+	"./etEh100Pos/1_simulate/etEh100.h5ad" \
+	"./etEh100Pos/2_correctPseudoCounts6/"
+```
+
+#### 6.2.3.2 Corr 0.8
+```{bash}
+python "/Users/nv4/gitClones/sNuConv/scripts/CorrectCounts.py" \
+	"./etEh100Pos/2_calculateCorrelations8/df_corr" \
+	"./etEh100Pos/1_simulate/etEh100.h5ad" \
+	"./etEh100Pos/2_correctPseudoCounts8/"
+```
+
+## 6.3 Scaden process
+### 6.3.1 Corr 0.6
+```{bash}
+# Corrected counts
+scaden process \
+	--var_cutoff 0 \
+	--processed_path "./etEh100Pos/3_scadenProcess6/etEh100_6_processed.h5ad" \
+	"./etEh100Pos/2_correctPseudoCounts6/training_data_corrected.h5ad" \
+	"./etEh100Pos/0_scadenInput/etEh100_bulkCpmMatched.txt"
+	
+# Uncorrected counts
+scaden process \
+	--var_cutoff 0 \
+	--processed_path "./etEh100Pos/3_scadenProcess6/etEh100_6_processed_uncorrected.h5ad" \
+	"./etEh100Pos/1_simulate/etEh100.h5ad" \
+	"./etEh100Pos/0_scadenInput/etEh100_bulkCpmMatched.txt"
+```
+### 6.3.2 Corr 0.8
+- Don't need uncorrected because it would be the same of 0.6 and 0.8
+```{bash}
+scaden process \
+	--var_cutoff 0 \
+	--processed_path "./etEh100Pos/3_scadenProcess8/etEh100_8_processed.h5ad" \
+	"./etEh100Pos/2_correctPseudoCounts8/training_data_corrected.h5ad" \
+	"./etEh100Pos/0_scadenInput/etEh100_bulkCpmMatched.txt"
+```
+
+## 6.4 Scaden train
+If there is an error about dimensions, make sure the trained model output folders do not exist yet!!
+
+### 6.4.1 Corr 0.6
+Corrected
+m256 Step: 4999, Loss: 0.0008
+m512 Step: 4999, Loss: 0.0013
+m1024 Step: 4999, Loss: 0.0011
+
+```{bash}
+scaden train \
+  --steps 5000 \
+  --model_dir "./etEh100Pos/4_scadenTrain6/" \
+  "./etEh100Pos/3_scadenProcess6/etEh100_6_processed.h5ad"
+```
+
+### 6.4.2 Corr 0.8
+
+```{bash}
+scaden train \
+  --steps 5000 \
+  --model_dir "./etEh100Pos/4_scadenTrain8/" \
+  "./etEh100Pos/3_scadenProcess8/etEh100_8_processed.h5ad"
+```
+
+## 6.5 Predict on matched samples 
+Still a training step because on matched samples. 
+See how predictions compare to ground truth for those samples. 
+### 6.5.1 Corr 0.6
+```{bash}
+scaden predict \
+	--outname "./etEh100Pos/5_scadenPredict6/etEh100_6_predictions.txt" \
+	--model_dir "./etEh100Pos/4_scadenTrain6/" \
+	"./etEh100Pos/0_scadenInput/etEh100_bulkCpmMatched.txt"
+
+scaden predict \
+	--outname "./etEh100Pos/5_scadenPredict6/etEh100_6_predictions_nonMatched.txt" \
+	--model_dir "./etEh100Pos/4_scadenTrain6/" \
+	"./etEh100Pos/0_scadenInput/etEh100_bulkCpmNonMatched.txt"
+```
+
+### 6.5.2 Corr 0.8
+```{bash}
+scaden predict \
+	--outname "./etEh100Pos/5_scadenPredict8/etEh100_8_predictions.txt" \
+	--model_dir "./etEh100Pos/4_scadenTrain8/" \
+	"./etEh100Pos/0_scadenInput/etEh100_bulkCpmMatched.txt"
+	
+scaden predict \
+	--outname "./etEh100Pos/5_scadenPredict8/etEh100_8_predictions_nonMatched.txt" \
+	--model_dir "./etEh100Pos/4_scadenTrain8/" \
+	"./etEh100Pos/0_scadenInput/etEh100_bulkCpmNonMatched.txt"
+```
+
+## 6.6 Create cell-type regression model
+### 6.6.1 Corr 0.6
+```{r}
+Celltypes <- TRUE
+truep <- paste0(resDir, "/etEh100Pos/0_scadenInput/etEh100_truep.txt")
+predictions <- paste0(resDir, "/etEh100Pos/5_scadenPredict6/etEh100_6_predictions.txt")
+outDir <- paste0(resDir, "etEh100Pos/6_createModel6/")
+
+
+# ---- Import data ----
+truep <- as.matrix(read.delim(truep, header = TRUE, row.names=1))
+preds <- as.matrix(read.delim(predictions, header = TRUE, row.names=1))
+samples = intersect(rownames(preds),rownames(truep))
+cts = intersect(colnames(preds),colnames(truep))
+truep <- truep[samples,cts]
+preds <- preds[samples,cts]
+truep <- truep[order(rownames(truep)),]
+truep <- truep[,order(colnames(truep))]
+preds <- preds[order(rownames(preds)),]
+preds <- preds[,order(colnames(preds))]
+samples = rownames(truep)
+cts = colnames(truep)
+
+# ---- Build linear models ----
+## Not really sure what Samples would do?
+## Loops through cell types, getting predicted and true proportions. 
+## Calculates correlation between these two values. 
+if (Celltypes) {
+  lms = data.frame()
+  for (ct in cts) {
+    true = truep[,ct] %>% as.vector()
+    pred = preds[,ct] %>% as.vector()
+    lm = lm(true ~ pred)
+    df = data.frame('Celltype'=ct, 'Slope'=lm$coefficients[2], 'Intercept'=lm$coefficients[1], 'Rsquare'=summary(lm)$r.squared)
+    lms = rbind(lms, df)
+  }
+} else if (opt$Samples) {
+  writeLog(logfile, paste("Building model using Samples...",sep=''))
+  lms = data.frame()
+  for (sample in samples) {
+    true = truep[sample,] %>% as.vector()
+    pred = preds[sample,] %>% as.vector()
+    lm = lm(true ~ pred)
+    df = data.frame('Sample'=sample, 'Slope'=lm$coefficients[2], 'Intercept'=lm$coefficients[1])
+    lms = rbind(lms, df)
+  }
+}
+
+write.table(lms, paste(outDir,'etEh100_6_Model.txt',sep=''), row.names=FALSE, sep='\t')
+
+
+## From results below, it looks like Plasma cells are being over estimated. B-cells are the best predicted. 
+# Cell types with a calculated R2 correlation coefficient above a certain cutoff (default: R2 > 0.8) were used to adjust (correct) the predicted proportions of our test bulk RNA-seq data. We chose to correct only for the highly correlated cell types, since they present a consistent error of the original Scaden-based model. This ensured that proportions of cell types with high confidence were estimated more accurately while minimizing the overall estimation error. --> CTVT, Bcells, and plasma cells would be considered.
+
+# > lms
+#       Celltype      Slope    Intercept   Rsquare
+# pred    Bcells  0.7961069 0.0002865109 0.9980578
+# pred1 CAF.Endo -0.2200642 0.0245722410 0.1439807
+# pred2     CTVT  0.4458929 0.4733565869 0.9297758
+# pred3  Myeloid  0.6438427 0.0389629406 0.4778522
+# pred4   Plasma  0.4367855 0.0017586854 0.9803024
+# pred5   Tcells  0.3449124 0.0045140340 0.6971753
+```
+
+### 6.6.2 Corr 0.8
+```{r}
+Celltypes <- TRUE
+truep <- paste0(resDir, "/etEh100Pos/0_scadenInput/etEh100_truep.txt")
+predictions <- paste0(resDir, "/etEh100Pos/5_scadenPredict8/etEh100_8_predictions.txt")
+outDir <- paste0(resDir, "etEh100Pos/6_createModel8/")
+
+
+# ---- Import data ----
+truep <- as.matrix(read.delim(truep, header = TRUE, row.names=1))
+preds <- as.matrix(read.delim(predictions, header = TRUE, row.names=1))
+samples = intersect(rownames(preds),rownames(truep))
+cts = intersect(colnames(preds),colnames(truep))
+truep <- truep[samples,cts]
+preds <- preds[samples,cts]
+truep <- truep[order(rownames(truep)),]
+truep <- truep[,order(colnames(truep))]
+preds <- preds[order(rownames(preds)),]
+preds <- preds[,order(colnames(preds))]
+samples = rownames(truep)
+cts = colnames(truep)
+
+# ---- Build linear models ----
+## Not really sure what Samples would do?
+## Loops through cell types, getting predicted and true proportions. 
+## Calculates correlation between these two values. 
+if (Celltypes) {
+  lms = data.frame()
+  for (ct in cts) {
+    true = truep[,ct] %>% as.vector()
+    pred = preds[,ct] %>% as.vector()
+    lm = lm(true ~ pred)
+    df = data.frame('Celltype'=ct, 'Slope'=lm$coefficients[2], 'Intercept'=lm$coefficients[1], 'Rsquare'=summary(lm)$r.squared)
+    lms = rbind(lms, df)
+  }
+} else if (opt$Samples) {
+  writeLog(logfile, paste("Building model using Samples...",sep=''))
+  lms = data.frame()
+  for (sample in samples) {
+    true = truep[sample,] %>% as.vector()
+    pred = preds[sample,] %>% as.vector()
+    lm = lm(true ~ pred)
+    df = data.frame('Sample'=sample, 'Slope'=lm$coefficients[2], 'Intercept'=lm$coefficients[1])
+    lms = rbind(lms, df)
+  }
+}
+
+write.table(lms, paste(outDir,'etEh100_8_Model.txt',sep=''), row.names=FALSE, sep='\t')
+
+
+## Exact same result at 6???
+
+# > lms --> Bcells, CTVT, and Plasma considered. --> perhaps we need more distinct Myeloid/CAF.Endo markers?
+#       Celltype     Slope   Intercept   Rsquare
+# pred    Bcells 0.5519467 0.002924296 0.9978809
+# pred1 CAF.Endo 0.4207129 0.015267925 0.4027422
+# pred2     CTVT 0.3825732 0.528884052 0.8453334
+# pred3  Myeloid 0.8746403 0.043468547 0.2786784
+# pred4   Plasma 0.5353996 0.002254733 0.9697856
+# pred5   Tcells 0.1660769 0.009012969 0.4374782
+```
+## 6.7 Correct predictions
+Uses y=mx+c to adjust estimated proportions of cell types (x) using true proportion (y)? 
+### 6.6.1 Corr 0.6
+#### 6.6.1.1 Matched samples
+```{r}
+model <- paste0(resDir, "etEh100Pos/6_createModel6/etEh100_6_Model.txt")
+predictions <- paste0(resDir, "./etEh100Pos/5_scadenPredict6/etEh100_6_predictions.txt")
+outDir <- paste0(resDir, "./etEh100Pos/7_sNucPredict6/")
+rThresh <- 0.8
+
+# ---- Import data ----
+model <- read.delim(model,header = TRUE)
+model_source = colnames(model)[1]
+if (!(model_source %in% c('Celltype','Sample'))) {
+   paste("ERROR: The model (1st column name) should be based on either Celltype or Sample")
+}else{
+  paste0(model_source, " corrected model.")
+}
+
+preds <- read.delim(predictions,header = TRUE, row.names=1)
+
+# ---- Validating model and predictions ----
+if (model_source == 'Celltype') {
+  celltypes = model$Celltype
+  celltypes = celltypes[order(celltypes)]
+  preds = preds[,celltypes]
+  samples = rownames(preds)
+  if (length(samples)>1) {
+    samples = samples[order(samples)]
+	preds = preds[samples,]
+  }
+} else if (model_source == 'Sample') {
+  avg_slope = mean(model$Slope)
+  avg_intercept = mean(model$Intercept)
+}
+
+preds_corrected = data.frame(row.names=samples)
+cts_adjusted = c()
+
+# ---- Correct Proportions ----
+## Loop through cell types
+## If the correlation between bulk cell and predicted was good (Rsquare > 0.8), use y=mx+c to correct counts
+## Otherwise, take proportions estimated originally by Scaden. This means that only some cell types will be corrected, and so, proportions per sample do not sum to 1 anymore. 
+
+if (model_source == 'Celltype') {
+  for (ct in celltypes) {
+    Rsquare = model$Rsquare[model$Celltype==ct]
+	if (Rsquare >= rThresh) {
+	  cts_adjusted = c(cts_adjusted, ct)
+	  slope = model$Slope[model$Celltype==ct]
+	  intercept = model$Intercept[model$Celltype==ct]
+	  df = data.frame(preds[,ct] * slope + intercept)
+	} else {
+	  df = data.frame(preds[,ct])
+	}
+	rownames(df) = samples
+	colnames(df) = ct
+	preds_corrected = cbind(preds_corrected, df)
+  }
+} else if (model_source == 'Sample') {
+    preds_corrected = preds * avg_slope + avg_intercept
+}
+
+# ---- Normalize proportions to 1 ----
+## Any negative proportions change to 0
+## Per sample, take the new sum of proportions for corrected cell types with R > 0.8. Lock these proportions
+## For the remaining cell types, use ground truth proportions to correct their counts and still sum to remainder. 
+
+preds_corrected[preds_corrected<0] = 0
+
+for (nrow in 1:nrow(preds_corrected)) {
+  props = preds_corrected[nrow,] %>% as.numeric
+  names(props) = colnames(preds_corrected)
+  lock_props = sum(props[cts_adjusted])
+  unlocked_props = props[!(names(props) %in% cts_adjusted)]
+  unlocked_props = (props[!(names(props) %in% cts_adjusted)]/sum(unlocked_props))*(1-lock_props)
+  for (ct in names(props)) {
+    if (!(ct %in% cts_adjusted))
+	  props[ct] = unlocked_props[ct]
+  }
+  preds_corrected[nrow,] = props
+}
+
+# ---- Save updated predictions ----
+write.table(preds_corrected, paste(outDir,'etEh100_6_corrected_predictions.txt',sep=''), row.names=TRUE, quote=FALSE, sep='\t')
+```
+#### 6.6.1.2 All samples
+```{r}
+model <- paste0(resDir, "etEh100Pos/6_createModel6/etEh100_6_Model.txt")
+predictions <- paste0(resDir, "./etEh100Pos/5_scadenPredict6/etEh100_6_predictions_nonMatched.txt")
+outDir <- paste0(resDir, "./etEh100Pos/7_sNucPredict6/")
+rThresh <- 0.8
+
+# ---- Import data ----
+model <- read.delim(model,header = TRUE)
+model_source = colnames(model)[1]
+if (!(model_source %in% c('Celltype','Sample'))) {
+   paste("ERROR: The model (1st column name) should be based on either Celltype or Sample")
+}else{
+  paste0(model_source, " corrected model.")
+}
+
+preds <- read.delim(predictions,header = TRUE, row.names=1)
+
+# ---- Validating model and predictions ----
+if (model_source == 'Celltype') {
+  celltypes = model$Celltype
+  celltypes = celltypes[order(celltypes)]
+  preds = preds[,celltypes]
+  samples = rownames(preds)
+  if (length(samples)>1) {
+    samples = samples[order(samples)]
+	preds = preds[samples,]
+  }
+} else if (model_source == 'Sample') {
+  avg_slope = mean(model$Slope)
+  avg_intercept = mean(model$Intercept)
+}
+
+preds_corrected = data.frame(row.names=samples)
+cts_adjusted = c()
+
+# ---- Correct Proportions ----
+## Loop through cell types
+## If the correlation between bulk cell and predicted was good (Rsquare > 0.8), use y=mx+c to correct counts
+## Otherwise, take proportions estimated originally by Scaden. This means that only some cell types will be corrected, and so, proportions per sample do not sum to 1 anymore. 
+
+if (model_source == 'Celltype') {
+  for (ct in celltypes) {
+    Rsquare = model$Rsquare[model$Celltype==ct]
+	if (Rsquare >= rThresh) {
+	  cts_adjusted = c(cts_adjusted, ct)
+	  slope = model$Slope[model$Celltype==ct]
+	  intercept = model$Intercept[model$Celltype==ct]
+	  df = data.frame(preds[,ct] * slope + intercept)
+	} else {
+	  df = data.frame(preds[,ct])
+	}
+	rownames(df) = samples
+	colnames(df) = ct
+	preds_corrected = cbind(preds_corrected, df)
+  }
+} else if (model_source == 'Sample') {
+    preds_corrected = preds * avg_slope + avg_intercept
+}
+
+# ---- Normalize proportions to 1 ----
+## Any negative proportions change to 0
+## Per sample, take the new sum of proportions for corrected cell types with R > 0.8. Lock these proportions
+## For the remaining cell types, use ground truth proportions to correct their counts and still sum to remainder. 
+
+preds_corrected[preds_corrected<0] = 0
+
+for (nrow in 1:nrow(preds_corrected)) {
+  props = preds_corrected[nrow,] %>% as.numeric
+  names(props) = colnames(preds_corrected)
+  lock_props = sum(props[cts_adjusted])
+  unlocked_props = props[!(names(props) %in% cts_adjusted)]
+  unlocked_props = (props[!(names(props) %in% cts_adjusted)]/sum(unlocked_props))*(1-lock_props)
+  for (ct in names(props)) {
+    if (!(ct %in% cts_adjusted))
+	  props[ct] = unlocked_props[ct]
+  }
+  preds_corrected[nrow,] = props
+}
+
+# ---- Save updated predictions ----
+write.table(preds_corrected, paste(outDir,'etEh100_6_corrected_predictions_allSamples.txt',sep=''), row.names=TRUE, quote=FALSE, sep='\t')
+```
+### 6.6.2 Corr 0.8
+#### 6.6.2.1 Matched samples
+```{r}
+model <- paste0(resDir, "etEh100Pos/6_createModel8/etEh100_8_Model.txt")
+predictions <- paste0(resDir, "./etEh100Pos/5_scadenPredict8/etEh100_8_predictions.txt")
+outDir <- paste0(resDir, "./etEh100Pos/7_sNucPredict8/")
+rThresh <- 0.8
+
+# ---- Import data ----
+model <- read.delim(model,header = TRUE)
+model_source = colnames(model)[1]
+if (!(model_source %in% c('Celltype','Sample'))) {
+   paste("ERROR: The model (1st column name) should be based on either Celltype or Sample")
+}else{
+  paste0(model_source, " corrected model.")
+}
+
+preds <- read.delim(predictions,header = TRUE, row.names=1)
+
+# ---- Validating model and predictions ----
+if (model_source == 'Celltype') {
+  celltypes = model$Celltype
+  celltypes = celltypes[order(celltypes)]
+  preds = preds[,celltypes]
+  samples = rownames(preds)
+  if (length(samples)>1) {
+    samples = samples[order(samples)]
+	preds = preds[samples,]
+  }
+} else if (model_source == 'Sample') {
+  avg_slope = mean(model$Slope)
+  avg_intercept = mean(model$Intercept)
+}
+
+preds_corrected = data.frame(row.names=samples)
+cts_adjusted = c()
+
+# ---- Correct Proportions ----
+## Loop through cell types
+## If the correlation between bulk cell and predicted was good (Rsquare > 0.8), use y=mx+c to correct counts
+## Otherwise, take proportions estimated originally by Scaden. This means that only some cell types will be corrected, and so, proportions per sample do not sum to 1 anymore. 
+
+if (model_source == 'Celltype') {
+  for (ct in celltypes) {
+    Rsquare = model$Rsquare[model$Celltype==ct]
+	if (Rsquare >= rThresh) {
+	  cts_adjusted = c(cts_adjusted, ct)
+	  slope = model$Slope[model$Celltype==ct]
+	  intercept = model$Intercept[model$Celltype==ct]
+	  df = data.frame(preds[,ct] * slope + intercept)
+	} else {
+	  df = data.frame(preds[,ct])
+	}
+	rownames(df) = samples
+	colnames(df) = ct
+	preds_corrected = cbind(preds_corrected, df)
+  }
+} else if (model_source == 'Sample') {
+    preds_corrected = preds * avg_slope + avg_intercept
+}
+
+# ---- Normalize proportions to 1 ----
+## Any negative proportions change to 0
+## Per sample, take the new sum of proportions for corrected cell types with R > 0.8. Lock these proportions
+## For the remaining cell types, use ground truth proportions to correct their counts and still sum to remainder. 
+
+preds_corrected[preds_corrected<0] = 0
+
+for (nrow in 1:nrow(preds_corrected)) {
+  props = preds_corrected[nrow,] %>% as.numeric
+  names(props) = colnames(preds_corrected)
+  lock_props = sum(props[cts_adjusted])
+  unlocked_props = props[!(names(props) %in% cts_adjusted)]
+  unlocked_props = (props[!(names(props) %in% cts_adjusted)]/sum(unlocked_props))*(1-lock_props)
+  for (ct in names(props)) {
+    if (!(ct %in% cts_adjusted))
+	  props[ct] = unlocked_props[ct]
+  }
+  preds_corrected[nrow,] = props
+}
+
+# ---- Save updated predictions ----
+write.table(preds_corrected, paste(outDir,'etEh100_8_corrected_predictions.txt',sep=''), row.names=TRUE, quote=FALSE, sep='\t')
+```
+
+#### 6.6.2.2 All samples
+```{r}
+model <- paste0(resDir, "etEh100Pos/6_createModel8/etEh100_8_Model.txt")
+predictions <- paste0(resDir, "./etEh100Pos/5_scadenPredict8/etEh100_8_predictions_nonMatched.txt")
+outDir <- paste0(resDir, "./etEh100Pos/7_sNucPredict8/")
+rThresh <- 0.8
+
+# ---- Import data ----
+model <- read.delim(model,header = TRUE)
+model_source = colnames(model)[1]
+if (!(model_source %in% c('Celltype','Sample'))) {
+   paste("ERROR: The model (1st column name) should be based on either Celltype or Sample")
+}else{
+  paste0(model_source, " corrected model.")
+}
+
+preds <- read.delim(predictions,header = TRUE, row.names=1)
+
+# ---- Validating model and predictions ----
+if (model_source == 'Celltype') {
+  celltypes = model$Celltype
+  celltypes = celltypes[order(celltypes)]
+  preds = preds[,celltypes]
+  samples = rownames(preds)
+  if (length(samples)>1) {
+    samples = samples[order(samples)]
+	preds = preds[samples,]
+  }
+} else if (model_source == 'Sample') {
+  avg_slope = mean(model$Slope)
+  avg_intercept = mean(model$Intercept)
+}
+
+preds_corrected = data.frame(row.names=samples)
+cts_adjusted = c()
+
+# ---- Correct Proportions ----
+## Loop through cell types
+## If the correlation between bulk cell and predicted was good (Rsquare > 0.8), use y=mx+c to correct counts
+## Otherwise, take proportions estimated originally by Scaden. This means that only some cell types will be corrected, and so, proportions per sample do not sum to 1 anymore. 
+
+if (model_source == 'Celltype') {
+  for (ct in celltypes) {
+    Rsquare = model$Rsquare[model$Celltype==ct]
+	if (Rsquare >= rThresh) {
+	  cts_adjusted = c(cts_adjusted, ct)
+	  slope = model$Slope[model$Celltype==ct]
+	  intercept = model$Intercept[model$Celltype==ct]
+	  df = data.frame(preds[,ct] * slope + intercept)
+	} else {
+	  df = data.frame(preds[,ct])
+	}
+	rownames(df) = samples
+	colnames(df) = ct
+	preds_corrected = cbind(preds_corrected, df)
+  }
+} else if (model_source == 'Sample') {
+    preds_corrected = preds * avg_slope + avg_intercept
+}
+
+# ---- Normalize proportions to 1 ----
+## Any negative proportions change to 0
+## Per sample, take the new sum of proportions for corrected cell types with R > 0.8. Lock these proportions
+## For the remaining cell types, use ground truth proportions to correct their counts and still sum to remainder. 
+
+preds_corrected[preds_corrected<0] = 0
+
+for (nrow in 1:nrow(preds_corrected)) {
+  props = preds_corrected[nrow,] %>% as.numeric
+  names(props) = colnames(preds_corrected)
+  lock_props = sum(props[cts_adjusted])
+  unlocked_props = props[!(names(props) %in% cts_adjusted)]
+  unlocked_props = (props[!(names(props) %in% cts_adjusted)]/sum(unlocked_props))*(1-lock_props)
+  for (ct in names(props)) {
+    if (!(ct %in% cts_adjusted))
+	  props[ct] = unlocked_props[ct]
+  }
+  preds_corrected[nrow,] = props
+}
+
+# ---- Save updated predictions ----
+write.table(preds_corrected, paste(outDir,'etEh100_8_corrected_predictions_allSamples.txt',sep=''), row.names=TRUE, quote=FALSE, sep='\t')
+```
+
+# 6 Visualizations
+## 5.2 Cell-type regression plots
+### 5.2.1 Corr > 0.6
+```{r}
+Celltypes <- TRUE
+truep <- paste0(resDir, "/etEh100Pos/0_scadenInput/etEh100_truep.txt")
+predictions <- paste0(resDir, "/etEh100Pos/5_scadenPredict6/etEh100_6_predictions.txt")
+outDir <- paste0(resDir, "etEh100Pos/6_createModel6/")
+
+
+# ---- Import data ----
+truep <- as.matrix(read.delim(truep, header = TRUE, row.names=1))
+preds <- as.matrix(read.delim(predictions, header = TRUE, row.names=1))
+samples = intersect(rownames(preds),rownames(truep))
+cts = intersect(colnames(preds),colnames(truep))
+truep <- truep[samples,cts]
+preds <- preds[samples,cts]
+truep <- truep[order(rownames(truep)),]
+truep <- truep[,order(colnames(truep))]
+preds <- preds[order(rownames(preds)),]
+preds <- preds[,order(colnames(preds))]
+samples = rownames(truep)
+cts = colnames(truep)
+
+# ---- Build linear models ----
+## Not really sure what Samples would do?
+## Loops through cell types, getting predicted and true proportions. 
+## Calculates correlation between these two values. 
+if (Celltypes) {
+  lms = data.frame()
+  for (ct in cts) {
+    true = truep[,ct] %>% as.vector()
+    pred = preds[,ct] %>% as.vector()
+    lm = lm(true ~ pred)
+    df = data.frame('Celltype'=ct, 'Slope'=lm$coefficients[2], 'Intercept'=lm$coefficients[1], 'Rsquare'=summary(lm)$r.squared)
+    lms = rbind(lms, df)
+  }
+} else if (opt$Samples) {
+  writeLog(logfile, paste("Building model using Samples...",sep=''))
+  lms = data.frame()
+  for (sample in samples) {
+    true = truep[sample,] %>% as.vector()
+    pred = preds[sample,] %>% as.vector()
+    lm = lm(true ~ pred)
+    df = data.frame('Sample'=sample, 'Slope'=lm$coefficients[2], 'Intercept'=lm$coefficients[1])
+    lms = rbind(lms, df)
+  }
+}
+
+df <- expand.grid(Sample = samples, Celltype = cts) %>%
+  mutate(
+    True  = as.vector(truep),
+    Pred  = as.vector(preds)
+  )
+
+p <- ggplot(df, aes(x = True, y = Pred, color = Sample)) +
+  geom_point(alpha = 0.7, size=2) +
+  geom_smooth(method = "lm", se = FALSE, color = "black", size=0.5) +
+  facet_wrap(~ Celltype, scales = "free", nrow=1) +
+  theme_minimal() +
+  xlab("Ground truth") +
+  ylab("sNuConv prediction |R|>0.6") +
+  ggtitle("")
+
+pdf(paste0(plotDir, "/scatter/", fprefix, "_etEh100Pos_6_cellType.pdf"),
+    height=3, width=14)
+print(p)
+dev.off()
+
+```
+### 5.2.2 Corr > 0.8
+```{r}
+Celltypes <- TRUE
+truep <- paste0(resDir, "/etEh100Pos/0_scadenInput/etEh100_truep.txt")
+predictions <- paste0(resDir, "/etEh100Pos/5_scadenPredict8/etEh100_8_predictions.txt")
+outDir <- paste0(resDir, "etEh100Pos/6_createModel8/")
+
+
+# ---- Import data ----
+truep <- as.matrix(read.delim(truep, header = TRUE, row.names=1))
+preds <- as.matrix(read.delim(predictions, header = TRUE, row.names=1))
+samples = intersect(rownames(preds),rownames(truep))
+cts = intersect(colnames(preds),colnames(truep))
+truep <- truep[samples,cts]
+preds <- preds[samples,cts]
+truep <- truep[order(rownames(truep)),]
+truep <- truep[,order(colnames(truep))]
+preds <- preds[order(rownames(preds)),]
+preds <- preds[,order(colnames(preds))]
+samples = rownames(truep)
+cts = colnames(truep)
+
+# ---- Build linear models ----
+## Not really sure what Samples would do?
+## Loops through cell types, getting predicted and true proportions. 
+## Calculates correlation between these two values. 
+if (Celltypes) {
+  lms = data.frame()
+  for (ct in cts) {
+    true = truep[,ct] %>% as.vector()
+    pred = preds[,ct] %>% as.vector()
+    lm = lm(true ~ pred)
+    df = data.frame('Celltype'=ct, 'Slope'=lm$coefficients[2], 'Intercept'=lm$coefficients[1], 'Rsquare'=summary(lm)$r.squared)
+    lms = rbind(lms, df)
+  }
+} else if (opt$Samples) {
+  writeLog(logfile, paste("Building model using Samples...",sep=''))
+  lms = data.frame()
+  for (sample in samples) {
+    true = truep[sample,] %>% as.vector()
+    pred = preds[sample,] %>% as.vector()
+    lm = lm(true ~ pred)
+    df = data.frame('Sample'=sample, 'Slope'=lm$coefficients[2], 'Intercept'=lm$coefficients[1])
+    lms = rbind(lms, df)
+  }
+}
+
+df <- expand.grid(Sample = samples, Celltype = cts) %>%
+  mutate(
+    True  = as.vector(truep),
+    Pred  = as.vector(preds)
+  )
+
+p <- ggplot(df, aes(x = True, y = Pred, color = Sample)) +
+  geom_point(alpha = 0.7, size=2) +
+  geom_smooth(method = "lm", se = FALSE, color = "black", size=0.5) +
+  facet_wrap(~ Celltype, scales = "free", nrow=1) +
+  theme_minimal() +
+  xlab("Ground truth") +
+  ylab("sNuConv prediction |R|>0.8") +
+  ggtitle("")
+
+pdf(paste0(plotDir, "/scatter/", fprefix, "_etEh100Pos_8_cellType.pdf"),
+    height=3, width=14)
+print(p)
+dev.off()
+
+```
+
+## 6.2 deltaEtEh vs Purity
+Make size the R value and only label points with R > 0.6
+### 6.2.1 Corr > 0.6
+### 6.2.1.1 Data
+```{r}
+plotDf <- dfCorr6Merged %>%
+  rename("sampleCount"="variantCount")
+  
+# Max for scaling
+q1 <- subset(plotDf, purity_correlation > 0 & deltaEtEh > 0)
+maxq1 <- max(q1$deltaEtEh)
+
+q2 <- subset(plotDf, purity_correlation > 0 & deltaEtEh < 0)
+maxq2 <- min(q2$deltaEtEh)
+
+q3 <- subset(plotDf, purity_correlation < 0 & deltaEtEh > 0)
+maxq3 <- min(q3$deltaEtEh)
+
+q4 <- subset(plotDf, purity_correlation < 0 & deltaEtEh < 0)
+maxq4 <- min(q4$deltaEtEh)
+
+# Label points with a high correlation between snRNAseq pseudobulk AND bulk
+q1Label <- subset(q1, Correlation > 0.6)
+q4Label <- subset(q4, Correlation > 0.6)
+```
+### 6.2.1.2 Plot
+```{r}
+# Plot with labels
+medianPlot <- ggplot(plotDf, aes(x = purity_correlation, y = deltaEtEh)) +
+  # NEUTRAL points
+  geom_point(data = subset(plotDf, Correlation <= 0.6 ),
+             aes(size = variantCount), fill = "grey80", color = "black", shape = 21, stroke = 0.2) +
+
+  # Q1
+  new_scale_fill() +
+  geom_point(data = q1,
+             aes(fill = Correlation, size = variantCount), color = "black", shape = 21, stroke = 0.2) +
+  scale_fill_gradient(low = "blue", high = "maroon", limits = c(-1, 1), na.value = "grey90") +
+
+  # # Q2
+  # new_scale_fill() +
+  # geom_point(data = q2,
+  #            aes(fill = deltaEtEh, size = variantCount), color = "black", shape = 21, stroke = 0.2) +
+  # scale_fill_gradient(high = "#ffd580", low = "firebrick2", limits = c(maxq2, 0), na.value = "grey90") +
+  # 
+  # # Q3
+  # new_scale_fill() +
+  # geom_point(data = q3,
+  #            aes(fill = deltaEtEh, size = variantCount), color = "black", shape = 21, stroke = 0.2) +
+  # scale_fill_gradient(low = "#7ED6B7", high = "#1831F5", limits = c(0, 5000), na.value = "grey90") +
+
+  # Q4
+  new_scale_fill() +
+  geom_point(data = q4,
+             aes(fill = Correlation, size = variantCount), color = "black", shape = 21, stroke = 0.2) +
+  scale_fill_gradient(low = "#7E53E6", high = "green", limits = c(-1, 1), na.value = "grey90") +
+
+  # Labels for Q1 and Q4
+  geom_text(data = q1Label, aes(label = Symbol), size = 2, vjust = -1, check_overlap = TRUE) +
+  geom_text(data = q4Label, aes(label = Symbol), size = 2, vjust = -1, check_overlap = TRUE) +
+  scale_size(range = c(1,10)) +
+
+  theme_minimal() +
+  labs(x = "Purity Correlation", y = "Median eT - Median eH")
+
+pdf(paste0(plotDir, "/volcano/", fprefix, "_deltaEtEh_purity_labelled100PosCorr_6_etEh100Pos.pdf"), height=10, width=10)
+print(medianPlot)
+dev.off()
+```
+
+
+
+### 6.2.2 Corr > 0.8
+### 6.2.1.1 Data
+```{r}
+plotDf <- dfCorr8Merged %>%
+  rename("sampleCount"="variantCount")
+  
+# Max for scaling
+q1 <- subset(plotDf, purity_correlation > 0 & deltaEtEh > 0)
+maxq1 <- max(q1$deltaEtEh)
+
+q2 <- subset(plotDf, purity_correlation > 0 & deltaEtEh < 0)
+maxq2 <- min(q2$deltaEtEh)
+
+q3 <- subset(plotDf, purity_correlation < 0 & deltaEtEh > 0)
+maxq3 <- min(q3$deltaEtEh)
+
+q4 <- subset(plotDf, purity_correlation < 0 & deltaEtEh < 0)
+maxq4 <- min(q4$deltaEtEh)
+
+# Label points with a high correlation between snRNAseq pseudobulk AND bulk
+q1Label <- subset(q1, Correlation > 0.8)
+q4Label <- subset(q4, Correlation > 0.8)
+```
+### 6.2.1.2 Plot
+```{r}
+# Plot with labels
+medianPlot <- ggplot(plotDf, aes(x = purity_correlation, y = deltaEtEh)) +
+  # NEUTRAL points
+  geom_point(data = subset(plotDf, Correlation <= 0.6 ),
+             aes(size = variantCount), fill = "grey80", color = "black", shape = 21, stroke = 0.2) +
+
+  # Q1
+  new_scale_fill() +
+  geom_point(data = q1,
+             aes(fill = Correlation, size = variantCount), color = "black", shape = 21, stroke = 0.2) +
+  scale_fill_gradient(low = "blue", high = "maroon", limits = c(-1, 1), na.value = "grey90") +
+
+  # # Q2
+  # new_scale_fill() +
+  # geom_point(data = q2,
+  #            aes(fill = deltaEtEh, size = variantCount), color = "black", shape = 21, stroke = 0.2) +
+  # scale_fill_gradient(high = "#ffd580", low = "firebrick2", limits = c(maxq2, 0), na.value = "grey90") +
+  # 
+  # # Q3
+  # new_scale_fill() +
+  # geom_point(data = q3,
+  #            aes(fill = deltaEtEh, size = variantCount), color = "black", shape = 21, stroke = 0.2) +
+  # scale_fill_gradient(low = "#7ED6B7", high = "#1831F5", limits = c(0, 5000), na.value = "grey90") +
+
+  # Q4
+  new_scale_fill() +
+  geom_point(data = q4,
+             aes(fill = Correlation, size = variantCount), color = "black", shape = 21, stroke = 0.2) +
+  scale_fill_gradient(low = "#7E53E6", high = "green", limits = c(-1, 1), na.value = "grey90") +
+
+  # Labels for Q1 and Q4
+  geom_text(data = q1Label, aes(label = Symbol), size = 2, vjust = -1, check_overlap = TRUE) +
+  geom_text(data = q4Label, aes(label = Symbol), size = 2, vjust = -1, check_overlap = TRUE) +
+  scale_size(range = c(1,10)) +
+
+  theme_minimal() +
+  labs(x = "Purity Correlation", y = "Median eT - Median eH")
+
+pdf(paste0(plotDir, "/volcano/", fprefix, "_deltaEtEh_purity_labelled100PosCorr_8_etEh100Pos.pdf"), height=10, width=10)
+print(medianPlot)
+dev.off()
+```
+
+
+## 6.3 Predicted proportions 
+```{r}
+# Step 2: Define a color mapping
+celltype_colors <- c(
+  "CTVT" = "#BCD0C7",
+  "CAF.Endo" = "#FDDFA4FF",
+  "Myeloid" = "#F5FDC6",
+  "Plasma" = "#B4B9E0FF",
+  "Tcells" = "#D56AA0",
+  "Bcells" = "#A8D5E2"
+)
+
+
+colData <- colData(objNoBad)
+# rm(objNoBad)
+gc()
+
+# Create the cell count matrix: rows = cell types, columns = samples
+snCellCountsNoBad <- colData(objNoBad) %>%
+  as.data.frame() %>%
+  group_by(manual.log.anot.fine,
+           Sample) %>%
+  summarise(cellCount = n()) %>%
+  pivot_wider(names_from = Sample,
+              values_from = cellCount,
+              values_fill = 0) %>%
+  column_to_rownames("manual.log.anot.fine")
+
+snCellPropNoBad <- apply(snCellCountsNoBad, 2, function(x) x/sum(x))
+
+colSums(snCellPropNoBad) # Should all be 1.
+
+groundTruth <- snCellPropNoBad %>%
+  t() %>%
+  as.data.frame() %>%
+  rownames_to_column("Sample") %>%
+  pivot_longer(cols = -c("Sample"), names_to = "Cluster", values_to = "Proportion") %>%
+  mutate(
+         Sample = paste0(Sample, " - GT"))
+```
+
+### 6.3.1 Scaden
+#### 6.2.1.1 R > 0.6
+```{r}
+files <- list.files(paste0(resDir, "etEh100Pos/5_scadenPredict6/"), full.names = T, recursive = F)
+names <- list.files(paste0(resDir, "etEh100Pos/5_scadenPredict6/"), full.names = F, recursive = F)
+
+for (d in 1:length(files)){
+  
+  tempFile <- files[d]
+  tempName <- names[d]
+  
+  resName <- str_replace(tempName,
+                     ".txt",
+                     "")
+  
+  tempRes <- read_tsv(tempFile)%>%
+        as.data.frame() %>%
+        rename("...1"="Sample") %>%
+      pivot_longer(cols = -c("Sample"),
+                   values_to = "Proportion",
+                   names_to = "Cluster") %>%
+    # mutate(facet = str_replace_all(Sample, c(
+    #   '- GT$' = '',   # strip GT
+    #   '_n$'   = '',   # strip _n
+    #   '_p$'   = ''))) %>%    # strip _p)
+      rbind(groundTruth) %>%
+      mutate(
+    Type = ifelse(grepl("- GT$", Sample), "Ground truth", "Estimated")
+  ) 
+    
+    tempRes$Cluster <- factor(tempRes$Cluster, levels = rev(c("CTVT", 
+                                                    "Myeloid", 
+                                                    "Bcells",
+                                                    "CAF.Endo",
+                                                    "Tcells",
+                                                    "Plasma")))
+
+  # Step 3: Plot
+  plot <- ggplot(
+    tempRes,
+    aes(
+      x = Sample,
+      y = Proportion,
+      fill = Cluster,
+      pattern = Type  # TRUE/FALSE
+    )
+  ) +
+  geom_bar_pattern(
+    stat = "identity",
+    pattern_fill = "whitesmoke",           # color of stripes
+    pattern_angle = 45,               # diagonal stripes
+    pattern_density = 0.01,            # small + widely spaced
+    pattern_spacing = 0.01,           # space between stripes
+    pattern_key_scale_factor = 0.5, 
+    pattern_alpha = 0.4 # smaller legend pattern
+  ) +
+  scale_pattern_manual(values = c("Estimated" = "none", "Ground truth" = "stripe")) +
+  scale_fill_manual(values = celltype_colors) +
+  theme_minimal() +
+  ylab("Estimated Proportion") +
+  xlab("Sample") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))+
+    ggtitle(paste0(resName))+
+    theme(title = element_text(size=6))
+  
+  
+   pdf(paste0(plotDir, "/bar/scaden/", fprefix, "_", tempName, "_etEh100Pos.pdf"),
+      height=4, width=7)
+  print(plot)
+  dev.off()
+}
+```
+
+#### 6.2.1.2 R > 0.8
+```{r}
+files <- list.files(paste0(resDir, "etEh100Pos/5_scadenPredict8/"), full.names = T, recursive = F)
+names <- list.files(paste0(resDir, "etEh100Pos/5_scadenPredict8/"), full.names = F, recursive = F)
+
+for (d in 1:length(files)){
+  
+  tempFile <- files[d]
+  tempName <- names[d]
+  
+  resName <- str_replace(tempName,
+                     ".txt",
+                     "")
+  
+  tempRes <- read_tsv(tempFile)%>%
+        as.data.frame() %>%
+        rename("...1"="Sample") %>%
+      pivot_longer(cols = -c("Sample"),
+                   values_to = "Proportion",
+                   names_to = "Cluster") %>%
+      rbind(groundTruth) %>%
+      mutate(Type = ifelse(grepl("- GT$", Sample), 
+                           "Ground truth",
+                           "Estimated"))
+    
+    tempRes$Cluster <- factor(tempRes$Cluster, levels = rev(c("CTVT", 
+                                                    "Myeloid", 
+                                                    "Bcells",
+                                                    "CAF.Endo",
+                                                    "Tcells",
+                                                    "Plasma")))
+
+  # Step 3: Plot
+  plot <- ggplot(
+    tempRes,
+    aes(
+      x = Sample,
+      y = Proportion,
+      fill = Cluster,
+      pattern = Type  # TRUE/FALSE
+    )
+  ) +
+  geom_bar_pattern(
+    stat = "identity",
+    pattern_fill = "whitesmoke",           # color of stripes
+    pattern_angle = 45,               # diagonal stripes
+    pattern_density = 0.01,            # small + widely spaced
+    pattern_spacing = 0.01,           # space between stripes
+    pattern_key_scale_factor = 0.5, 
+    pattern_alpha = 0.4 # smaller legend pattern
+  ) +
+  scale_pattern_manual(values = c("Estimated" = "none", "Ground truth" = "stripe")) +
+  scale_fill_manual(values = celltype_colors) +
+  theme_minimal() +
+  ylab("Estimated Proportion") +
+  xlab("Sample") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))+
+    ggtitle(paste0(resName))+
+    theme(title = element_text(size=6))
+  
+  
+   pdf(paste0(plotDir, "/bar/scaden/", fprefix, "_", tempName, "_etEh100Pos.pdf"),
+      height=4, width=7)
+  print(plot)
+  dev.off()
+}
+```
+### 6.3.2 sNuc corrected
+#### 6.2.2.1 R > 0.6
+```{r}
+files <- list.files(paste0(resDir, "etEh100Pos/7_sNucPredict6/"), full.names = T, recursive = F)
+
+names <- list.files(paste0(resDir, "etEh100Pos/7_sNucPredict6/"), full.names = F, recursive = F)
+
+for (d in 1:length(files)){
+  
+  tempFile <- files[d]
+  tempName <- names[d]
+  
+  resName <- str_replace(tempName,
+                     ".txt",
+                     "")
+  tempRes <- read_tsv(tempFile)
+  
+  tempRes <- read_tsv(tempFile, col_names = c("Sample", colnames(tempRes)), skip = 1) %>%
+        as.data.frame() %>%
+      pivot_longer(cols = -c("Sample"),
+                   values_to = "Proportion",
+                   names_to = "Cluster") %>%
+      rbind(groundTruth) %>%
+      mutate(Type = ifelse(grepl("- GT$", Sample), 
+                           "Ground truth",
+                           "Estimated"))
+    
+    tempRes$Cluster <- factor(tempRes$Cluster, levels = rev(c("CTVT", 
+                                                    "Myeloid", 
+                                                    "Bcells",
+                                                    "CAF.Endo",
+                                                    "Tcells",
+                                                    "Plasma")))
+
+  # Step 3: Plot
+  plot <- ggplot(
+    tempRes,
+    aes(
+      x = Sample,
+      y = Proportion,
+      fill = Cluster,
+      pattern = Type  # TRUE/FALSE
+    )
+  ) +
+  geom_bar_pattern(
+    stat = "identity",
+    pattern_fill = "whitesmoke",           # color of stripes
+    pattern_angle = 45,               # diagonal stripes
+    pattern_density = 0.01,            # small + widely spaced
+    pattern_spacing = 0.01,           # space between stripes
+    pattern_key_scale_factor = 0.5, 
+    pattern_alpha = 0.4 # smaller legend pattern
+  ) +
+  scale_pattern_manual(values = c("Estimated" = "none", "Ground truth" = "stripe")) +
+  scale_fill_manual(values = celltype_colors) +
+  theme_minimal() +
+  ylab("Estimated Proportion") +
+  xlab("Sample") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))+
+    ggtitle(paste0(resName))+
+    theme(title = element_text(size=6))
+  
+  
+   pdf(paste0(plotDir, "/bar/sNuConv/", fprefix, "_", tempName, "_etEh100Pos.pdf"),
+      height=4, width=7)
+  print(plot)
+  dev.off()
+}
+```
+#### 6.2.2.2 R > 0.8
+```{r}
+files <- list.files(paste0(resDir, "etEh100Pos/7_sNucPredict8/"), full.names = T, recursive = F)
+
+names <- list.files(paste0(resDir, "etEh100Pos/7_sNucPredict8/"), full.names = F, recursive = F)
+
+for (d in 1:length(files)){
+  
+  tempFile <- files[d]
+  tempName <- names[d]
+  
+  resName <- str_replace(tempName,
+                     ".txt",
+                     "")
+  tempRes <- read_tsv(tempFile)
+  
+  tempRes <- read_tsv(tempFile, col_names = c("Sample", colnames(tempRes)), skip = 1) %>%
+        as.data.frame() %>%
+      pivot_longer(cols = -c("Sample"),
+                   values_to = "Proportion",
+                   names_to = "Cluster") %>%
+      rbind(groundTruth) %>%
+      mutate(Type = ifelse(grepl("- GT$", Sample), 
+                           "Ground truth",
+                           "Estimated"))
+    
+    tempRes$Cluster <- factor(tempRes$Cluster, levels = rev(c("CTVT", 
+                                                    "Myeloid", 
+                                                    "Bcells",
+                                                    "CAF.Endo",
+                                                    "Tcells",
+                                                    "Plasma")))
+
+  # Step 3: Plot
+  plot <- ggplot(
+    tempRes,
+    aes(
+      x = Sample,
+      y = Proportion,
+      fill = Cluster,
+      pattern = Type  # TRUE/FALSE
+    )
+  ) +
+  geom_bar_pattern(
+    stat = "identity",
+    pattern_fill = "whitesmoke",           # color of stripes
+    pattern_angle = 45,               # diagonal stripes
+    pattern_density = 0.01,            # small + widely spaced
+    pattern_spacing = 0.01,           # space between stripes
+    pattern_key_scale_factor = 0.5, 
+    pattern_alpha = 0.4 # smaller legend pattern
+  ) +
+  scale_pattern_manual(values = c("Estimated" = "none", "Ground truth" = "stripe")) +
+  scale_fill_manual(values = celltype_colors) +
+  theme_minimal() +
+  ylab("Estimated Proportion") +
+  xlab("Sample") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))+
+    ggtitle(paste0(resName))+
+    theme(title = element_text(size=6))
+  
+  
+   pdf(paste0(plotDir, "/bar/sNuConv/", fprefix, "_", tempName, "_etEh100Pos.pdf"),
+      height=4, width=7)
+  print(plot)
+  dev.off()
+}
+```
+
+###

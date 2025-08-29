@@ -1,0 +1,349 @@
+---
+title: "03_Deconvolution_CTVT_cibersort"
+output: html_document
+---
+
+# 0 Environment
+## 0.1 Packages
+### 0.1.1 Installs
+```{r echo=F, message=F, warning=FALSE}
+# devtools::install_github("Moonerss/CIBERSORT")
+```
+### 0.1.1 Library
+```{r echo=F, message=F, warning=FALSE}
+set.seed(123)
+# library(CIBERSORT)
+library(tidyverse)
+library(SingleCellExperiment)
+library(openxlsx)
+library(dplyr)
+library(Seurat)
+# BiocManager::install("orthogene")
+options(future.globals.maxSize = 3e+09)
+```
+
+## 0.2 Paths
+```{r echo=F, message=FALSE, warning=FALSE}
+fprefix <- "03_Deconvolution_CTVT_integrated_cibersort"
+wDir <- paste0("~/gitClones/01_Deconvolution/03_Deconvolution_CTVT/")
+dataDir <- paste0(wDir, "/031_Data/")
+resDir <- paste0(wDir, "/033_Results/", fprefix, "/")
+plotDir <- paste0(wDir, "/034_Plots/", fprefix, "/")
+
+dir.create(resDir)
+dir.create(plotDir)
+```
+
+### 0.3.3 Metrics
+```{r}
+# source(paste0(wDir, "/12_Scripts/01_Deconvolution_deconBenchmark_metricFunctions.R"))
+```
+
+# 1.0 Inputs
+## 1.1 Candidate marker genes 
+### 1.1.1 Mapping
+```{r}
+mappings <- read.xlsx("~/gitClones/01_Deconvolution/03_Deconvolution_CTVT/033_Results/03_Deconvolution_CTVT_GSE210347/03_Deconvolution_CTVT_orthologs_mappingEdit.xlsx")
+
+mappingsUnique <- mappings %>%
+  filter(Mapping == "unique")
+```
+
+### 1.1.2 Adrian's table
+```{r}
+adrianDf <- read_csv(paste0(dataDir, "ctvt_rnaseq_expression-2.csv"))
+
+adrianCorr <- read.xlsx(paste0(dataDir, "CTVT_expression_purity_correlations.xlsx")) %>%
+  dplyr::rename("Symbol"="gene")
+
+geneDf <- adrianDf %>%
+  group_by( GeneID, Symbol) %>% # Group by SNP (Location)
+  mutate(etEdit = ifelse(eT == Inf, 
+                             50000,
+                             eT)) %>%
+  summarise(sampleCount = n(), 
+            medianEh = median(eH), 
+            medianEt = median(eT),
+            medianEtEdit = median(etEdit), 
+            sumEt = sum(eT),
+            sumEtEdit = sum(etEdit),
+            sumEh = sum(eH)) %>%
+  left_join(adrianCorr, 
+            by = join_by(Symbol))
+
+plotDf <- geneDf %>%
+  mutate(deltaEtEh = medianEt-medianEh)
+
+
+tempPlotDf <- plotDf %>%
+  dplyr::rename("variantCount"="sampleCount") %>%
+  mutate(
+    fillPos = medianEtEdit,
+    fillNeg = medianEh
+  ) %>%
+  rename("Symbol"="Dog") %>%
+  filter(Dog %in% mappings$Dog) %>%
+  left_join(mappings)
+
+# # Max for scaling
+# q1 <- subset(tempPlotDf, purity_correlation > 0 & deltaEtEh > 0)
+# q4 <- subset(tempPlotDf, purity_correlation < 0 & deltaEtEh < 0)
+# 
+# 
+# # Filter points with abs(deltaEtEh) > 500 in Q1 and Q4
+# # q1 = tumor
+# q1Label 
+# q1Label100 <- subset(q1, abs(deltaEtEh) > 100)
+# 
+# # q4 = host
+# q4Label100 <- subset(q4, abs(deltaEtEh) > 100)
+```
+### 1.1.3 FAM results
+```{r}
+# famWilcoxDegs <- read.xlsx(paste0( "~/gitClones/01_Deconvolution/03_Deconvolution_CTVT/033_Results/03_Deconvolution_CTVT_GSE21034_integrated/findAllMarkers/03_Deconvolution_CTVT_GSE21034_integrated_merged_fullyintegrated_famWilcox.xlsx"))  %>%
+#   rename("gene"="Human") %>%
+#   filter(Human %in% mappings$Human) %>%
+#   left_join(mappings) %>%
+#   filter(p_val_adj < 0.05 & avg_log2FC > 2.5)
+# 
+# table(famWilcoxDegs$cluster)
+
+     #    CTVT_CTVT Human_Endothelium  Human_Fibroblast  Human_Lymphocyte     Human_Myeloid 
+     #         2022               261               393               130               198 
+     # Human_Plasma 
+     #           39 
+```
+
+
+### 1.1.4 Merge tables
+Make sure to map dog to human genes. 
+```{r}
+# merged <- famWilcoxDegs %>%
+#   left_join(tempPlotDf)
+# 
+# write.xlsx(merged, paste0(resDir, fprefix, "_merged_famWilcoxDegs_adrianTable.xlsx"))
+
+merged <- read.xlsx(paste0(resDir, fprefix, "_merged_famWilcoxDegs_adrianTable.xlsx"))
+```
+
+# 2 Export counts
+Reference - cellxgene dense matrix.
+## 2.1 Matrix
+```{r}
+# test <- readRDS( paste0(dataDir, "/GSE210347/merged_fullyIntegrated_sampTissRef.rds"))
+# gc()
+# 
+# Idents(test) <- "cellTypeMerged"
+# 
+# testSubset <- subset(test, idents = c("CTVT_CTVT",
+#                                       "Human_Endothelium",
+#                                       "Human_Fibroblast",
+#                                       "Human_Myeloid",
+#                                      "Human_Plasma",
+#                                      "Human_Lymphocyte"))
+# 
+# rm(test)
+# gc()
+# 
+# testSubset <- JoinLayers(testSubset)
+# 
+# DefaultAssay(testSubset) <- "RNA"
+# 
+# saveRDS(testSubset, paste0(dataDir, "/GSE210347/merged_fullyIntegrated_sampTissRef_subset.rds"))
+
+testSubset <- readRDS(paste0(dataDir, "/GSE210347/merged_fullyIntegrated_sampTissRef_subset.rds"))
+
+snAnno <- testSubset$cellTypeMerged %>%
+  as.data.frame()
+
+gc()
+```
+## 2.2 All of Adrian's table
+Not filtering by FAM Degs. 
+### 2.2.1 Reference
+May crash session!
+```{r}
+genes <- merged %>%
+       filter((purity_correlation < 0 & deltaEtEh < 0 ) | (purity_correlation < 0 & deltaEtEh < 0))
+
+counts <- LayerData(testSubset, 
+                                     assay = "RNA", 
+                                     layer = "counts") 
+
+rm(testSubset)
+gc()
+
+counts <- counts[unique(genes$Human), ]
+
+counts <- t(counts) %>%
+            as.data.frame() %>%
+            # Not actually GeneSymbol, but for matching format. 
+            rownames_to_column("geneSymbol") %>%
+            t() %>%
+            as.data.frame()
+
+gc()
+
+counts[1,] <- snAnno$.
+
+# rownames(counts) <- NULL
+colnames(counts) <- NULL
+
+write.table(counts,
+          paste0(resDir, fprefix, "_counts_etEh0_famDegs_snAnno.txt"),
+          quote=F,
+          col.names = F,
+          row.names = T,
+          sep = "\t")
+
+rm(counts)
+gc()
+```
+
+### 2.2.2 Bulk
+Map bulk using rowdata
+```{r}
+rowdata <- read.xlsx(paste0(dataDir, "03_Deconvolution_CTVT_seuratObjNoBad_rowData.xlsx")) %>%
+  rename("Symbol"="Dog") %>%
+  filter(Dog %in% genes$Dog) %>%
+  left_join(mappings %>%
+              select(-c(Type))) %>%
+  filter(Mapping =="unique")
+
+# > length(unique(rowdata$Dog))
+# [1] 919
+
+bulk <- DGEobj.utils::convertCounts(readRDS(paste0(dataDir,
+                                  "01_Deconvolution_matchedBulkMatrixCTVT_bulkCountsFinal.rds")), 
+                                       unit = "CPM")%>%
+  as.data.frame() %>%
+  rownames_to_column("ID") %>%
+  filter(ID %in% rowdata$ID) %>%
+  left_join(rowdata) %>%
+  column_to_rownames("Human") %>%
+  select(-c(setdiff(colnames(rowdata), "Human")))
+
+
+bulk <- bulk %>%
+  as.data.frame() %>%
+  rownames_to_column("geneSymbol") %>%
+  # filter(geneSymbol %in% rownames(counts)) %>%
+  t()%>%
+  as.data.frame() %>%
+  rownames_to_column("Sample") %>%
+  t() %>%
+  as.data.frame()
+  
+rownames(bulk) <- NULL
+colnames(bulk) <- NULL
+
+write.table(bulk ,
+            paste0(resDir, fprefix, "_bulkCpm_etEh0_famDegs.txt"), 
+              quote=F,
+              row.names = F,
+              col.names = F,
+              sep = "\t")
+
+test <- read.table(paste0(resDir, fprefix, "_bulkCpm_etEh0_famDegs.txt"), 
+                          sep = "\t")[1:5,]
+```
+
+## 2.3 Delta eH eT = 0 + FAM Degs
+### 2.3.1 Reference
+May crash session!
+```{r}
+genes <- merged %>%
+       filter((purity_correlation < 0 & deltaEtEh < 0 ) | (purity_correlation < 0 & deltaEtEh < 0))
+
+counts <- LayerData(testSubset, 
+                                     assay = "RNA", 
+                                     layer = "counts") 
+
+rm(testSubset)
+gc()
+
+counts <- counts[unique(genes$Human), ]
+
+counts <- t(counts) %>%
+            as.data.frame() %>%
+            # Not actually GeneSymbol, but for matching format. 
+            rownames_to_column("geneSymbol") %>%
+            t() %>%
+            as.data.frame()
+
+gc()
+
+counts[1,] <- snAnno$.
+
+# rownames(counts) <- NULL
+colnames(counts) <- NULL
+
+write.table(counts,
+          paste0(resDir, fprefix, "_counts_etEh0_famDegs_snAnno.txt"),
+          quote=F,
+          col.names = F,
+          row.names = T,
+          sep = "\t")
+
+rm(counts)
+gc()
+```
+
+### 2.3.2 Bulk
+Map bulk using rowdata
+```{r}
+rowdata <- read.xlsx(paste0(dataDir, "03_Deconvolution_CTVT_seuratObjNoBad_rowData.xlsx")) %>%
+  rename("Symbol"="Dog") %>%
+  filter(Dog %in% genes$Dog) %>%
+  left_join(mappings %>%
+              select(-c(Type))) %>%
+  filter(Mapping =="unique")
+
+# > length(unique(rowdata$Dog))
+# [1] 919
+
+bulk <- DGEobj.utils::convertCounts(readRDS(paste0(dataDir,
+                                  "01_Deconvolution_matchedBulkMatrixCTVT_bulkCountsFinal.rds")), 
+                                       unit = "CPM")%>%
+  as.data.frame() %>%
+  rownames_to_column("ID") %>%
+  filter(ID %in% rowdata$ID) %>%
+  left_join(rowdata) %>%
+  column_to_rownames("Human") %>%
+  select(-c(setdiff(colnames(rowdata), "Human")))
+
+
+bulk <- bulk %>%
+  as.data.frame() %>%
+  rownames_to_column("geneSymbol") %>%
+  # filter(geneSymbol %in% rownames(counts)) %>%
+  t()%>%
+  as.data.frame() %>%
+  rownames_to_column("Sample") %>%
+  t() %>%
+  as.data.frame()
+  
+rownames(bulk) <- NULL
+colnames(bulk) <- NULL
+
+write.table(bulk ,
+            paste0(resDir, fprefix, "_bulkCpm_etEh0_famDegs.txt"), 
+              quote=F,
+              row.names = F,
+              col.names = F,
+              sep = "\t")
+
+test <- read.table(paste0(resDir, fprefix, "_bulkCpm_etEh0_famDegs.txt"), 
+                          sep = "\t")[1:5,]
+```
+
+# 3 Signature matrix
+## 3.1 Delta eH eT = 0 + FAM Degs
+```{bash}
+cd ~/gitClones/01_Deconvolution/03_Deconvolution_CTVT/033_Results/03_Deconvolution_CTVT_integrated_cibersort
+
+docker run -v ./input_etEh0_famDegs:/src/data -v ./output_etEh0_famDegs_0_1to100:/src/outdir cibersortx/fractions --username imev2@cam.ac.uk --token 1bfb52b0b1ef7d7db51361fe6aeccac5 --single_cell TRUE --refsample 03_Deconvolution_CTVT_integrated_cibersort_counts_etEh0_famDegs_snAnno.txt --mixture 03_Deconvolution_CTVT_integrated_cibersort_bulkCpm_etEh0_famDegs.txt --fraction 0 --rmbatchSmode TRUE --G.min 1 --G.min 100 --perm 100
+```
+
+
+

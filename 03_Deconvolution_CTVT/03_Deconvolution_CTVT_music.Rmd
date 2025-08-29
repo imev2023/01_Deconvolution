@@ -172,6 +172,10 @@ snCellPropNoBad <- apply(snCellCountsNoBad, 2, function(x) x/sum(x))
 
 colSums(snCellPropNoBad) # Should all be 1.
 
+write.xlsx(snCellCountsNoBad %>% rownames_to_column("Cluster"), paste0(dataDir, "01_Deconvolution_CTVT_seuratObjNoBad_snCellCounts.xlsx"))
+
+test <- read.xlsx( paste0(dataDir, "01_Deconvolution_CTVT_seuratObjNoBad_snCellCounts.xlsx"))
+
 # df = data.frame(cellNames = snAnno, Sample = snCountsFinal_colData$Sample)
 # row.names(df) <- row.names(snCountsFinal_colData)
 # df = new("AnnotatedDataFrame", data = df) # Cell type identities are stored as an AnnotatedDataFrame

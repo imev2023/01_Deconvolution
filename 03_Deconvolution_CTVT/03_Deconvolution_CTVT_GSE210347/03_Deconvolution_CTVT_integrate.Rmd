@@ -1,0 +1,1350 @@
+---
+title: "03_Deconvolution_CTVT_Junho2024"
+output: html_document
+---
+
+# 0 Environment
+## 0.1 Packages
+### 0.1.1 Installs
+```{r}
+# # install.packages("devtools"); # If you don't have it.
+# BiocManager::install("sparseMatrixStats")
+# require("devtools")
+# 
+# # Install dependencies
+# devtools::install_github(repo = "vertesy/Stringendo", ref = "main", upgrade = F)
+# devtools::install_github(repo = "vertesy/CodeAndRoll2", ref = "main", upgrade = F)
+# devtools::install_github(repo = "vertesy/ReadWriter", ref = "main", upgrade = F)
+# devtools::install_github(repo = "vertesy/MarkdownHelpers", ref = "main", upgrade = F)
+# devtools::install_github(repo = "vertesy/MarkdownReports", ref = "main", upgrade = F)
+# devtools::install_github(repo = "vertesy/ggExpress", ref = "main", upgrade = F)
+# 
+# # Recommended
+# devtools::install_github(repo = "vertesy/DatabaseLinke.R", ref = "main", upgrade = F)
+# 
+# # Install Seurat.utils
+# devtools::install_github(repo = "vertesy/Seurat.utils", ref = "main", upgrade = F)
+
+# You may need to install
+# install.packages("pheatmap")
+# install.packages("checkmate")
+
+# https://github.com/bnprks/BPCells/issues/6#issuecomment-1700435556 --> follow
+# 
+# CONDA_SUBDIR=osx-arm64 conda create -n osx-arm hdf5
+# conda activte osx-arm
+
+# 
+# then within env, open R, and run 
+# Sys.setenv(BPCELLS_DEBUG_INSTALL="true")
+# remotes::install_github("bnprks/BPCells/r")
+```
+
+
+### 0.1.1 Library
+```{r echo=F, message=F, warning=FALSE}
+set.seed(123)
+library(tidyverse)
+library(openxlsx)
+library(optparse)
+library(dplyr)
+library(Biobase)
+library(ggpattern)
+library(ggnewscale)
+library(Seurat)
+library(zellkonverter)
+library(dplyr)
+library(infercnv)
+library(BPCells)
+
+# set this option when analyzing large datasets
+options(future.globals.maxSize = 3e+09)
+
+# Define custom color palette
+celltype_colors <- c(
+  
+  
+  "CTVT_CAF.Endo"     = "darkblue",  # Dark Blue
+  "Human_Endothelium" = "#4292C6",  # Light Blue
+  "Human_Fibroblast"  = "#9ECAE1",  # Pale Blue
+  
+  "CTVT_CTVT"         = "grey",  # Goldenrod
+  
+  "CTVT_Myeloid"      = "seagreen",  # Dark Green
+   "Human_Myeloid"     = "#9ab973",  # Light Green
+  
+  
+  "CTVT_Plasma"       = "#4A1486",  # Dark Purple
+  "Human_Plasma"      = "#B39DD8",   # Light Purple
+  
+  "CTVT_Tcells"       = "#FF7D2D",  
+  "Human_Lymphocyte"  = "#FAC846",  
+  "CTVT_Bcells"       = "firebrick"  # Dark Red
+ 
+  
+)
+
+```
+
+## 0.2 Paths
+```{r echo=F, message=FALSE, warning=FALSE}
+wDir <- paste0("~/gitClones/01_Deconvolution/03_Deconvolution_CTVT/")
+fprefix <- "03_Deconvolution_CTVT_GSE21034_integrated"
+dataDir <- paste0(wDir, "/031_Data/")
+resDir <- paste0(wDir, "/033_Results/", fprefix, "/")
+plotDir <- paste0(wDir, "/034_Plots/", fprefix, "/")
+
+dir.create(resDir)
+dir.create(plotDir)
+```
+
+# 1 Data
+Restart session after loading in each test. 
+## 1.1 Seurat test
+Read in data from Luo TME atlas
+"...After filtering, 855,271 high-quality cells were preserved for subsequent analyses."
+Cells have already been processed, integrated, and annotated.
+```{r}
+# human <- readRDS(paste0(dataDir, "GSE210347/GSE210347_subset.rds"))
+```
+
+## 1.2 CTVT test
+```{r}
+# dog <- readRDS(paste0(dataDir, "03_Deconvolution_CTVT_seuratObjNoBad.rds"))
+```
+
+## 1.3 Mapping genes
+Read in file from ~/gitClones/01_Deconvolution/03_Deconvolution_CTVT/032_Scripts/03_Deconvolution_CTVT_GSE210347/..._orthologs.R
+This maps unique genes between the human and CTVT datasets. 
+```{r}
+mappings <- read.xlsx("~/gitClones/01_Deconvolution/03_Deconvolution_CTVT/033_Results/03_Deconvolution_CTVT_GSE210347/03_Deconvolution_CTVT_orthologs_mappingEdit.xlsx")
+
+mappingsUnique <- mappings %>%
+  filter(Mapping == "unique")
+```
+
+## 1.4 Subset tests on mapped genes
+Take human genes from mapping.
+For non-intersecting, unique genes in the dogs (ex. DLA), replace with human gene symbol. 
+https://github.com/satijalab/seurat/issues/1049 --> adjusted the function here. 
+```{r}
+# human <- subset(human, features = mappingsUnique$Human)
+# print(nrow(human))
+# 
+# dog <- subset(dog, features = mappingsUnique$Dog)
+# print(nrow(dog))
+# 
+# # Order mappingsUnique to match order of genes in dog test. Make sure setDiff is empty!!
+# dogGenes <- rownames(dog)
+# 
+# setdiff(dogGenes, mappingsUnique$Dog)
+# 
+# dogRename <- mappingsUnique %>%
+#   filter(Dog %in% rownames(dog)) %>%
+#   arrange(match(Dog, rownames(dog)))
+# 
+# ### Check with DLA to HLA.
+# # dogCheck <- dogRename %>%
+# #   filter(str_detect(Human, "HLA-"))
+# 
+# # dog <- RenameGenesSeurat(dog, newnames = dogRename$Human)
+# RNA <- dog@assays$originalexp@counts %>%
+#   as.data.frame() %>%
+#   rownames_to_column("Dog") %>%
+#   left_join(mappingsUnique) %>%
+#   column_to_rownames("Human") %>%
+#   select(-c("Dog", "Type", "HumanCount", "DogCount", "Mapping"))
+# 
+# # Store in new assay
+# dog@assays$RNA <- RNA
+# 
+# dog
+# 
+# # > setdiff(dogRename$Dog, rownames(dog))
+# # character(0)
+# 
+# dog <- CreateSeurattest(RNA, 
+#                           meta.data=dog@meta.data) 
+# 
+# print(dog)
+# 
+# 
+# saveRDS(dog, paste0(dataDir, "/GSE210347/GSE210347_dog_orthologs.rds"))
+# saveRDS(human, paste0(dataDir, "/GSE210347/GSE210347_human_orthologs.rds"))
+```
+
+
+# 2 Integration
+## 2.1 Read data
+```{r}
+# dog <- readRDS(paste0(dataDir, "/GSE210347/GSE210347_dog_orthologs.rds"))
+# dog$reference <- "dog"
+# print(table(dog$reference))
+# print(head(dog$percent.mt))
+# 
+# human <- readRDS(paste0(dataDir, "/GSE210347/GSE210347_human_orthologs.rds"))
+# 
+# test <- merge(dog, human, add.cell.ids=c("dog", "human"), project="integrationSketch")
+# combined <- JoinLayers(combined)
+# 
+# table(test$reference)
+# 
+# rm(dog, human)
+# gc()
+# 
+# saveRDS(test, paste0(dataDir, "/GSE210347/merged.rds"))
+# test <- readRDS(paste0(dataDir, "/GSE210347/merged.rds"))
+# list <- c(dog, human)
+```
+## 2.2 Adjacent+tumor only
+```{r}
+dog <- readRDS(paste0(dataDir, "/GSE210347/GSE210347_dog_orthologs.rds"))
+dog$reference <- "dog"
+print(table(dog$reference))
+print(head(dog$percent.mt))
+dog$group <- "CTVT"
+
+human <- readRDS(paste0(dataDir, "/GSE210347/GSE210347_human_orthologs.rds"))
+
+Idents(human) <- "group"
+
+humanSubset <- subset(human, idents=c("Tumor", "Adjacent"))
+humanSubset$reference <- "human"
+
+table(Idents(humanSubset))
+
+rm(human)
+gc()
+
+test <- merge(dog, humanSubset, add.cell.ids=c("dog", "humanSub"), project="integrationSketch")
+test <- JoinLayers(test)
+
+table(test$reference)
+
+rm(dog, humanSubset)
+gc()
+
+saveRDS(test, paste0(dataDir, "/GSE210347/merged_humanSubset.rds"))
+
+# test <- readRDS(paste0(dataDir, "/GSE210347/merged_humanSubset.rds"))
+```
+## 2.2 Sketch
+### 2.2.1 All data
+From each dataset, take 10,000 most rep. cells. (determine optimal #?)
+- Had an error https://github.com/satijalab/seurat/issues/7690, updated Seurat to developemtn version (last suggestion to try)
+```{r}
+# test <- JoinLayers(test)
+# test <- NormalizeData(test)
+# test <- split(test, 
+#               f = test$reference)
+# test <- FindVariableFeatures(test, verbose = FALSE)
+# saveRDS(test, paste0(dataDir, "/GSE210347/merged_norm_fvf.rds"))
+
+# test <- readRDS(paste0(dataDir, "/GSE210347/merged_norm_fvf.rds"))
+# 
+# test <- SketchData(test = test, 
+#                    ncells = 10000, 
+#                    method = "LeverageScore", 
+#                    features = VariableFeatures(test),
+#                    sketched.assay = "sketch")
+# 
+# saveRDS(test, paste0(dataDir, "/GSE210347/merged_norm_fvf_sketched.rds"))
+
+test <- readRDS(paste0(dataDir, "/GSE210347/merged_norm_fvf_sketched.rds"))
+test
+gc()
+```
+
+### 2.2.2 Tumor+adjacent only
+From each dataset, take 10,000 most rep. cells. (determine optimal #?)
+- Had an error https://github.com/satijalab/seurat/issues/7690, updated Seurat to developemtn version (last suggestion to try)
+```{r}
+test <- NormalizeData(test)
+gc()
+# test <- split(test,
+#               f = test$reference)
+gc()
+test <- FindVariableFeatures(test, verbose = FALSE)
+gc()
+# saveRDS(test, paste0(dataDir, "/GSE210347/merged_humanSubset_norm_fvf.rds"))
+
+# test <- readRDS(paste0(dataDir, "/GSE210347/merged_humanSubset_norm_fvf.rds"))
+
+test <- SketchData(test = test,
+                   ncells = 10000,
+                   method = "LeverageScore",
+                   features = VariableFeatures(test),
+                   sketched.assay = "sketch")
+
+saveRDS(test, paste0(dataDir, "/GSE210347/merged_humanSubset_norm_fvf_sketched.rds"))
+
+# test <- readRDS(paste0(dataDir, "/GSE210347/merged_humanSubset_norm_fvf_sketched.rds"))
+test
+gc()
+```
+
+## 2.3 Integrate
+### 2.3.1 Integration on all sketched data
+```{r}
+# test$cellTypeMerged <- ifelse(is.na(test$celltype)==T,
+#                               paste0("CTVT_", test$manual.log.anot.fine), 
+#                               paste0("Human_", test$celltype))
+# 
+# test$sampleMerged <- ifelse(is.na(test$SampleID)==T,
+#                               paste0("CTVT_", test$Sample), 
+#                               paste0("Human_", test$SampleID))
+# table(test$cellTypeMerged)
+# 
+# DefaultAssay(test) <- "sketch"
+# 
+# test <- FindVariableFeatures(test, verbose = F)
+# 
+# test <- ScaleData(test, verbose = F, vars.to.regress = c("sampleMerged", "percent.mt"))
+# 
+# test <- RunPCA(test, verbose = F)
+# 
+# 
+# DimHeatmap(test, dims = 1, cells = 500, balanced = TRUE)
+# 
+# ElbowPlot(test, ndims = 30)
+
+# saveRDS(test, paste0(dataDir, "/GSE210347/merged_fvf_scale_pca.rds"))
+
+# test <- readRDS(paste0(dataDir, "/GSE210347/merged_fvf_scale_pca.rds"))
+# 
+# DefaultAssay(test) <- "sketch"
+# 
+# # integrate the datasets
+# test <- IntegrateLayers(test, 
+#                         method = RPCAIntegration, 
+#                         orig = "pca", 
+#                         new.reduction = "integrated.rpca",
+#                         dims = 1:30,
+#                         verbose = T)
+# 
+# # cluster the integrated data
+# test <- FindNeighbors(test, reduction = "integrated.rpca", dims = 1:30)
+# test <- FindClusters(test, resolution = 2)
+# test <- RunUMAP(test, reduction = "integrated.rpca", dims = 1:30, return.model = T, verbose = F)
+# 
+# # saveRDS(test, paste0(dataDir, "/GSE210347/merged_integrated.rds"))
+# 
+# plot.s1 <- DimPlot(test, 
+#                    group.by = "sampleMerged", 
+#                    reduction = "umap") +
+#   NoLegend()
+# plot.s2 <- DimPlot(test, 
+#                    group.by = "cellTypeMerged", 
+#                    reduction = "umap")
+# plot.s3 <- DimPlot(test, 
+#                    group.by = "reference", 
+#                    reduction = "umap")
+# 
+# plot.s4 <- DimPlot(test, 
+#                    group.by = "seurat_clusters", 
+#                    reduction = "umap")
+# 
+# 
+# pdf(paste0(plotDir, "/umap/", fprefix, "_merged_integrated_sampleMerged.pdf"), 
+#     height=10, 
+#     width=10)
+# print(plot.s1)
+# dev.off()
+# 
+# 
+# pdf(paste0(plotDir, "/umap/", fprefix, "_merged_integrated_cellTypeMerged.pdf"), 
+#     height=10, 
+#     width=10)
+# print(plot.s2)
+# dev.off()
+# 
+# pdf(paste0(plotDir, "/umap/", fprefix, "_merged_integrated_reference.pdf"), 
+#     height=10, 
+#     width=10)
+# print(plot.s3)
+# dev.off()
+# 
+# pdf(paste0(plotDir, "/umap/", fprefix, "_merged_integrated_seurat_clusters.pdf"), 
+#     height=10, 
+#     width=10)
+# print(plot.s4)
+# dev.off()
+
+```
+
+### 2.3.2 Integration on all sketched data - scale with sample + tissue + reference
+```{r}
+# test$cellTypeMerged <- ifelse(is.na(test$celltype)==T,
+#                               paste0("CTVT_", test$manual.log.anot.fine),
+#                               paste0("Human_", test$celltype))
+# 
+# test$sampleMerged <- ifelse(is.na(test$SampleID)==T,
+#                               paste0("CTVT_", test$Sample),
+#                               paste0("Human_", test$SampleID))
+# 
+# test$tissueMerged <- ifelse(test$reference=="dog",
+#                               "CTVT",
+#                               test$tissue)
+# 
+# test$tissueMerged <- ifelse(test$reference=="dog",
+#                               "CTVT",
+#                               test$tissue)
+# 
+# test$groupMerged <- ifelse(is.na(test$group)==T,
+#                               "CTVT",
+#                               test$group)
+# 
+# DefaultAssay(test) <- "sketch"
+# 
+# test <- FindVariableFeatures(test, verbose = T)
+# 
+# gc()
+# 
+# test <- ScaleData(test, verbose = T, vars.to.regress = c("sampleMerged", "percent.mt",
+#                                                          "tissueMerged", "reference"))
+# 
+# gc()
+# 
+# test <- RunPCA(test, verbose = F)
+# 
+# gc()
+# 
+# DimHeatmap(test, dims = 1:10, cells = 500, balanced = TRUE)
+# 
+# ElbowPlot(test, ndims = 30)
+# 
+# DefaultAssay(test) <- "sketch"
+# 
+# # integrate the datasets
+# test <- IntegrateLayers(test, 
+#                         method = RPCAIntegration, 
+#                         orig = "pca", 
+#                         new.reduction = "integrated.rpca",
+#                         dims = 1:30,
+#                         verbose = T)
+# 
+# # cluster the integrated data
+# test <- FindNeighbors(test, reduction = "integrated.rpca", dims = 1:30)
+# test <- FindClusters(test, resolution = 2)
+# test <- RunUMAP(test, reduction = "integrated.rpca", dims = 1:30, return.model = T, verbose = F)
+# 
+# saveRDS(test, paste0(dataDir, "/GSE210347/merged_integrated_sampTissRef.rds"))
+
+
+DefaultAssay(test) <- "sketch"
+
+plot.s1 <- DimPlot(test, 
+                   group.by = "sampleMerged", 
+                   reduction = "umap") +
+  NoLegend()
+plot.s2 <- DimPlot(test, 
+                   group.by = "cellTypeMerged", 
+                   reduction = "umap",
+                   cols=celltype_colors)
+plot.s3 <- DimPlot(test, 
+                   group.by = "reference", 
+                   reduction = "umap")
+
+plot.s4 <- DimPlot(test, 
+                   group.by = "seurat_clusters", 
+                   reduction = "umap")
+
+plot.s5 <- DimPlot(test, 
+                   group.by = "tissueMerged", 
+                   reduction = "umap")
+
+plot.s6 <- DimPlot(test, 
+                   group.by = "groupMerged", 
+                   reduction = "umap")
+
+
+pdf(paste0(plotDir, "/umap/", fprefix, "_merged_integrated_sampTissRef_sampleMerged.pdf"), 
+    height=10, 
+    width=10)
+print(plot.s1)
+dev.off()
+
+
+pdf(paste0(plotDir, "/umap/", fprefix, "_merged_integrated_sampTissRef_cellTypeMerged.pdf"), 
+    height=10, 
+    width=10)
+print(plot.s2)
+dev.off()
+
+pdf(paste0(plotDir, "/umap/", fprefix, "_merged_integrated_sampTissRef_reference.pdf"), 
+    height=10, 
+    width=10)
+print(plot.s3)
+dev.off()
+
+pdf(paste0(plotDir, "/umap/", fprefix, "_merged_integrated_sampTissRef_seurat_clusters.pdf"), 
+    height=10, 
+    width=10)
+print(plot.s4)
+dev.off()
+
+pdf(paste0(plotDir, "/umap/", fprefix, "_merged_integrated_sampTissRef_tissueMerged.pdf"), 
+    height=10, 
+    width=10)
+print(plot.s5)
+dev.off()
+
+pdf(paste0(plotDir, "/umap/", fprefix, "_merged_integrated_sampTissRef_groupMerged.pdf"), 
+    height=10, 
+    width=10)
+print(plot.s6)
+dev.off()
+```
+
+### 2.3.3 Integration on adjacent + tumor data (n=53 and n=148) - scale with sample + tissue + reference
+
+## 2.4 FAM and Project Integration
+After integrating a subset of the atoms in each dataset, load full datasets back in individually, and project integration to integrate all cells. The inegrated.rpca.full embeds all cells in the dataset. 
+Assay sketch = all sketched cells, in memory
+Assay RNA = full dataset on disk. 
+
+### 2.4.1 All human data 
+```{r}
+# test <- readRDS(paste0(dataDir, "/GSE210347/merged_integrated_sampTissRef.rds"))
+# test
+# gc()
+
+# test[["sketch"]] <- JoinLayers(test[["sketch"]])
+
+# c10_markers <- FindMarkers(object = object, ident.1 = 10, max.cells.per.ident = 500, only.pos = TRUE)
+# head(c10_markers)
+
+# resplit the sketched cell assay into layers this is required to project the integration onto
+# all cells
+
+# test[["sketch"]] <- split(test[["sketch"]], f = test$reference)
+
+# test <- ProjectIntegration(object = test, 
+#                            sketched.assay = "sketch", 
+#                            features = features,
+#                            assay = "RNA", 
+#                            reduction = "integrated.rpca")
+# 
+# test <- ProjectData(object = test, 
+#                     sketched.assay = "sketch", 
+#                     assay = "RNA", 
+#                     sketched.reduction = "integrated.rpca.full",
+#                     full.reduction = "integrated.rpca.full", 
+#                     dims = 1:30, 
+#                     refdata = list(celltype.full = "cellTypeMerged"))
+# 
+# test <- RunUMAP(test, reduction = "integrated.rpca.full", dims = 1:30, reduction.name = "umap.full",
+#     reduction.key = "UMAP_full_")
+
+# saveRDS(test, paste0(dataDir, "/GSE210347/merged_fullyIntegrated_sampTissRef.rds"))
+# 
+# p1 <- DimPlot(test, reduction = "umap.full", group.by = "sampleMerged", alpha = 0.1)
+# p2 <- DimPlot(test, reduction = "umap.full", group.by = "cellTypeMerged", alpha = 0.1)
+# p1 + p2 
+
+test <- readRDS( paste0(dataDir, "/GSE210347/merged_fullyIntegrated_sampTissRef.rds"))
+
+DefaultAssay(test) <- "RNA"
+
+plot.s1 <- DimPlot(test, 
+                   group.by = "sampleMerged", 
+                   reduction = "umap.full"
+                   ) +
+  NoLegend()
+
+plot.s2 <- DimPlot(test, 
+                   group.by = "cellTypeMerged", 
+                   reduction = "umap.full",
+                   alpha=0.1,
+                   cols=celltype_colors)
+plot.s3 <- DimPlot(test, 
+                   group.by = "reference", 
+                   alpha=0.1,
+                   reduction = "umap.full")
+
+plot.s4 <- DimPlot(test, 
+                   group.by = "seurat_clusters", 
+                   alpha=0.1,
+                   reduction = "umap.full")
+
+plot.s5 <- DimPlot(test, 
+                   group.by = "tissueMerged", 
+                   alpha=0.1,
+                   reduction = "umap.full")
+
+plot.s6 <- DimPlot(test, 
+                   group.by = "groupMerged", 
+                   alpha=0.1,
+                   reduction = "umap.full")
+
+
+pdf(paste0(plotDir, "/umap/", fprefix, "_merged_fullyIntegrated_sampTissRef_sampleMerged.pdf"), 
+    height=10, 
+    width=10)
+print(plot.s1)
+dev.off()
+
+
+pdf(paste0(plotDir, "/umap/", fprefix, "_merged_fullyIntegrated_sampTissRef_cellTypeMerged.pdf"), 
+    height=10, 
+    width=10)
+print(plot.s2)
+dev.off()
+
+pdf(paste0(plotDir, "/umap/", fprefix, "_merged_fullyIntegrated_sampTissRef_reference.pdf"), 
+    height=10, 
+    width=10)
+print(plot.s3)
+dev.off()
+
+pdf(paste0(plotDir, "/umap/", fprefix, "_merged_fullyIntegrated_sampTissRef_seurat_clusters.pdf"), 
+    height=10, 
+    width=10)
+print(plot.s4)
+dev.off()
+
+pdf(paste0(plotDir, "/umap/", fprefix, "_merged_fullyIntegrated_sampTissRef_tissueMerged.pdf"), 
+    height=10, 
+    width=10)
+print(plot.s5)
+dev.off()
+
+pdf(paste0(plotDir, "/umap/", fprefix, "_merged_fullyIntegrated_sampTissRef_groupMerged.pdf"), 
+    height=10, 
+    width=10)
+print(plot.s6)
+dev.off()
+```
+
+### 2.4.2 Subset CTVT cluster + all human data 
+```{r}
+test <- readRDS( paste0(dataDir, "/GSE210347/merged_fullyIntegrated_sampTissRef.rds"))
+gc()
+```
+
+#### 2.4.2.1 Subset
+```{r}
+Idents(test) <- "cellTypeMerged"
+
+testSubset <- subset(test, idents = c("CTVT_CTVT",
+                                      "Human_Endothelium",
+                                      "Human_Fibroblast",
+                                      "Human_Myeloid",
+                                     "Human_Plasma",
+                                     "Human_Lymphocyte"))
+
+rm(test)
+gc()
+
+testSubset <- JoinLayers(testSubset)
+```
+
+
+#### 2.4.2.2 FAM
+```{r}
+# famWilcox <- FindAllMarkers(testSubset, 
+#                       group.by = "cellTypeMerged", 
+#                       min.pct = 0.05)
+# 
+# write.xlsx(famWilcox, 
+#            paste0(resDir, "findAllMarkers/", fprefix, "_merged_fullyintegrated_famWilcox.xlsx"))
+
+famWilcox <- read.xlsx(paste0(resDir, "findAllMarkers/", fprefix, "_merged_fullyintegrated_famWilcox.xlsx"))
+
+top10 <- famWilcox %>%
+  group_by(cluster) %>%
+  filter(p_val_adj < 0.05 & avg_log2FC > 2.5) %>%
+  arrange(avg_log2FC) %>%
+  slice_head(n=10)
+
+table(top10$cluster)
+
+top20 <- famWilcox %>%
+  group_by(cluster) %>%
+  filter(p_val_adj < 0.05 & avg_log2FC > 2.5) %>%
+  arrange(avg_log2FC) %>%
+  slice_head(n=20)
+
+table(top20$cluster)
+
+gc()
+
+### Some may be overlapping?
+famWilcoxEdit <- famWilcox %>%
+  mutate(top10 = ifelse(gene %in% top10$gene, 
+                        "y", 
+                        "n"),
+         top20 = ifelse(gene %in% top20$gene, 
+                        "y", 
+                        "n"))
+
+# Some of the top marker genes may be shared by multiple cell types (but not necessarily when filtered by log2fc and pval.)
+table(famWilcoxEdit$top10)
+table(famWilcoxEdit$top20)
+```
+
+#### 2.4.2.3 Overlap with Adrian's list
+```{r}
+adrianDf <- read_csv(paste0(dataDir, "ctvt_rnaseq_expression-2.csv"))
+head(adrianDf)
+
+adrianCorr <- read.xlsx(paste0(dataDir, "CTVT_expression_purity_correlations.xlsx")) %>%
+  dplyr::rename("Symbol"="gene")
+
+geneDf <- adrianDf %>%
+  group_by( GeneID, Symbol) %>% # Group by SNP (Location)
+  mutate(etEdit = ifelse(eT == Inf, 
+                             50000,
+                             eT)) %>%
+  summarise(sampleCount = n(), 
+            medianEh = median(eH), 
+            medianEt = median(eT),
+            medianEtEdit = median(etEdit), 
+            sumEt = sum(eT),
+            sumEtEdit = sum(etEdit),
+            sumEh = sum(eH)) %>%
+  left_join(adrianCorr, 
+            by = join_by(Symbol))
+
+plotDf <- geneDf %>%
+  mutate(deltaEtEh = medianEt-medianEh,
+         medianEhLog = log1p(medianEh), 
+         medianEtLog = log1p(medianEt),
+         medianEtEditLog = log10(medianEtEdit),
+         labelTH = ifelse(medianEh > 1000 & medianEt > 1000,
+                            Symbol, 
+                            NA),
+         labelNeither = ifelse(medianEh < 1000 & medianEt < 1000,
+                            Symbol, 
+                            NA),
+         labelH =  ifelse(medianEh > 1000 & medianEt < 1000,
+                            Symbol, 
+                            NA),
+         labelT = ifelse(medianEh < 1000 & medianEt > 1000,
+                            Symbol, 
+                            NA))
+
+
+tempPlotDf <- plotDf %>%
+  dplyr::rename("variantCount"="sampleCount") %>%
+  mutate(
+    fillPos = medianEtEdit,
+    fillNeg = medianEh
+  )
+
+# Max for scaling
+q1 <- subset(tempPlotDf, purity_correlation > 0 & deltaEtEh > 0)
+q4 <- subset(tempPlotDf, purity_correlation < 0 & deltaEtEh < 0)
+
+
+# Filter points with abs(deltaEtEh) > 500 in Q1 and Q4
+# q1 = tumor
+q1Label100 <- subset(q1, abs(deltaEtEh) > 100)
+
+# q4 = host
+q4Label100 <- subset(q4, abs(deltaEtEh) > 100)
+```
+
+### 8.3.2 Filter genes 
+```{r}
+famWilcox <- read.xlsx(paste0(resDir, 
+                              "findAllMarkers/",
+                              fprefix,
+                        "_merged_fullyintegrated_famWilcox.xlsx"))
+
+famWilcoxCtvtDegs <- famWilcox %>%
+  filter(p_val_adj < 0.05 & avg_log2FC > 2.5 & cluster == "CTVT_CTVT") 
+
+intersectingCtvt <- intersect(famWilcoxCtvtDegs$gene, q1$Symbol) ### 1216 genes intersecting with q100
+
+
+famWilcoxHostDegs <- famWilcox %>%
+  filter(p_val_adj < 0.05 & avg_log2FC > 2.5 & cluster != "CTVT_CTVT") 
+
+intersectingHostRemove <- intersect(famWilcoxHostDegs$gene, q1Label100$Symbol) ### 9 genes intersect with tumor!
+
+intersectingHost <- intersect(famWilcoxHostDegs$gene, q4$Symbol) ### 153 genes 
+
+famWilcoxFilter10 <- famWilcox %>%
+  filter(p_val_adj < 0.05 & avg_log2FC > 2.5) %>%
+  filter(gene %in% c(intersectingCtvt, intersectingHost)) %>%
+  group_by(cluster) %>%
+  arrange(avg_log2FC) %>%
+  slice_head(n=10)
+
+table(famWilcoxFilter10$cluster)
+
+famWilcoxFilter20 <- famWilcox %>%
+  filter(p_val_adj < 0.05 & avg_log2FC > 2.5) %>%
+  filter(gene %in% c(intersectingCtvt, intersectingHost)) %>%
+  group_by(cluster) %>%
+  arrange(avg_log2FC) %>%
+  slice_head(n=20)
+
+table(famWilcoxFilter20$cluster)
+
+
+famWilcoxEdit <- famWilcoxEdit %>%
+  mutate(top10q1q4 = ifelse(gene %in% famWilcoxFilter10$gene, 
+                        "y", 
+                        "n"),
+         top20q1q4 = ifelse(gene %in% famWilcoxFilter20$gene, 
+                        "y", 
+                        "n"))
+table(famWilcoxEdit$top10)
+table(famWilcoxEdit$top10q1q4)
+table(famWilcoxEdit$top20q1q4)
+
+write.xlsx(famWilcoxEdit, paste0(resDir, "findAllMarkers/",
+                              fprefix,
+                        "_merged_fullyintegrated_famWilcoxEdit.xlsx"))
+```
+
+### 8.3.3 Feature plots
+#### 8.3.3.1 CTVT 
+Merged and split by sample
+```{r}
+for(g in intersectingCtvt){
+
+  feat <- FeaturePlot(testSubset,
+                      reduction = "umap.full",
+                      features=g, 
+                      order = T) +
+
+    ggtitle(paste0("q1 + CTVT Wilcox DEG - ", g))
+
+  featSamp <- FeaturePlot(testSubset,
+                          reduction = "umap.full",
+                          features=g,
+                          split.by = "reference", 
+                      order = T)
+
+  pdf(paste0(plotDir, 
+             "feature/", 
+             fprefix,
+             "_tumorSpecificIntersect_",
+             g, "_expression.pdf"),
+      height=4,
+      width=4)
+
+  print(feat)
+  print(featSamp)
+
+  dev.off()
+
+
+}
+```
+
+#### 8.3.3.2 Host
+```{r}
+###### 2.1.4 Loop through NON CTVT FAM DEG's --> check against genetic deconv list. Test positive genes first.
+for(ctype in unique(famWilcox$cluster)){
+  if(ctype=="CTVT_CTVT"){
+    next
+  }
+
+  tempFamWilcoxDegs <- famWilcox %>%
+    filter(p_val_adj < 0.05 & avg_log2FC > 2.5 & cluster == ctype)
+
+  tempIntersecting <- intersect(tempFamWilcoxDegs$gene, q4Label100$Symbol)
+
+  print(paste0("Cell type: ", ctype, " - Intersecting: ", length(tempIntersecting)))
+
+  # tempPlotDir <- paste0("hostSpecificIntersect", ctype)
+
+  for(tg in tempIntersecting){
+
+     feat <- FeaturePlot(testSubset,
+                      reduction = "umap.full",
+                      features=g, 
+                      order = T) +
+
+    ggtitle(paste0("q4 + ", ctype, " Wilcox DEG - ", g))
+
+  # featSamp <- FeaturePlot(testSubset,
+  #                         reduction = "umap.full",
+  #                         features=g,
+  #                         split.by = "reference", 
+  #                     order = T)
+
+
+      pdf(paste0(plotDir, 
+             "feature/", 
+             fprefix,
+             "_", ctype, 
+             "SpecificIntersect_",
+             g, "_expression.pdf"),
+      height=4,
+      width=4)
+
+  print(feat)
+  # print(featSamp)
+
+  dev.off()
+
+  }
+
+}
+```
+
+### 8.3.4 Upset
+#### 8.3.4.1 All FAM
+```{r}
+allDegs <- famWilcox %>%
+    filter(p_val_adj < 0.05 & avg_log2FC > 2.5) %>%
+  rename("Symbol"="gene") 
+
+candCTVT <- allDegs %>% 
+  filter(cluster == "CTVT_CTVT") %>% 
+  dplyr::select(Symbol)
+
+ctvtSet <- candCTVT$Symbol
+
+
+candFib <- allDegs %>% 
+  filter(cluster == "Human_Fibroblast") %>% 
+  dplyr::select(Symbol)
+
+fibSet <- candFib$Symbol
+
+candEndo <- allDegs %>% 
+  filter(cluster == "Human_Endothelium") %>% 
+  dplyr::select(Symbol)
+
+endoSet <- candEndo$Symbol
+
+
+candPlasma <- allDegs %>% 
+  filter(cluster == "Human_Plasma") %>% 
+  dplyr::select(Symbol)
+
+plasmaSet <- candPlasma$Symbol
+
+candMyeloid <- allDegs %>% 
+  filter(cluster == "Human_Myeloid") %>% 
+  dplyr::select(Symbol)
+
+myeloidSet <- candMyeloid$Symbol
+
+candLymphocyte <- allDegs %>% 
+  filter(cluster == "Human_Lymphocyte") %>% 
+  dplyr::select(Symbol)
+
+lymphocyteSet <- candLymphocyte$Symbol
+
+geneSets <- list("ctvt"=ctvtSet,
+             "lymphocyte"=lymphocyteSet,
+             "myeloid"=myeloidSet,
+             "fib"=fibSet,
+             "plasma"=plasmaSet,
+             "endo"=endoSet)
+
+
+genes <- sort(unique(unlist(geneSets)))
+
+sets <- t(+sapply(geneSets, "%in%", x = genes)) %>%
+  t() %>%
+  as.data.frame()
+
+rownames(sets) <- genes
+
+sets <- sets %>%
+  rownames_to_column("Gene")
+
+upsetPlot <- upset(sets,
+      sets = c("ctvt", "lymphocyte", "myeloid", "fib", "endo", "plasma"),
+      # keep.order = TRUE,
+      nintersects = NA, # show all intersections
+      order.by = "freq") # optional, could be degree or freq
+
+upsetPlot <- upset(
+  sets,
+  sets = c("ctvt", "lymphocyte", "myeloid", "fib", "endo", "plasma"),
+  keep.order = TRUE,
+  nintersects = NA,
+  sets.bar.color = c(
+    ctvt = "#E41A1C",
+    caf.endo = "gold",
+    myeloid = "#4DAF4A",
+    plasma = "skyblue",
+    tcell = "cornflowerblue",
+    bcell = "pink"
+  )
+)
+
+
+uniqueGenes <- sets %>%
+  column_to_rownames("Gene") %>%
+  mutate(rowsum = rowSums(.)) %>%
+  filter(rowsum==1)
+
+
+upsetData <- sets %>%
+  unite(col = "intersection", -c("Gene"), sep = "") %>%
+  group_by(intersection) %>%
+  summarise(list = list(Gene)) %>%
+  mutate(list = setNames(list, intersection)) %>%
+  pull(list)
+
+pdf(paste0(plotDir, "/upset/", fprefix, "_famDegs_intersection.pdf"), 
+    height=6, 
+    width=8)
+print(upsetPlot)
+dev.off()
+```
+
+#### 8.3.4.2 Overlap with eTeH 0
+```{r}
+allDegs <- famWilcox %>%
+    filter(p_val_adj < 0.05 & avg_log2FC > 2.5) %>%
+  rename("Symbol"="gene") %>%
+  left_join(plotDf)
+
+candCTVT <- allDegs %>% 
+  filter(cluster == "CTVT_CTVT" & purity_correlation > -0) %>% 
+  dplyr::select(Symbol, medianEh, purity_correlation, avg_log2FC)
+
+ctvtSet <- candCTVT$Symbol
+
+
+candFib <- allDegs %>% 
+  filter(cluster == "Human_Fibroblast" & purity_correlation < -0) %>% 
+  dplyr::select(Symbol, medianEh, purity_correlation, avg_log2FC)
+
+fibSet <- candFib$Symbol
+
+candEndo <- allDegs %>% 
+  filter(cluster == "Human_Endothelium" & purity_correlation < -0) %>% 
+  dplyr::select(Symbol, medianEh, purity_correlation, avg_log2FC)
+
+endoSet <- candEndo$Symbol
+
+
+candPlasma <- allDegs %>% 
+  filter(cluster == "Human_Plasma" & purity_correlation < -0) %>% 
+  dplyr::select(Symbol, medianEh, purity_correlation, avg_log2FC)
+
+plasmaSet <- candPlasma$Symbol
+
+candMyeloid <- allDegs %>% 
+  filter(cluster == "Human_Myeloid" & purity_correlation < -0) %>% 
+  dplyr::select(Symbol, medianEh, purity_correlation, avg_log2FC)
+
+myeloidSet <- candMyeloid$Symbol
+
+candLymphocyte <- allDegs %>% 
+  filter(cluster == "Human_Lymphocyte" & purity_correlation < -0) %>% 
+  dplyr::select(Symbol, medianEh, purity_correlation, avg_log2FC)
+
+lymphocyteSet <- candLymphocyte$Symbol
+
+geneSets <- list("ctvt"=ctvtSet,
+             "lymphocyte"=lymphocyteSet,
+             "myeloid"=myeloidSet,
+             "fib"=fibSet,
+             "plasma"=plasmaSet,
+             "endo"=endoSet)
+
+
+genes <- sort(unique(unlist(geneSets)))
+
+sets <- t(+sapply(geneSets, "%in%", x = genes)) %>%
+  t() %>%
+  as.data.frame()
+
+rownames(sets) <- genes
+
+sets <- sets %>%
+  rownames_to_column("Gene")
+
+upsetPlot <- upset(sets,
+      sets = c("ctvt", "lymphocyte", "myeloid", "fib", "endo", "plasma"),
+      # keep.order = TRUE,
+      nintersects = NA, # show all intersections
+      order.by = "freq") # optional, could be degree or freq
+
+upsetPlot <- upset(
+  sets,
+  sets = c("ctvt", "lymphocyte", "myeloid", "fib", "endo", "plasma"),
+  keep.order = TRUE,
+  nintersects = NA,
+  sets.bar.color = c(
+    ctvt = "#E41A1C",
+    caf.endo = "gold",
+    myeloid = "#4DAF4A",
+    plasma = "skyblue",
+    tcell = "cornflowerblue",
+    bcell = "pink"
+  )
+)
+
+
+uniqueGenes <- sets %>%
+  column_to_rownames("Gene") %>%
+  mutate(rowsum = rowSums(.)) %>%
+  filter(rowsum==1)
+
+
+upsetData <- sets %>%
+  unite(col = "intersection", -c("Gene"), sep = "") %>%
+  group_by(intersection) %>%
+  summarise(list = list(Gene)) %>%
+  mutate(list = setNames(list, intersection)) %>%
+  pull(list)
+
+write.xlsx(sets, paste0(resDir, fprefix, "_geneCorrelations_famDegs.xlsx"))
+
+pdf(paste0(plotDir, "/upset/", fprefix, "_q1q4Genes_famDegs_intersection.pdf"), 
+    height=6, 
+    width=8)
+print(upsetPlot)
+dev.off()
+```
+
+
+#### 8.3.4.3 Overlap with eTeH 100
+```{r}
+
+allDegs <- famWilcox %>%
+    filter(p_val_adj < 0.05 & avg_log2FC > 2.5) %>%
+  rename("Symbol"="gene") %>%
+  left_join(plotDf)
+
+candCTVT <- allDegs %>% 
+  filter(cluster == "CTVT_CTVT" & purity_correlation > -0&deltaEtEh > 100) %>% 
+  dplyr::select(Symbol, medianEh, purity_correlation, avg_log2FC)
+
+ctvtSet <- candCTVT$Symbol
+
+
+candFib <- allDegs %>% 
+  filter(cluster == "Human_Fibroblast" & purity_correlation < -0&deltaEtEh < -100) %>% 
+  dplyr::select(Symbol, medianEh, purity_correlation, avg_log2FC)
+
+fibSet <- candFib$Symbol
+
+candEndo <- allDegs %>% 
+  filter(cluster == "Human_Endothelium" & purity_correlation < -0&deltaEtEh < -100) %>% 
+  dplyr::select(Symbol, medianEh, purity_correlation, avg_log2FC)
+
+endoSet <- candEndo$Symbol
+
+
+candPlasma <- allDegs %>% 
+  filter(cluster == "Human_Plasma" & purity_correlation < -0&deltaEtEh < -100) %>% 
+  dplyr::select(Symbol, medianEh, purity_correlation, avg_log2FC)
+
+plasmaSet <- candPlasma$Symbol
+
+candMyeloid <- allDegs %>% 
+  filter(cluster == "Human_Myeloid" & purity_correlation < -0&deltaEtEh < -100) %>% 
+  dplyr::select(Symbol, medianEh, purity_correlation, avg_log2FC)
+
+myeloidSet <- candMyeloid$Symbol
+
+candLymphocyte <- allDegs %>% 
+  filter(cluster == "Human_Lymphocyte" & purity_correlation < -0 &deltaEtEh < -100) %>% 
+  dplyr::select(Symbol, medianEh, purity_correlation, avg_log2FC)
+
+lymphocyteSet <- candLymphocyte$Symbol
+
+geneSets <- list("ctvt"=ctvtSet,
+             "lymphocyte"=lymphocyteSet,
+             "myeloid"=myeloidSet,
+             "fib"=fibSet,
+             "plasma"=plasmaSet,
+             "endo"=endoSet)
+
+
+genes <- sort(unique(unlist(geneSets)))
+
+sets <- t(+sapply(geneSets, "%in%", x = genes)) %>%
+  t() %>%
+  as.data.frame()
+
+rownames(sets) <- genes
+
+sets <- sets %>%
+  rownames_to_column("Gene")
+
+upsetPlot <- upset(sets,
+      sets = c("ctvt", "lymphocyte", "myeloid", "fib", "endo", "plasma"),
+      # keep.order = TRUE,
+      nintersects = NA, # show all intersections
+      order.by = "freq") # optional, could be degree or freq
+
+upsetPlot <- upset(
+  sets,
+  sets = c("ctvt", "lymphocyte", "myeloid", "fib", "endo", "plasma"),
+  keep.order = TRUE,
+  nintersects = NA,
+  sets.bar.color = c(
+    ctvt = "#E41A1C",
+    caf.endo = "gold",
+    myeloid = "#4DAF4A",
+    plasma = "skyblue",
+    tcell = "cornflowerblue",
+    bcell = "pink"
+  )
+)
+
+
+uniqueGenes <- sets %>%
+  column_to_rownames("Gene") %>%
+  mutate(rowsum = rowSums(.)) %>%
+  filter(rowsum==1)
+
+
+upsetData <- sets %>%
+  unite(col = "intersection", -c("Gene"), sep = "") %>%
+  group_by(intersection) %>%
+  summarise(list = list(Gene)) %>%
+  mutate(list = setNames(list, intersection)) %>%
+  pull(list)
+
+write.xlsx(sets, paste0(resDir, fprefix, "_geneCorrelations_famDegs.xlsx"))
+
+pdf(paste0(plotDir, "/upset/", fprefix, "_q1q4Genes_famDegs_intersection_100.pdf"), 
+    height=6, 
+    width=8)
+print(upsetPlot)
+dev.off()
+```
+
+# --------
+### 2.4.2 Add merged cell type information 
+```{r}
+test <- readRDS( paste0(dataDir, "/GSE210347/merged_fullyIntegrated_sampTissRef.rds"))
+gc()
+```
+
+#### 2.4.2.1 Rename
+```{r}
+test$cellTypeAgg <- ifelse(test$cellTypeMerged == "CTVT_CAF.Endo" | test$cellTypeMerged == "Human_Fibroblast" |test$cellTypeMerged == "Human_Endothelium" ,
+                           "All_CAF.Endo", 
+                                  ifelse(test$cellTypeMerged == "CTVT_CTVT",
+                                  "All_CTVT",
+                                  ifelse(test$cellTypeMerged == "CTVT_Myeloid"| test$cellTypeMerged == "Human_Myeloid",
+                                  "All_Myeloid", 
+                                  ifelse(test$cellTypeMerged == "CTVT_Bcells"|test$cellTypeMerged == "CTVT_Tcells"| test$cellTypeMerged == "Human_Lymphocyte",
+                                  "All_Lymphocyte", 
+                                  ifelse(test$cellTypeMerged == "CTVT_Plasma"| test$cellTypeMerged == "Human_Plasma",
+                                  "All_Plasma", "none")))))
+
+table(test$cellTypeAgg)
+
+Idents(test) <- "cellTypeAgg"
+
+for (ct in unique(test$cellTypeAgg)){
+  print(ct)
+  
+  sub <- subset(test, 
+                idents = ct)
+  
+  plot <- DimPlot(sub, 
+                   group.by = "cellTypeMerged", 
+                   reduction = "umap.full",
+                   alpha=0.1,
+                   cols=celltype_colors)
+  
+  pdf(paste0(plotDir, "/umap/", fprefix, "_merged_fullyIntegrated_sampTissRef_splitByCellTypeAgg_", ct, ".pdf"), height=10, 
+    width=10)
+  print(plot)
+  dev.off()
+}
+
+saveRDS(test, paste0(dataDir, "/GSE210347/merged_fullyIntegrated_sampTissRef.rds"))
+```
+
+#### 2.4.2.1 Rename
+```{r}
+Idents(test) <- "cellTypeMerged"
+
+testSubset <- subset(test, idents = c("CTVT_CTVT",
+                                      "Human_Endothelium",
+                                      "Human_Fibroblast",
+                                      "Human_Myeloid",
+                                     "Human_Plasma",
+                                     "Human_Lymphocyte"))
+
+rm(test)
+gc()
+
+testSubset <- JoinLayers(testSubset)
+```
+
+
+#### 2.4.2.2 FAM
+```{r}
+famWilcox <- FindAllMarkers(testSubset, 
+                      group.by = "cellTypeMerged", 
+                      min.pct = 0.05)
+
+write.xlsx(famWilcox, 
+           paste0(resDir, "findAllMarkers/", fprefix, "_merged_fullyintegrated_famWilcox.xlsx"))
+
+gc()
+```
+
+#### 2.4.2.3 Overlap with Adrian's list
+```{r}
+adrianDf <- read_csv(paste0(dataDir, "ctvt_rnaseq_expression-2.csv"))
+head(adrianDf)
+
+adrianCorr <- read.xlsx(paste0(dataDir, "CTVT_expression_purity_correlations.xlsx")) %>%
+  dplyr::rename("Symbol"="gene")
+
+geneDf <- adrianDf %>%
+  group_by( GeneID, Symbol) %>% # Group by SNP (Location)
+  mutate(etEdit = ifelse(eT == Inf, 
+                             50000,
+                             eT)) %>%
+  summarise(sampleCount = n(), 
+            medianEh = median(eH), 
+            medianEt = median(eT),
+            medianEtEdit = median(etEdit), 
+            sumEt = sum(eT),
+            sumEtEdit = sum(etEdit),
+            sumEh = sum(eH)) %>%
+  left_join(adrianCorr, 
+            by = join_by(Symbol))
+
+plotDf <- geneDf %>%
+  mutate(deltaEtEh = medianEt-medianEh,
+         medianEhLog = log1p(medianEh), 
+         medianEtLog = log1p(medianEt),
+         medianEtEditLog = log10(medianEtEdit),
+         labelTH = ifelse(medianEh > 1000 & medianEt > 1000,
+                            Symbol, 
+                            NA),
+         labelNeither = ifelse(medianEh < 1000 & medianEt < 1000,
+                            Symbol, 
+                            NA),
+         labelH =  ifelse(medianEh > 1000 & medianEt < 1000,
+                            Symbol, 
+                            NA),
+         labelT = ifelse(medianEh < 1000 & medianEt > 1000,
+                            Symbol, 
+                            NA))
+
+
+tempPlotDf <- plotDf %>%
+  dplyr::rename("variantCount"="sampleCount") %>%
+  mutate(
+    fillPos = medianEtEdit,
+    fillNeg = medianEh
+  )
+
+# Max for scaling
+q1 <- subset(tempPlotDf, purity_correlation > 0 & deltaEtEh > 0)
+q4 <- subset(tempPlotDf, purity_correlation < 0 & deltaEtEh < 0)
+
+
+# Filter points with abs(deltaEtEh) > 500 in Q1 and Q4
+# q1 = tumor
+q1Label100 <- subset(q1, abs(deltaEtEh) > 100)
+
+# q4 = host
+q4Label100 <- subset(q4, abs(deltaEtEh) > 100)
+```

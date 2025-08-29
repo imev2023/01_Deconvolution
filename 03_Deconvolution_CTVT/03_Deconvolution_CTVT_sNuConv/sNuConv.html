@@ -1,0 +1,45 @@
+<!DOCTYPE html PUBLIC "-//W3C//DTD HTML 4.01//EN" "http://www.w3.org/TR/html4/strict.dtd">
+<html>
+<head>
+  <meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+  <meta http-equiv="Content-Style-Type" content="text/css">
+  <title></title>
+  <meta name="Generator" content="Cocoa HTML Writer">
+  <meta name="CocoaVersion" content="2575.6">
+  <style type="text/css">
+    p.p1 {margin: 0.0px 0.0px 0.0px 0.0px; font: 12.0px Helvetica}
+    p.p2 {margin: 0.0px 0.0px 0.0px 0.0px; font: 12.0px Helvetica; min-height: 14.0px}
+    p.p3 {margin: 0.0px 0.0px 0.0px 0.0px; font: 11.0px Menlo; color: #000000}
+    p.p4 {margin: 0.0px 0.0px 0.0px 0.0px; font: 11.0px Menlo; color: #000000; min-height: 13.0px}
+    span.s1 {font-variant-ligatures: no-common-ligatures}
+  </style>
+</head>
+<body>
+<p class="p1"><b>sNucDeconvScadenEnv</b><b></b></p>
+<p class="p2"><br></p>
+<p class="p1"><b>create the custom environment<span class="Apple-converted-space"> </span></b><b></b></p>
+<p class="p3"><span class="s1">create_x86_conda_environment sNuConvX86 python=3.8</span></p>
+<p class="p4"><span class="s1"></span><br></p>
+<p class="p1"><b>clone scaden into a clean environment, and install in new custom env</b><b></b></p>
+<p class="p3"><span class="s1">git clone https://github.com/KevinMenden/scaden.git ../scadenClean</span></p>
+<p class="p3"><span class="s1">pip install -e ../scadenClean</span></p>
+<p class="p4"><span class="s1"></span><br></p>
+<p class="p3"><span class="s1"><b>tested with:</b> scaden process --help</span></p>
+<p class="p3"><span class="s1"><b>error message:</b> The TensorFlow library was compiled to use AVX instructions, but these aren't available on your machine.</span></p>
+<p class="p4"><span class="s1"></span><br></p>
+<p class="p3"><span class="s1">pip uninstall TensorFlow</span></p>
+<p class="p3"><span class="s1">conda install TensorFlow</span></p>
+<p class="p4"><span class="s1"><i></i></span><br></p>
+<p class="p3"><span class="s1"><b>tested with:</b> scaden simulate --help</span></p>
+<p class="p3"><span class="s1"><b>error message:</b> AttributeError: partially initialized module 'charset_normalizer' has no attribute 'md__mypyc' (most likely due to a circular import)</span></p>
+<p class="p4"><span class="s1"></span><br></p>
+<p class="p4"><span class="s1"></span><br></p>
+<p class="p3"><span class="s1">pip uninstall charset_normalizer</span></p>
+<p class="p3"><span class="s1">pip install charset_normalizer==3.3.2</span></p>
+<p class="p3"><span class="s1">pip install numpy==1.22.1</span></p>
+<p class="p3"><span class="s1">pip install pandas==1.2.4</span></p>
+<p class="p4"><span class="s1"><i></i></span><br></p>
+<p class="p3"><span class="s1"><b>tested with:</b> scaden simulate --help</span></p>
+<p class="p3"><span class="s1"><b>error message:</b> <b>none</b><b></b></span></p>
+</body>
+</html>

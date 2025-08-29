@@ -1,0 +1,141 @@
+{\rtf1\ansi\ansicpg1252\cocoartf2822
+\cocoatextscaling0\cocoaplatform0{\fonttbl\f0\fswiss\fcharset0 Helvetica;\f1\fnil\fcharset0 Menlo-Regular;\f2\fnil\fcharset0 .AppleSystemUIFontMonospaced-Regular;
+\f3\fnil\fcharset0 Menlo-Bold;}
+{\colortbl;\red255\green255\blue255;\red0\green0\blue0;\red11\green12\blue12;\red244\green244\blue244;
+\red103\green103\blue103;\red220\green224\blue226;\red128\green128\blue128;\red0\green0\blue0;}
+{\*\expandedcolortbl;;\csgray\c0;\cssrgb\c4706\c5098\c5490;\cssrgb\c96471\c96471\c96471;
+\csgray\c47953;\cssrgb\c89020\c90196\c90980;\csgray\c57415;\csgray\c0\c0;}
+\paperw11900\paperh16840\margl1440\margr1440\vieww11520\viewh8400\viewkind0
+\pard\tx720\tx1440\tx2160\tx2880\tx3600\tx4320\tx5040\tx5760\tx6480\tx7200\tx7920\tx8640\pardirnatural\partightenfactor0
+
+\f0\fs24 \cf0 I am using a \
+\
+conda config --show subdir\
+\pard\tx560\tx1120\tx1680\tx2240\tx2800\tx3360\tx3920\tx4480\tx5040\tx5600\tx6160\tx6720\pardirnatural\partightenfactor0
+
+\f1\fs22 \cf2 \CocoaLigature0 subdir: osx-arm64
+\f0\fs24 \cf0 \CocoaLigature1 \
+\pard\tx720\tx1440\tx2160\tx2880\tx3600\tx4320\tx5040\tx5760\tx6480\tx7200\tx7920\tx8640\pardirnatural\partightenfactor0
+\cf0 \
+\
+Which caused conflicts with tensor flow. I ran (based on Chatgpt): \
+\
+\pard\tx560\tx1120\tx1680\tx2240\tx2800\tx3360\tx3920\tx4480\tx5040\tx5600\tx6160\tx6720\pardirnatural\partightenfactor0
+
+\f1\fs22 \cf2 \CocoaLigature0 conda config --env --set subdir osx-64 \
+\
+But need to check \
+\
+{\field{\*\fldinst{HYPERLINK "https://stackoverflow.com/questions/65415996/how-to-specify-the-architecture-or-platform-for-a-new-conda-environment-apple"}}{\fldrslt https://stackoverflow.com/questions/65415996/how-to-specify-the-architecture-or-platform-for-a-new-conda-environment-apple}}. I don\'92t want to run into issues with arm and osx 64 in miniconda later on. \
+\
+Following this instead to install scaden. \
+\
+{\field{\*\fldinst{HYPERLINK "https://medium.com/@lorenzozar/how-to-install-rosetta-on-mac-53c74391d2f5"}}{\fldrslt https://medium.com/@lorenzozar/how-to-install-rosetta-on-mac-53c74391d2f5}}\
+\
+curl -L -O "https://github.com/conda-forge/miniforge/releases/latest/download/
+\f2\fs26 \cf3 \cb4 \expnd0\expndtw0\kerning0
+\CocoaLigature1 Miniforge3-MacOSX-arm64.sh
+\f1\fs22 \cf2 \cb1 \kerning1\expnd0\expndtw0 \CocoaLigature0 "\
+\
+\pard\pardeftab720\partightenfactor0
+
+\f2\fs26 \cf3 \cb4 \expnd0\expndtw0\kerning0
+\CocoaLigature1 sh Miniforge3-MacOSX-arm64.sh\
+\
+\pard\tx560\tx1120\tx1680\tx2240\tx2800\tx3360\tx3920\tx4480\tx5040\tx5600\tx6160\tx6720\pardirnatural\partightenfactor0
+
+\f1\fs22 \cf5 \cb1 \kerning1\expnd0\expndtw0 \CocoaLigature0 Transaction finished\
+\
+installation finished.\
+Do you wish to update your shell profile to automatically initialize conda?\
+This will activate conda on startup and change the command prompt when activated.\
+If you'd prefer that conda's base environment not be activated on startup,\
+   run the following command when conda is activated:\
+\
+conda config --set auto_activate_base false\
+\
+You can undo this by running `conda init --reverse $SHELL`? [yes|no]\
+[no] >>> yes\
+no change     /Users/nv4/miniforge3/condabin/conda\
+no change     /Users/nv4/miniforge3/bin/conda\
+no change     /Users/nv4/miniforge3/bin/conda-env\
+no change     /Users/nv4/miniforge3/bin/activate\
+no change     /Users/nv4/miniforge3/bin/deactivate\
+no change     /Users/nv4/miniforge3/etc/profile.d/conda.sh\
+no change     /Users/nv4/miniforge3/etc/fish/conf.d/conda.fish\
+no change     /Users/nv4/miniforge3/shell/condabin/Conda.psm1\
+no change     /Users/nv4/miniforge3/shell/condabin/conda-hook.ps1\
+no change     /Users/nv4/miniforge3/lib/python3.12/site-packages/xontrib/conda.xsh\
+no change     /Users/nv4/miniforge3/etc/profile.d/conda.csh\
+modified      /Users/nv4/.zshrc\
+\
+==> For changes to take effect, close and re-open your current shell. <==\
+\
+Running `shell init`, which:\
+ - modifies RC file: "/Users/nv4/.zshrc"\
+ - generates config for root prefix: 
+\f3\b "/Users/nv4/miniforge3"
+\f1\b0 \
+ - sets mamba executable to: 
+\f3\b "/Users/nv4/miniforge3/bin/mamba"
+\f1\b0 \
+The following has been added in your "/Users/nv4/.zshrc" file\
+\
+# >>> mamba initialize >>>\
+# !! Contents within this block are managed by 'mamba shell init' !!\
+export MAMBA_EXE='/Users/nv4/miniforge3/bin/mamba';\
+export MAMBA_ROOT_PREFIX='/Users/nv4/miniforge3';\
+__mamba_setup="$("$MAMBA_EXE" shell hook --shell zsh --root-prefix "$MAMBA_ROOT_PREFIX" 2> /dev/null)"\
+if [ $? -eq 0 ]; then\
+    eval "$__mamba_setup"\
+else\
+    alias mamba="$MAMBA_EXE"  # Fallback on help from mamba activate\
+fi\
+unset __mamba_setup\
+# <<< mamba initialize <<<\
+\
+Thank you for installing Miniforge3!\cf2 \
+\
+- Code above changed the base to miniforge iso miniconda!!!\
+\
+- Now add this to 
+\f2\fs26 \cf3 \cb6 \expnd0\expndtw0\kerning0
+\CocoaLigature1 ~/.zshrc\
+\
+\pard\pardeftab720\partightenfactor0
+\cf7 \cb8 # Create x86 conda environment\
+create_x86_conda_environment () \{\
+\
+  # example usage: create_x86_conda_environment myenv_x86 python=3.9\
+  CONDA_SUBDIR=osx-64 conda create -n $@\
+  conda activate $1\
+\
+\}\
+\
+# Create ARM conda environment\
+create_ARM_conda_environment () \{\
+\
+  # example usage: create_ARM_conda_environment myenv_x86 python=3.9\
+  CONDA_SUBDIR=osx-arm64 conda create -n $@\
+  conda activate $1\
+\
+\}\cb6 \
+\pard\tx560\tx1120\tx1680\tx2240\tx2800\tx3360\tx3920\tx4480\tx5040\tx5600\tx6160\tx6720\pardirnatural\partightenfactor0
+\cf3 \
+
+\f1\fs22 \cf2 \cb1 \kerning1\expnd0\expndtw0 \CocoaLigature0 - I want to create an osx-64 (x86_64)
+\f2\fs26 \cf3 \cb4 \expnd0\expndtw0\kerning0
+\CocoaLigature1 \
+\pard\pardeftab720\partightenfactor0
+\cf3 \cb4 \
+\pard\tx560\tx1120\tx1680\tx2240\tx2800\tx3360\tx3920\tx4480\tx5040\tx5600\tx6160\tx6720\pardirnatural\partightenfactor0
+
+\f1\fs22 \cf7 \cb1 \kerning1\expnd0\expndtw0 \CocoaLigature0 create_x86_conda_environment scadenEnvX86 python=3.8\cf2 \
+\pard\pardeftab720\partightenfactor0
+\
+This way, it is not overriding my default arm. Note, the default Conda now comes from mini forge rather than miniconda. \
+\
+\cf7 pip install scaden==0.9.4\cf2 \
+\pard\tx560\tx1120\tx1680\tx2240\tx2800\tx3360\tx3920\tx4480\tx5040\tx5600\tx6160\tx6720\pardirnatural\partightenfactor0
+\
+}

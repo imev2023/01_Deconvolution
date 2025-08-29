@@ -1,0 +1,957 @@
+---
+title: "03_Deconvolution_CTVT_cibersort"
+output: html_document
+---
+
+# 0 Environment
+## 0.1 Packages
+### 0.1.1 Installs
+```{r echo=F, message=F, warning=FALSE}
+# devtools::install_github('xuranw/MuSiC')
+```
+### 0.1.1 Library
+```{r echo=F, message=F, warning=FALSE}
+set.seed(123)
+library(MuSiC)
+library(tidyverse)
+library(SingleCellExperiment)
+library(openxlsx)
+library(dplyr)
+library(Seurat)
+library(Biobase)
+library(ggpattern)
+```
+
+## 0.2 Paths
+```{r echo=F, message=FALSE, warning=FALSE}
+fprefix <- "03_Deconvolution_CTVT_integrated_music"
+wDir <- paste0("~/gitClones/01_Deconvolution/03_Deconvolution_CTVT/")
+dataDir <- paste0(wDir, "/031_Data/")
+resDir <- paste0(wDir, "/033_Results/", fprefix, "/")
+plotDir <- paste0(wDir, "/034_Plots/", fprefix, "/")
+
+dir.create(resDir)
+dir.create(plotDir)
+```
+
+### 0.3.3 Metrics
+```{r}
+# source(paste0(wDir, "/12_Scripts/01_Deconvolution_deconBenchmark_metricFunctions.R"))
+```
+
+# -------------------------------------------
+# 1.0 Inputs - Subset human cell types + CTVT
+Use unnormalized and untransformed count data.
+
+## 1.1 Candidate marker genes 
+### 1.1.1 Mapping
+```{r}
+mappings <- read.xlsx("~/gitClones/01_Deconvolution/03_Deconvolution_CTVT/033_Results/03_Deconvolution_CTVT_GSE210347/03_Deconvolution_CTVT_orthologs_mappingEdit.xlsx")
+
+mappingsUnique <- mappings %>%
+  filter(Mapping == "unique")
+```
+
+### 1.1.2 Adrian's table
+```{r}
+adrianDf <- read_csv(paste0(dataDir, "ctvt_rnaseq_expression-2.csv"))
+
+adrianCorr <- read.xlsx(paste0(dataDir, "CTVT_expression_purity_correlations.xlsx")) %>%
+  dplyr::rename("Symbol"="gene")
+
+geneDf <- adrianDf %>%
+  group_by( GeneID, Symbol) %>% # Group by SNP (Location)
+  mutate(etEdit = ifelse(eT == Inf, 
+                             50000,
+                             eT)) %>%
+  summarise(sampleCount = n(), 
+            medianEh = median(eH), 
+            medianEt = median(eT),
+            medianEtEdit = median(etEdit), 
+            sumEt = sum(eT),
+            sumEtEdit = sum(etEdit),
+            sumEh = sum(eH)) %>%
+  left_join(adrianCorr, 
+            by = join_by(Symbol))
+
+plotDf <- geneDf %>%
+  mutate(deltaEtEh = medianEt-medianEh)
+
+
+tempPlotDf <- plotDf %>%
+  dplyr::rename("variantCount"="sampleCount") %>%
+  mutate(
+    fillPos = medianEtEdit,
+    fillNeg = medianEh
+  ) %>%
+  rename("Symbol"="Dog") %>%
+  filter(Dog %in% mappings$Dog) %>%
+  left_join(mappings)
+
+# # Max for scaling
+# q1 <- subset(tempPlotDf, purity_correlation > 0 & deltaEtEh > 0)
+# q4 <- subset(tempPlotDf, purity_correlation < 0 & deltaEtEh < 0)
+# 
+# 
+# # Filter points with abs(deltaEtEh) > 500 in Q1 and Q4
+# # q1 = tumor
+# q1Label 
+# q1Label100 <- subset(q1, abs(deltaEtEh) > 100)
+# 
+# # q4 = host
+# q4Label100 <- subset(q4, abs(deltaEtEh) > 100)
+```
+
+### 1.1.3 FAM results
+```{r}
+# famWilcoxDegs <- read.xlsx(paste0( "~/gitClones/01_Deconvolution/03_Deconvolution_CTVT/033_Results/03_Deconvolution_CTVT_GSE21034_integrated/findAllMarkers/03_Deconvolution_CTVT_GSE21034_integrated_merged_fullyintegrated_famWilcox.xlsx"))  %>%
+#   rename("gene"="Human") %>%
+#   filter(Human %in% mappings$Human) %>%
+#   left_join(mappings) %>%
+#   filter(p_val_adj < 0.05 & avg_log2FC > 2.5)
+# 
+# table(famWilcoxDegs$cluster)
+
+     #    CTVT_CTVT Human_Endothelium  Human_Fibroblast  Human_Lymphocyte     Human_Myeloid 
+     #         2022               261               393               130               198 
+     # Human_Plasma 
+     #           39 
+
+famWilcoxDegs <- read.xlsx(paste0( "~/gitClones/01_Deconvolution/03_Deconvolution_CTVT/033_Results/03_Deconvolution_CTVT_GSE21034_integrated/findAllMarkers/03_Deconvolution_CTVT_GSE21034_integrated_merged_fullyintegrated_famWilcoxEdit.xlsx"))
+```
+
+
+### 1.1.4 Merge tables
+Make sure to map dog to human genes. 
+```{r}
+# merged <- famWilcoxDegs %>%
+#   left_join(tempPlotDf)
+# 
+# write.xlsx(merged, paste0(resDir, fprefix, "_merged_famWilcoxDegs_adrianTable.xlsx"))
+
+merged <- read.xlsx(paste0("~/gitClones/01_Deconvolution/03_Deconvolution_CTVT/033_Results/03_Deconvolution_CTVT_integrated_cibersort/03_Deconvolution_CTVT_integrated_cibersort_merged_famWilcoxDegs_adrianTable.xlsx"))
+```
+
+## 1.1 Counts
+### 1.1.1 Et Eh 0
+Do not take FAM results into account.
+#### 1.1.1.1 Genes
+```{r}
+genes <- tempPlotDf %>%
+       filter((purity_correlation > 0 & deltaEtEh > 0 ) | (purity_correlation < 0 & deltaEtEh < 0))
+
+# nrow(genes %>% filter(purity_correlation > 0)) 5062
+
+# nrow(genes %>% filter(purity_correlation < 0)) 2863
+```
+
+Reference - cellxgene dense matrix.
+#### 1.1.1.2 Seurat to SCE
+Set reductions and assay from sketching to NULL, otherwise as.SingleCellExperiment() throws an error. 
+```{r}
+testSubset <- readRDS(paste0(dataDir, "/GSE210347/merged_fullyIntegrated_sampTissRef_subset.rds"))
+testSubset@reductions$integrated.rpca <- NULL
+testSubset@reductions$umap <- NULL
+testSubset@reductions$pca <- NULL
+testSubset@assays$sketch <- NULL
+
+snAnno <-  testSubset$cellTypeMerged %>%
+  as.data.frame()
+
+gc()
+
+testSubset <- as.SingleCellExperiment(testSubset,
+                                      assay = "RNA")
+```
+
+#### 1.1.1.3 Bulk
+```{r}
+rowdata <- read.xlsx(paste0(dataDir, "03_Deconvolution_CTVT_seuratObjNoBad_rowData.xlsx")) %>%
+  rename("Symbol"="Dog") %>%
+  filter(Dog %in% genes$Dog) %>%
+  left_join(mappings %>%
+              select(-c(Type))) %>%
+  filter(Mapping =="unique")
+
+
+bulk <- readRDS(paste0(dataDir,
+                                  "01_Deconvolution_matchedBulkMatrixCTVT_bulkCountsFinal.rds")) %>%
+  as.data.frame() %>%
+  rownames_to_column("ID") %>%
+  filter(ID %in% rowdata$ID) %>%
+  left_join(rowdata) %>%
+  column_to_rownames("Human") %>%
+  select(-c(setdiff(colnames(rowdata), "Human")))%>%
+  as.matrix()
+```
+
+
+
+### 1.1.2 Et Eh 0 + FAM
+#### 1.1.2.1 Genes
+The merged df has already been filtered on lfc and pval. 
+```{r}
+genes <- merged %>%
+       filter((purity_correlation > 0 & deltaEtEh > 0 & cluster == "CTVT_CTVT") | (purity_correlation < 0 & deltaEtEh < 0 & cluster != "CTVT_CTVT"))
+
+# min(genes$avg_log2FC)
+# max(genes$p_val_adj)
+# table(genes$cluster)
+#         CTVT_CTVT Human_Endothelium  Human_Fibroblast  Human_Lymphocyte     Human_Myeloid      Human_Plasma 
+#               191                17                21                16                 6                 2 
+```
+
+Reference - cellxgene dense matrix.
+#### 1.1.2.2 Seurat to SCE
+Set reductions and assay from sketching to NULL, otherwise as.SingleCellExperiment() throws an error. 
+```{r}
+testSubset <- readRDS(paste0(dataDir, "/GSE210347/merged_fullyIntegrated_sampTissRef_subset.rds"))
+testSubset@reductions$integrated.rpca <- NULL
+testSubset@reductions$umap <- NULL
+testSubset@reductions$pca <- NULL
+testSubset@assays$sketch <- NULL
+
+snAnno <-  testSubset$cellTypeMerged %>%
+  as.data.frame()
+
+gc()
+
+testSubset <- subset(testSubset, features = unique(genes$Human))
+
+gc()
+
+testSubset <- as.SingleCellExperiment(testSubset,
+                                      assay = "RNA")
+```
+
+#### 1.1.2.3 Bulk
+```{r}
+rowdata <- read.xlsx(paste0(dataDir, "03_Deconvolution_CTVT_seuratObjNoBad_rowData.xlsx")) %>%
+  rename("Symbol"="Dog") %>%
+  filter(Dog %in% genes$Dog) %>%
+  left_join(mappings %>%
+              select(-c(Type))) %>%
+  filter(Mapping =="unique")
+
+
+bulk <- readRDS(paste0(dataDir,
+                                  "01_Deconvolution_matchedBulkMatrixCTVT_bulkCountsFinal.rds")) %>%
+  as.data.frame() %>%
+  rownames_to_column("ID") %>%
+  filter(ID %in% rowdata$ID) %>%
+  left_join(rowdata) %>%
+  column_to_rownames("Human") %>%
+  select(-c(setdiff(colnames(rowdata), "Human"))) %>%
+  as.matrix()
+
+```
+
+
+
+### 1.1.3 Et Eh 0 + FAM Top 20
+#### 1.1.3.1 Genes
+The merged df has already been filtered on lfc and pval. 
+```{r}
+genes <- merged %>%
+       filter((purity_correlation > 0 & deltaEtEh > 0 & cluster == "CTVT_CTVT") | (purity_correlation < 0 & deltaEtEh < 0 & cluster != "CTVT_CTVT")) %>%
+  left_join(famWilcoxDegs %>% select(gene, top20q1q4) %>%
+              rename("gene"="Human")) %>%
+  filter(top20q1q4 == "y") %>%
+  distinct()
+
+table(genes$top20q1q4) ### y --> 118 unique genes!!
+
+# min(genes$avg_log2FC)
+# max(genes$p_val_adj)
+# table(genes$cluster)
+#         CTVT_CTVT Human_Endothelium  Human_Fibroblast  Human_Lymphocyte     Human_Myeloid      Human_Plasma 
+#               191                17                21                16                 6                 2 
+```
+
+Reference - cellxgene dense matrix.
+#### 1.1.3.2 Seurat to SCE
+Set reductions and assay from sketching to NULL, otherwise as.SingleCellExperiment() throws an error. 
+```{r}
+testSubset <- readRDS(paste0(dataDir, "/GSE210347/merged_fullyIntegrated_sampTissRef_subset.rds"))
+testSubset@reductions$integrated.rpca <- NULL
+testSubset@reductions$umap <- NULL
+testSubset@reductions$pca <- NULL
+testSubset@assays$sketch <- NULL
+
+snAnno <-  testSubset$cellTypeMerged %>%
+  as.data.frame()
+
+gc()
+
+testSubset <- subset(testSubset, features = unique(genes$Human))
+
+gc()
+
+testSubset <- as.SingleCellExperiment(testSubset,
+                                      assay = "RNA")
+gc()
+```
+
+#### 1.1.3.3 Bulk
+```{r}
+rowdata <- read.xlsx(paste0(dataDir, "03_Deconvolution_CTVT_seuratObjNoBad_rowData.xlsx")) %>%
+  rename("Symbol"="Dog") %>%
+  filter(Dog %in% genes$Dog) %>%
+  left_join(mappings %>%
+              select(-c(Type))) %>%
+  filter(Mapping =="unique")
+
+
+bulk <- readRDS(paste0(dataDir,
+                                  "01_Deconvolution_matchedBulkMatrixCTVT_bulkCountsFinal.rds")) %>%
+  as.data.frame() %>%
+  rownames_to_column("ID") %>%
+  filter(ID %in% rowdata$ID) %>%
+  left_join(rowdata) %>%
+  column_to_rownames("Human") %>%
+  select(-c(setdiff(colnames(rowdata), "Human"))) %>%
+  as.matrix()
+
+```
+
+
+
+### 1.1.3 Et Eh 100 + FAM
+#### 1.1.3.1 Genes
+The merged df has already been filtered on lfc and pval. 
+```{r}
+genes <- merged %>%
+       filter((purity_correlation > 0 & deltaEtEh > 100 & cluster == "CTVT" ) | (purity_correlation < 0 & deltaEtEh < -100& cluster != "CTVT"))
+# table(genes$cluster)
+#         CTVT_CTVT Human_Endothelium  Human_Fibroblast  Human_Lymphocyte     Human_Myeloid      Human_Plasma 
+#                12                27                78                 3                41                 5 
+```
+
+Reference - cellxgene dense matrix.
+#### 1.1.3.2 Seurat to SCE
+Set reductions and assay from sketching to NULL, otherwise as.SingleCellExperiment() throws an error. 
+```{r}
+testSubset <- readRDS(paste0(dataDir, "/GSE210347/merged_fullyIntegrated_sampTissRef_subset.rds"))
+testSubset@reductions$integrated.rpca <- NULL
+testSubset@reductions$umap <- NULL
+testSubset@reductions$pca <- NULL
+testSubset@assays$sketch <- NULL
+
+snAnno <-  testSubset$cellTypeMerged %>%
+  as.data.frame()
+
+gc()
+
+testSubset <- subset(testSubset, features = unique(genes$Human))
+
+gc()
+
+testSubset <- as.SingleCellExperiment(testSubset,
+                                      assay = "RNA")
+```
+
+#### 1.1.3.3 Bulk
+```{r}
+rowdata <- read.xlsx(paste0(dataDir, "03_Deconvolution_CTVT_seuratObjNoBad_rowData.xlsx")) %>%
+  rename("Symbol"="Dog") %>%
+  filter(Dog %in% genes$Dog) %>%
+  left_join(mappings %>%
+              select(-c(Type))) %>%
+  filter(Mapping =="unique")
+
+
+bulk <- readRDS(paste0(dataDir,
+                                  "01_Deconvolution_matchedBulkMatrixCTVT_bulkCountsFinal.rds")) %>%
+  as.data.frame() %>%
+  rownames_to_column("ID") %>%
+  filter(ID %in% rowdata$ID) %>%
+  left_join(rowdata) %>%
+  column_to_rownames("Human") %>%
+  select(-c(setdiff(colnames(rowdata), "Human"))) %>%
+  as.matrix()
+
+```
+
+
+# 2 Prepare MuSiC
+## 2.1 Basis
+### 2.1.1 Et Eh 0
+Do not take FAM results into account.
+```{r}
+# Produce the first step information
+basis = music_basis(testSubset,
+                    clusters = 'cellTypeMerged',
+                    samples = 'sampleMerged',
+                    select.ct = unique(snAnno$.))
+
+# Plot the dendrogram of design matrix and cross-subject mean of realtive abundance
+par(mfrow = c(1, 2))
+d <- dist(t(log(basis$Disgn.mtx + 1e-6)), method = "euclidean")
+# Hierarchical clustering using Complete Linkage
+hc1 <- hclust(d, method = "complete" )
+# Plot the obtained dendrogram
+plot(hc1, cex = 0.6, hang = -1, main = 'Cluster log(Design Matrix)')
+d <- dist(t(log(basis$M.theta + 1e-8)), method = "euclidean")
+# Hierarchical clustering using Complete Linkage
+# hc2 <- hclust(d, method = "complete" )
+hc2 <- hclust(d, method = "complete")
+# Plot the obtained dendrogram
+plot(hc2, cex = 0.6, hang = -1, main = 'Cluster log(Mean of RA)')
+
+pdf(paste0(plotDir, "dendro/", fprefix, "_designMatrix_crossSubMean_etEh0.pdf"),
+    height=5, width=6)
+plot(hc1, cex = 0.6, hang = -1, main = 'Cluster log(Design Matrix)')
+plot(hc2, cex = 0.6, hang = -1, main = 'Cluster log(Mean of RA)')
+dev.off()
+```
+
+### 2.1.2 Et Eh 0 + FAM Degs
+Do not take FAM results into account.
+```{r}
+# Produce the first step information
+basis = music_basis(testSubset,
+                    clusters = 'cellTypeMerged',
+                    samples = 'sampleMerged',
+                    select.ct = unique(snAnno$.),
+                    )
+
+# Plot the dendrogram of design matrix and cross-subject mean of realtive abundance
+par(mfrow = c(1, 2))
+d <- dist(t(log(basis$Disgn.mtx + 1e-6)), method = "euclidean")
+# Hierarchical clustering using Complete Linkage
+hc1 <- hclust(d, method = "complete" )
+# Plot the obtained dendrogram
+plot(hc1, cex = 0.6, hang = -1, main = 'Cluster log(Design Matrix)')
+d <- dist(t(log(basis$M.theta + 1e-8)), method = "euclidean")
+# Hierarchical clustering using Complete Linkage
+# hc2 <- hclust(d, method = "complete" )
+hc2 <- hclust(d, method = "complete")
+# Plot the obtained dendrogram
+plot(hc2, cex = 0.6, hang = -1, main = 'Cluster log(Mean of RA)')
+
+pdf(paste0(plotDir, "dendro/", fprefix, "_designMatrix_crossSubMean_etEh0_famDegs.pdf"),
+    height=5, width=6)
+plot(hc1, cex = 0.6, hang = -1, main = 'Cluster log(Design Matrix)')
+plot(hc2, cex = 0.6, hang = -1, main = 'Cluster log(Mean of RA)')
+dev.off()
+```
+
+### 2.1.2 Et Eh 0 + FAM Degs Top 20
+```{r}
+# Produce the first step information
+basis = music_basis(testSubset,
+                    clusters = 'cellTypeMerged',
+                    samples = 'sampleMerged',
+                    select.ct = unique(snAnno$.),
+                    )
+
+# Plot the dendrogram of design matrix and cross-subject mean of realtive abundance
+par(mfrow = c(1, 2))
+d <- dist(t(log(basis$Disgn.mtx + 1e-6)), method = "euclidean")
+# Hierarchical clustering using Complete Linkage
+hc1 <- hclust(d, method = "complete" )
+# Plot the obtained dendrogram
+plot(hc1, cex = 0.6, hang = -1, main = 'Cluster log(Design Matrix)')
+d <- dist(t(log(basis$M.theta + 1e-8)), method = "euclidean")
+# Hierarchical clustering using Complete Linkage
+# hc2 <- hclust(d, method = "complete" )
+hc2 <- hclust(d, method = "complete")
+# Plot the obtained dendrogram
+plot(hc2, cex = 0.6, hang = -1, main = 'Cluster log(Mean of RA)')
+
+pdf(paste0(plotDir, "dendro/", fprefix, "_designMatrix_crossSubMean_etEh0_famDegs_top20.pdf"),
+    height=5, width=6)
+plot(hc1, cex = 0.6, hang = -1, main = 'Cluster log(Design Matrix)')
+plot(hc2, cex = 0.6, hang = -1, main = 'Cluster log(Mean of RA)')
+dev.off()
+```
+
+### 2.1.3 Et Eh 100 + FAM Degs
+Do not take FAM results into account.
+```{r}
+# Produce the first step information
+basis = music_basis(testSubset,
+                    clusters = 'cellTypeMerged',
+                    samples = 'sampleMerged',
+                    select.ct = unique(snAnno$.),
+                    )
+
+# Plot the dendrogram of design matrix and cross-subject mean of realtive abundance
+par(mfrow = c(1, 2))
+d <- dist(t(log(basis$Disgn.mtx + 1e-6)), method = "euclidean")
+# Hierarchical clustering using Complete Linkage
+hc1 <- hclust(d, method = "complete" )
+# Plot the obtained dendrogram
+plot(hc1, cex = 0.6, hang = -1, main = 'Cluster log(Design Matrix)')
+d <- dist(t(log(basis$M.theta + 1e-8)), method = "euclidean")
+# Hierarchical clustering using Complete Linkage
+# hc2 <- hclust(d, method = "complete" )
+hc2 <- hclust(d, method = "complete")
+# Plot the obtained dendrogram
+plot(hc2, cex = 0.6, hang = -1, main = 'Cluster log(Mean of RA)')
+
+pdf(paste0(plotDir, "dendro/", fprefix, "_designMatrix_crossSubMean_etEh100_famDegs.pdf"),
+    height=5, width=6)
+plot(hc1, cex = 0.6, hang = -1, main = 'Cluster log(Design Matrix)')
+plot(hc2, cex = 0.6, hang = -1, main = 'Cluster log(Mean of RA)')
+dev.off()
+```
+
+# 3 Estimate proportions
+Do tree guided for other cell types (3.3) using FAM results. 
+## 3.1 No clustering
+### 3.1.1 Et Eh 0
+```{r}
+rm(basis)
+gc()
+
+musicRes = MuSiC::music_prop(bulk.mtx = bulk,
+                             sc.sce = testSubset,
+                             clusters = 'cellTypeMerged',
+                              samples = 'sampleMerged', 
+                              markers = unique(genes$Human)) # Running MuSiC
+
+saveRDS(musicRes, paste0(resDir, fprefix, "_musicRes_etEh0.rds"))
+```
+
+### 3.1.2 Et Eh 0 + FAM Degs
+```{r}
+rm(basis)
+gc()
+
+musicRes = MuSiC::music_prop(bulk.mtx = bulk,
+                             sc.sce = testSubset,
+                             clusters = 'cellTypeMerged',
+                              samples = 'sampleMerged', 
+                              markers = unique(genes$Human)) # Running MuSiC
+
+saveRDS(musicRes, paste0(resDir, fprefix, "_musicRes_etEh0_famDegs.rds"))
+```
+### 3.1.3 Et Eh 0 + FAM Degs Top 20
+```{r}
+rm(basis)
+gc()
+
+musicRes = MuSiC::music_prop(bulk.mtx = bulk,
+                             sc.sce = testSubset,
+                             clusters = 'cellTypeMerged',
+                              samples = 'sampleMerged', 
+                              markers = unique(genes$Human)) # Running MuSiC
+
+saveRDS(musicRes, paste0(resDir, fprefix, "_musicRes_etEh0_famDegs_top20.rds"))
+```
+
+### 3.1.3 Et Eh 100 + FAM Degs
+```{r}
+rm(basis)
+gc()
+
+musicRes = MuSiC::music_prop(bulk.mtx = bulk,
+                             sc.sce = testSubset,
+                             clusters = 'cellTypeMerged',
+                              samples = 'sampleMerged', 
+                              markers = unique(genes$Human)) # Running MuSiC
+
+saveRDS(musicRes, paste0(resDir, fprefix, "_musicRes_etEh100_famDegs.rds"))
+```
+
+
+## 3.2 CTVT vs Other
+### 3.2.1 Et Eh 0
+```{r}
+clusters <- list(C1 = c("CTVT_CTVT"),
+                     C2 = c("Human_Plasma", "Human_Lymphocyte", "Human_Myeloid", "Human_Fibroblast", "Human_Endothelium"))
+
+
+cl.type = as.character(testSubset$cellTypeMerged)
+
+for(cl in 1:length(clusters)){
+  cl.type[cl.type %in% clusters[[cl]]] = names(clusters)[cl]
+}
+
+testSubset$clusterType = factor(cl.type, levels = c(names(clusters)))
+
+unlist(clusters)
+
+# We now construct the list of group marker
+ctvtMarkers <- genes %>%
+  filter(deltaEtEh > 0 & purity_correlation > 0) %>%
+  distinct()
+
+otherMarkers <- genes %>%
+  filter(deltaEtEh < 0 & purity_correlation < 0) %>%
+  distinct()
+
+markers = list(ctvtMarkers$Human, otherMarkers$Human)
+names(markers) = c('C1', 'C2')
+
+musicRes = MuSiC::music_prop(bulk.mtx = bulk,
+                             sc.sce = testSubset,
+                             clusters = 'cellTypeMerged',
+                    samples = 'sampleMerged', 
+                             group.markers = markers, 
+                            
+                            groups = 'clusterType', 
+                            
+                            clusters.type = clusters,
+                            markers=unique(genes$Dog))
+
+saveRDS(musicRes, paste0(resDir, fprefix, "_musicRes_etEh0_manualTree.rds"))
+```
+
+### 3.2.2 Et Eh 0 + FAM Degs
+```{r}
+clusters <- list(C1 = c("CTVT_CTVT"),
+                     C2 = c("Human_Plasma", "Human_Lymphocyte", "Human_Myeloid", "Human_Fibroblast", "Human_Endothelium"))
+
+
+cl.type = as.character(testSubset$cellTypeMerged)
+
+for(cl in 1:length(clusters)){
+  cl.type[cl.type %in% clusters[[cl]]] = names(clusters)[cl]
+}
+
+testSubset$clusterType = factor(cl.type, levels = c(names(clusters)))
+
+unlist(clusters)
+
+# We now construct the list of group marker
+ctvtMarkers <- merged %>%
+  filter(deltaEtEh > 0 & purity_correlation > 0 & cluster == "CTVT_CTVT") %>%
+  distinct()
+
+otherMarkers <- merged %>%
+  filter(deltaEtEh < 0 & purity_correlation < 0 & cluster != "CTVT_CTVT") %>%
+  distinct()
+
+markers = list(ctvtMarkers$Human, otherMarkers$Human)
+names(markers) = c('C1', 'C2')
+
+musicRes = MuSiC::music_prop(bulk.mtx = bulk,
+                             sc.sce = testSubset,
+                             clusters = 'cellTypeMerged',
+                    samples = 'sampleMerged', 
+                             group.markers = markers, 
+                            
+                            groups = 'clusterType', 
+                            
+                            clusters.type = clusters,
+                            markers=unique(genes$Dog))
+
+saveRDS(musicRes, paste0(resDir, fprefix, "_musicRes_etEh0_famDegs_manualTree.rds"))
+```
+
+### 3.2.3 Et Eh 0 + FAM Degs Top 20
+```{r}
+clusters <- list(C1 = c("CTVT_CTVT"),
+                     C2 = c("Human_Plasma", "Human_Lymphocyte", "Human_Myeloid", "Human_Fibroblast", "Human_Endothelium"))
+
+
+cl.type = as.character(testSubset$cellTypeMerged)
+
+for(cl in 1:length(clusters)){
+  cl.type[cl.type %in% clusters[[cl]]] = names(clusters)[cl]
+}
+
+testSubset$clusterType = factor(cl.type, levels = c(names(clusters)))
+
+unlist(clusters)
+
+# We now construct the list of group marker
+ctvtMarkers <- genes %>%
+  filter(deltaEtEh > 0 & purity_correlation > 0 & cluster == "CTVT_CTVT") %>%
+  distinct()
+
+otherMarkers <- genes %>%
+  filter(deltaEtEh < 0 & purity_correlation < 0 & cluster != "CTVT_CTVT") %>%
+  distinct()
+
+markers = list(ctvtMarkers$Human, otherMarkers$Human)
+names(markers) = c('C1', 'C2')
+
+musicRes = MuSiC::music_prop(bulk.mtx = bulk,
+                             sc.sce = testSubset,
+                             clusters = 'cellTypeMerged',
+                    samples = 'sampleMerged', 
+                             group.markers = markers, 
+                            
+                            groups = 'clusterType', 
+                            
+                            clusters.type = clusters,
+                            markers=unique(genes$Dog))
+
+saveRDS(musicRes, paste0(resDir, fprefix, "_musicRes_etEh0_famDegs_top20_manualTree.rds"))
+```
+
+### 3.2.3 Et Eh 100 + FAM Degs
+```{r}
+clusters <- list(C1 = c("CTVT_CTVT"),
+                     C2 = c("Human_Plasma", "Human_Lymphocyte", "Human_Myeloid", "Human_Fibroblast", "Human_Endothelium"))
+
+
+cl.type = as.character(testSubset$cellTypeMerged)
+
+for(cl in 1:length(clusters)){
+  cl.type[cl.type %in% clusters[[cl]]] = names(clusters)[cl]
+}
+
+testSubset$clusterType = factor(cl.type, levels = c(names(clusters)))
+
+unlist(clusters)
+
+# We now construct the list of group marker
+ctvtMarkers <- merged %>%
+  filter(deltaEtEh > 100 & purity_correlation > 0 & cluster == "CTVT_CTVT") %>%
+  distinct()
+
+otherMarkers <- merged %>%
+  filter(deltaEtEh < -100 & purity_correlation < 0 & cluster != "CTVT_CTVT") %>%
+  distinct()
+
+markers = list(ctvtMarkers$Human, otherMarkers$Human)
+names(markers) = c('C1', 'C2')
+
+musicRes = MuSiC::music_prop(bulk.mtx = bulk,
+                             sc.sce = testSubset,
+                             clusters = 'cellTypeMerged',
+                    samples = 'sampleMerged', 
+                             group.markers = markers, 
+                            
+                            groups = 'clusterType', 
+                            
+                            clusters.type = clusters,
+                            markers=unique(genes$Dog))
+
+saveRDS(musicRes, paste0(resDir, fprefix, "_musicRes_etEh100_famDegs_manualTree.rds"))
+```
+
+# 4.0 Write results to masterDf
+## 4.1 List results
+```{r}
+eTeH0 <- readRDS(paste0(resDir, fprefix, "_musicRes_etEh0.rds"))
+eTeH0_famDegs <- readRDS(paste0(resDir, fprefix, "_musicRes_etEh0_famDegs.rds"))
+eTeH100_famDegs <- readRDS(paste0(resDir, fprefix, "_musicRes_etEh100_famDegs.rds"))
+eTeH0_manual <- readRDS(paste0(resDir, fprefix, "_musicRes_etEh0_manualTree.rds"))
+eTeH0_famDegs_manual <- readRDS(paste0(resDir, fprefix, "_musicRes_etEh0_famDegs_manualTree.rds"))
+eTeH100_famDegs_manual <- readRDS(paste0(resDir, fprefix, "_musicRes_etEh100_famDegs_manualTree.rds"))
+
+eTeH0_famDegs_top20 <- readRDS(paste0(resDir, fprefix, "_musicRes_etEh0_famDegs_top20.rds"))
+eTeH0_famDegs_top20_manual <- readRDS(paste0(resDir, fprefix, "_musicRes_etEh0_famDegs_top20_manualTree.rds"))
+
+
+resList <- list("eTeH0" = eTeH0, 
+             "eTeH0_famDegs" = eTeH0_famDegs,
+            "eTeH100_famDegs" = eTeH100_famDegs,
+            "eTeH0_manual" = eTeH0_manual, 
+            "eTeH0_famDegs_manual" = eTeH0_famDegs_manual,
+            "eTeH100_famDegs_manual" = eTeH100_famDegs_manual,
+            
+             "eTeH0_famDegs_top20" = eTeH0_famDegs_top20,
+            "eTeH0_famDegs_top20_manual" = eTeH0_famDegs_top20_manual)
+
+```
+
+## 4.2 Loop through results
+```{r}
+estimateDf <- data.frame()
+
+nnlsDf <- data.frame()
+
+for (i in 1:length(resList)){
+  tempName <- str_replace(names(resList)[i], "music", "")
+  
+  tempMusic <- resList[[i]]$Est.prop.weighted %>%
+    as.data.frame() %>%
+    rownames_to_column("Sample") %>%
+    # Method details
+    mutate("deconvBenchResType" = "P", # P for proportion
+           "Method" = "MuSiC",
+           "Reference" = tempName) # saves as string
+  
+  estimateDf <- rbind(estimateDf, tempMusic)
+  
+   tempNNLS <- resList[[i]]$Est.prop.allgene %>%
+    as.data.frame() %>%
+     rownames_to_column("Sample") %>%
+    # Method details
+    mutate("deconvBenchResType" = "P", # P for proportion
+           "Method" = "NNLS",
+           "Reference" = tempName) # saves as string
+  
+  nnlsDf <- rbind(nnlsDf, tempNNLS)
+  
+}
+
+
+write.xlsx(estimateDf, paste0(resDir, fprefix, "_estPropWeighted.xlsx"))
+write.xlsx(nnlsDf, paste0(resDir, fprefix, "_estPropAllgene.xlsx"))
+```
+
+# 5 Visualizations
+```{r}
+# Step 2: Define a color mapping
+celltype_colors <- c(
+  "CTVT_CTVT" = "#BCD0C7",
+  "Human_Fibroblast" = "#FDDFA4FF",
+  "Human_Endothelium" = "#BD5630FF",
+  "Human_Myeloid" = "",
+  "Human_Plasma" = "#B4B9E0FF",
+  "Human_Lymphocyte" = "#D56AA0",
+  # "Bcells" = "#A8D5E2",
+  
+
+)
+
+celltype_colors <- c(
+  
+  
+  "CTVT_CAF.Endo"     = "darkblue",  # Dark Blue
+  "Human_Endothelium" = "#4292C6",  # Light Blue
+  "Human_Fibroblast"  = "#9ECAE1",  # Pale Blue
+  
+  "CTVT_CTVT"         = "grey",  # Goldenrod
+  
+  "CTVT_Myeloid"      = "seagreen",  # Dark Green
+   "Human_Myeloid"     = "#9ab973",  # Light Green
+  
+  
+  "CTVT_Plasma"       = "#4A1486",  # Dark Purple
+  "Human_Plasma"      = "#B39DD8",   # Light Purple
+  
+  "CTVT_Tcells"       = "#FF7D2D",  
+  "Human_Lymphocyte"  = "#FAC846",  
+  "CTVT_Bcells"       = "firebrick",  # Dark Red
+ 
+    "CTVT - GT" = "grey",
+  "CAF.Endo - GT" = "#9ECAE1",
+  "Myeloid - GT" ="#9ab973",
+  "Plasma - GT" = "#B39DD8",
+  "Tcells - GT" = "#FF7D2D",
+  "Bcells - GT" = "#FAC846"
+  
+)
+
+sampleLevels <- c("3145T11a - GT",
+                  "3145T11a_n", 
+                  "3145T11a", 
+                  
+                  "3145T1c - GT",
+                  "3145T1c_n", 
+                  "3145T1c_p", 
+                
+                  
+                  "3203T1A2c - GT",
+                  "3203T1A2c_n", 
+                  "3203T1A2c_2", 
+                  
+                  "3203T1A2b_n",
+                  "3203T1A2b_2", 
+                  
+                   "3302T1b - GT",
+                  "3302T1b_n", 
+                  "3302T1b", 
+                  "3302T1b_p", 
+                  
+                  "3621T - GT",
+                  "3621T_n", 
+                  "3621T", 
+                  
+                  "3752T",
+                 "3759T",
+                  "3760T",
+                  "3761T",
+                  "3764T",
+                  "3770T",
+                  "3772T",
+                  "3774T",
+                  "3775T",
+                  "3776T"
+                  )
+snCellCountsNoBad <- read.xlsx( paste0(dataDir, "01_Deconvolution_CTVT_seuratObjNoBad_snCellCounts.xlsx")) %>%
+  column_to_rownames("Cluster")
+
+snCellPropNoBad <- apply(snCellCountsNoBad, 2, function(x) x/sum(x))
+
+colSums(snCellPropNoBad) # Should all be 1.
+
+
+groundTruth <- snCellPropNoBad %>%
+  t() %>%
+  as.data.frame() %>%
+  rownames_to_column("Sample") %>%
+  pivot_longer(cols = -c("Sample"), names_to = "Cluster", values_to = "Proportion") %>%
+  mutate(Cluster = paste0(Cluster, " - GT"),
+         Sample = paste0(Sample, " - GT"))
+
+
+```
+
+## 5.1 No clustering 
+### 5.1.1 Bar plots
+```{r}
+for (i in 1:length(resList)){
+  
+  tempName <- str_replace(names(resList)[i], "music", "")
+  
+  music <- resList[[i]]$Est.prop.weighted %>%
+    as.data.frame() %>%
+    rownames_to_column("Sample") %>%
+    pivot_longer(cols = -c("Sample"), names_to = "Cluster", values_to = "Proportion") %>%
+    rbind(groundTruth) %>%
+    mutate(Type = ifelse(grepl("- GT$", Sample), 
+                         "Ground truth",
+                         "Estimated"))
+  
+  music$Sample <- factor(music$Sample, 
+                         levels = sampleLevels)
+
+  music$Cluster <- factor(music$Cluster, levels = rev(c("CTVT - GT", 
+                                                        "CTVT_CTVT",
+                                                    "Myeloid - GT", 
+                                                    "Human_Myeloid",
+                                                    
+                                                    "CAF.Endo - GT",
+                                                    "Human_Fibroblast",
+                                                    "Human_Endothelium",
+                                                    "Tcells - GT",
+                                                    "Human_Lymphocyte",
+                                                    "Bcells - GT",
+                                                    "Plasma - GT", 
+                                                    "Human_Plasma")))
+
+  # Step 3: Plot
+  musicPlot <- ggplot(
+    music,
+    aes(
+      x = Sample,
+      y = Proportion,
+      fill = Cluster,
+      pattern = Type  # TRUE/FALSE
+    )
+  ) +
+  geom_bar_pattern(
+    stat = "identity",
+    pattern_fill = "whitesmoke",           # color of stripes
+    pattern_angle = 45,               # diagonal stripes
+    pattern_density = 0.01,            # small + widely spaced
+    pattern_spacing = 0.01,           # space between stripes
+    pattern_key_scale_factor = 0.5, 
+    pattern_alpha = 0.4 # smaller legend pattern
+  ) +
+  scale_pattern_manual(values = c("Estimated" = "none", "Ground truth" = "stripe")) +
+  scale_fill_manual(values = celltype_colors) +
+  theme_minimal() +
+  ylab("Estimated Proportion") +
+  xlab("Sample") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  ggtitle(paste0("MuSiC - ", tempName))
+
+  
+  pdf(paste0(plotDir, "/bar/", fprefix, "_", tempName, ".pdf"),
+      height=4, width=7)
+  print(musicPlot)
+  dev.off()
+}
+```
+# -------------------------------------------
+# 1.0 Inputs - All cell types

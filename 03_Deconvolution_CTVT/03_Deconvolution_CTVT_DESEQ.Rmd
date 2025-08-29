@@ -626,11 +626,14 @@ cibersortUniqueDictMin10 <- masterMarkerGenes %>%
 summary(resType)
 
 resTypeExport <- resType %>%
-  as.data.frame() %>% 
+  as.data.frame() %>%
     rownames_to_column("GeneID")
 
-write.xlsx(resTypeExport, 
+write.xlsx(resTypeExport,
   paste0( "~/gitClones/01_Deconvolution/03_Deconvolution_CTVT/033_Results/03_Deconvolution_CTVT_DESEQ/03_Deconvolution_CTVT_DESEQ_resType.xlsx"))
+
+resType <- read.xlsx(paste0( "~/gitClones/01_Deconvolution/03_Deconvolution_CTVT/033_Results/03_Deconvolution_CTVT_DESEQ/03_Deconvolution_CTVT_DESEQ_resType.xlsx")) %>%
+  column_to_rownames("GeneID")
 
 resTypeDegs <- resType %>%
   as.data.frame() %>%
@@ -667,17 +670,28 @@ curatedMarkersUnique <- masterMarkerGenes %>%
 # intersect(resTypeDegs$GeneID, cibersortDictMin10$GeneID) --> 0
 # [1] "ENSCAFG00000032358"
 
-curatedCib10 <- cibersortDictMin10 
+curatedCib10Up <- cibersortDictMin10 %>%
+  filter(GeneID == intersect(upType$GeneID, cibersortDictMin50$GeneID)) %>%
+  left_join(masterMarkerGenes)
 
-curatedCib10Unique <- cibersortUniqueDictMin10
+curatedCib10Down <- cibersortDictMin10 %>%
+  filter(GeneID == intersect(downType$GeneID, cibersortDictMin50$GeneID)) %>%
+  left_join(masterMarkerGenes)
 
-intersect(resTypeDegs$GeneID, cibersortDictMin50$GeneID)
+# curatedCib10Unique <- cibersortUniqueDictMin10
 
-curatedCib50 <- cibersortDictMin50 %>%
-  filter(GeneID != intersect(resTypeDegs$GeneID, cibersortDictMin50$GeneID))
+# intersect(resTypeDegs$GeneID, cibersortDictMin50$GeneID)
 
-curatedCib50Unique <- cibersortUniqueDictMin50 %>%
-  filter(GeneID != intersect(resTypeDegs$GeneID, cibersortUniqueDictMin50$GeneID))
+curatedCib50Up <- cibersortDictMin50 %>%
+  filter(GeneID == intersect(upType$GeneID, cibersortDictMin50$GeneID)) %>%
+  left_join(masterMarkerGenes)
+
+curatedCib50Down <- cibersortDictMin50 %>%
+  filter(GeneID == intersect(downType$GeneID, cibersortDictMin50$GeneID)) %>%
+  left_join(masterMarkerGenes)
+
+# curatedCib50Unique <- cibersortUniqueDictMin50 %>%
+#   filter(GeneID != intersect(resTypeDegs$GeneID, cibersortUniqueDictMin50$GeneID))
 ```
 
 ### 4.2.2 Type Overall
@@ -726,17 +740,25 @@ curatedMarkersUnique <- masterMarkerGenes %>%
 # intersect(resTypeOverallDegs$GeneID, cibersortDictMin10$GeneID) --> 0
 # [1] "ENSCAFG00000032358"
 
-curatedCib10 <- cibersortDictMin10 
+curatedCib10Up <- cibersortDictMin10 %>%
+  filter(GeneID == intersect(upTypeOverall$GeneID, cibersortDictMin50$GeneID)) %>%
+  left_join(masterMarkerGenes)
 
-curatedCib10Unique <- cibersortUniqueDictMin10
+curatedCib10Down <- cibersortDictMin10 %>%
+  filter(GeneID == intersect(downTypeOverall$GeneID, cibersortDictMin50$GeneID)) %>%
+  left_join(masterMarkerGenes)
 
-intersect(resTypeOverallDegs$GeneID, cibersortDictMin50$GeneID)
+# curatedCib10Unique <- cibersortUniqueDictMin10
 
-curatedCib50 <- cibersortDictMin50 %>%
-  filter(GeneID != intersect(resTypeOverallDegs$GeneID, cibersortDictMin50$GeneID))
+# intersect(resTypeDegs$GeneID, cibersortDictMin50$GeneID)
 
-curatedCib50Unique <- cibersortUniqueDictMin50 %>%
-  filter(GeneID != intersect(resTypeOverallDegs$GeneID, cibersortUniqueDictMin50$GeneID))
+curatedCib50Up <- cibersortDictMin50 %>%
+  filter(GeneID == intersect(upTypeOverall$GeneID, cibersortDictMin50$GeneID)) %>%
+  left_join(masterMarkerGenes)
+
+curatedCib50Down <- cibersortDictMin50 %>%
+  filter(GeneID == intersect(downTypeOverall$GeneID, cibersortDictMin50$GeneID)) %>%
+  left_join(masterMarkerGenes)
 ```
 
 ### 4.2.2 Matched
@@ -744,11 +766,14 @@ curatedCib50Unique <- cibersortUniqueDictMin50 %>%
 summary(resMatched)
 
 resMatchedExport <- resMatched %>%
-  as.data.frame() %>% 
+  as.data.frame() %>%
     rownames_to_column("GeneID")
 
-write.xlsx(resMatchedExport, 
-  paste0( "~/gitClones/01_Deconvolution/03_Deconvolution_CTVT/033_Results/03_Deconvolution_CTVT_DESEQ/03_Deconvolution_CTVT_DESEQ_resMatched.xlsx"))
+# write.xlsx(resMatchedExport, 
+#   paste0( "~/gitClones/01_Deconvolution/03_Deconvolution_CTVT/033_Results/03_Deconvolution_CTVT_DESEQ/03_Deconvolution_CTVT_DESEQ_resMatched.xlsx"))
+
+resMatched <- read.xlsx(paste0( "~/gitClones/01_Deconvolution/03_Deconvolution_CTVT/033_Results/03_Deconvolution_CTVT_DESEQ/03_Deconvolution_CTVT_DESEQ_resMatched.xlsx")) %>%
+  column_to_rownames("GeneID")
 
 resMatchedDegs <- resMatched %>%
   as.data.frame() %>%
@@ -772,7 +797,7 @@ upMatched <- resMatched %>%
 downMatched <- resMatched %>%
   as.data.frame() %>%
   rownames_to_column("GeneID") %>%
-  filter(log2FoldChange <= -2 & padj < 0.05) %>%
+  filter(log2FoldChange <= -2.5 & padj < 0.05) %>%
     left_join(masterMarkerGenes)%>%
   drop_na("cluster")
 
@@ -785,17 +810,25 @@ curatedMarkersUnique <- masterMarkerGenes %>%
 # intersect(resMatchedDegs$GeneID, cibersortDictMin10$GeneID) --> 0
 # [1] "ENSCAFG00000032358"
 
-curatedCib10 <- cibersortDictMin10 
+curatedCib10Up <- cibersortDictMin10 %>%
+  filter(GeneID == intersect(upMatched$GeneID, cibersortDictMin50$GeneID)) %>%
+  left_join(masterMarkerGenes)
 
-curatedCib10Unique <- cibersortUniqueDictMin10
+curatedCib10Down <- cibersortDictMin10 %>%
+  filter(GeneID == intersect(downMatched$GeneID, cibersortDictMin50$GeneID)) %>%
+  left_join(masterMarkerGenes)
 
-intersect(resMatchedDegs$GeneID, cibersortDictMin50$GeneID)
+# curatedCib10Unique <- cibersortUniqueDictMin10
 
-curatedCib50 <- cibersortDictMin50 %>%
-  filter(GeneID != intersect(resMatchedDegs$GeneID, cibersortDictMin50$GeneID))
+# intersect(resTypeDegs$GeneID, cibersortDictMin50$GeneID)
 
-curatedCib50Unique <- cibersortUniqueDictMin50 %>%
-  filter(GeneID != intersect(resMatchedDegs$GeneID, cibersortUniqueDictMin50$GeneID))
+curatedCib50Up <- cibersortDictMin50 %>%
+  filter(GeneID == intersect(upMatched$GeneID, cibersortDictMin50$GeneID)) %>%
+  left_join(masterMarkerGenes)
+
+curatedCib50Down <- cibersortDictMin50 %>%
+  filter(GeneID == intersect(downMatched$GeneID, cibersortDictMin50$GeneID)) %>%
+  left_join(masterMarkerGenes)
 ```
 ### 4.2.3 Type Matched
 ```{r}

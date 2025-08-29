@@ -67,12 +67,28 @@ Of note, need to replace gene symbols with Id's once filtered on candidate genes
 
 # saveRDS(seuratObjNoBad, paste0(dataDir, "03_Deconvolution_CTVT_seuratObjNoBad.rds"))
 
+# features <- rownames(seuratObjNoBad) %>%as.data.frame()
+# 
+# # The [[ operator can add columns to object metadata. This is a great place to stash QC stats
+# seuratObjNoBad[["percent.mt"]] <- PercentageFeatureSet(seuratObjNoBad, pattern = "^MT-")
+# 
+# nCount = colSums(x = seuratObjNoBad, slot = "counts")  # nCount_RNA
+# nFeature = colSums(x = GetAssayData(object = seuratObjNoBad, slot = "counts") > 0)  # nFeatureRNA
+# 
+# seuratObjNoBad[["nCount_RNA"]] <- nCount
+# seuratObjNoBad[["nFeature_RNA"]] <- nFeature
+# 
+# # Visualize QC metrics as a violin plot
+# VlnPlot(seuratObjNoBad, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3)
+# 
+# saveRDS(seuratObjNoBad, paste0(dataDir, "03_Deconvolution_CTVT_seuratObjNoBad.rds"))
+
 seuratObjNoBad <- readRDS(paste0(dataDir, "03_Deconvolution_CTVT_seuratObjNoBad.rds"))
 
-rowData <- seuratObjNoBad@
-
-pb <- AggregateExpression(seuratObjNoBad, 
-                          group.by = "Sample") 
+# rowData <- seuratObjNoBad@
+# 
+# pb <- AggregateExpression(seuratObjNoBad, 
+#                           group.by = "Sample") 
 
 # > dim(pb$originalexp)
 # [1] 15707     5
